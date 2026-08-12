@@ -1,0 +1,19 @@
+# Local Claude Code / OMC session state — never publish
+.omc/
+.claude/settings.local.json
+
+# Python build artifacts (these embed absolute authoring paths)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Installer backups written into target repos
+settings.json.bak.*
+
+# Internal working notes kept out of the published set
+OPEN-QUESTIONS-PLAN.md
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp

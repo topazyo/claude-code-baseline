@@ -1,0 +1,15 @@
+# Shell scripts and the hook payload MUST stay LF. This repo is authored on
+# Windows; without these rules a clone with core.autocrlf=true would check out
+# CRLF and every `#!/usr/bin/env bash` script would fail on Linux/macOS with
+# "bad interpreter: no such file or directory".
+*.sh        text eol=lf
+*.py        text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.md        text eol=lf
+VERSION     text eol=lf
+CODEOWNERS  text eol=lf
+
+# Everything else: let git decide, but normalize in the index.
+* text=auto

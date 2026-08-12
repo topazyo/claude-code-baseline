@@ -1,0 +1,18 @@
+# Hook scripts are executable content that runs automatically on every
+# contributor's machine (see CVE-2025-59536). Every change to a guardrail, a
+# permission rule, or the installer requires security review.
+#
+# Consumers who install this baseline should add the equivalent rule to their
+# own repo:  /.claude/**  @their-security-team
+#
+# Replace @OWNER with the maintaining GitHub user or team before publishing.
+
+/hooks/                     @OWNER
+/lib/                       @OWNER
+/managed/                   @OWNER
+/settings.template.json     @OWNER
+/baseline.config.json       @OWNER
+/install.sh                 @OWNER
+/tests/                     @OWNER
+/.github/                   @OWNER
+/SECURITY.md                @OWNER

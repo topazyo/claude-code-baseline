@@ -1,0 +1,41 @@
+{
+  "_comment": "EXAMPLE allowlist-primary profile (ROADMAP R7) — adapt the allow list to your repo; NOT turnkey. defaultMode 'dontAsk' auto-denies anything not in permissions.allow, BUT read-only Bash (cat/rg/grep/head/…) still runs, so the Read(.env*) deny does NOT stop `cat .env` via Bash — it only governs Claude's Read/Glob/Grep tools. Protect repo-local secrets with hygiene (don't commit real secrets; use env injection / a secret manager) and the network sandbox below (limits exfiltration), not with this deny alone. See managed/README.md 'Allowlist-primary profile (R7)'. Verified against code.claude.com 2026-05-31.",
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run:*)",
+      "Bash(pytest:*)"
+    ],
+    "deny": [
+      "Edit(.env*)",
+      "Read(.env*)",
+      "Edit(**/secrets/**)",
+      "Read(**/secrets/**)",
+      "Edit(.claude/baseline.config.json)",
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)",
+      "Edit(.claude/hooks/baseline/**)"
+    ],
+    "additionalDirectories": []
+  },
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyRead": ["~/.aws", "~/.ssh", "~/.gnupg", "~/.config/gh", "~/.kube", "~/.docker/config.json"],
+      "allowWrite": ["/tmp/claude-build"]
+    },
+    "network": {
+      "allowedDomains": ["github.com", "*.githubusercontent.com", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org"]
+    }
+  }
+}

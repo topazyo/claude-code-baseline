@@ -1,0 +1,73 @@
+{
+  "_comment": "EXAMPLE rules for the securityDefaults module — the OpenClaw/ClawdBot immutable defaults (CLAUDE.md Section 4) expressed declaratively. Copy to .claude/security-defaults.json and adapt for your own repo. Regexes are evaluated with Python re in MULTILINE mode, so ^ and $ anchor to line boundaries. This is a starting point, not a drop-in replacement for the repo's hand-tuned security_defaults_hook.sh (which handles split address:/port: keys); tighten as needed.",
+  "infraPattern": "\\.(ya?ml)$|Dockerfile|docker-compose|nginx\\.conf|tls|gateway",
+  "skipPathPattern": "[/\\\\]\\.github[/\\\\]workflows[/\\\\]",
+  "rules": [
+    {
+      "id": "gateway-bind",
+      "appliesWhen": "(^|\\s)gateway:|127\\.0\\.0\\.1:18789",
+      "mustMatch": "127\\.0\\.0\\.1:18789",
+      "message": "Gateway bind: expected 127.0.0.1:18789"
+    },
+    {
+      "id": "mcp-bind",
+      "appliesWhen": "(^|\\s)mcp[._]server:|(^|\\s)mcp:|127\\.0\\.0\\.1:8443",
+      "mustMatch": "127\\.0\\.0\\.1:8443",
+      "message": "MCP server bind: expected 127.0.0.1:8443"
+    },
+    {
+      "id": "container-user-nonroot",
+      "appliesWhen": "^\\s*user:\\s",
+      "mustMatch": "1000:1000",
+      "message": "Container user: must be 1000:1000 (non-root)"
+    },
+    {
+      "id": "cap-drop-all",
+      "appliesWhen": "cap_drop",
+      "mustMatch": "-\\s*ALL|\\[\\s*\"?ALL",
+      "message": "cap_drop: must include ALL"
+    },
+    {
+      "id": "read-only-fs",
+      "appliesWhen": "read_only",
+      "mustNotMatch": "read_only:\\s*false",
+      "message": "read_only: must not be false"
+    },
+    {
+      "id": "no-new-privileges",
+      "appliesWhen": "no-new-privileges",
+      "mustNotMatch": "no-new-privileges:\\s*false",
+      "message": "no-new-privileges: must not be false"
+    },
+    {
+      "id": "tls-13-only",
+      "appliesWhen": "^\\s*(ssl_protocols|tls_version)\\b",
+      "mustNotMatch": "TLSv1\\.[012]\\b|TLSv1[^.0-9]|TLSv1$",
+      "message": "TLS: only TLS 1.3 permitted — found older version reference"
+    },
+    {
+      "id": "tls-13-present",
+      "appliesWhen": "^\\s*(ssl_protocols|tls_version)\\b",
+      "mustMatch": "TLSv1\\.3",
+      "message": "TLS: TLS 1.3 must be explicitly configured"
+    },
+    {
+      "id": "skills-autoupdate-off",
+      "appliesWhen": "autoUpdate",
+      "mustNotMatch": "autoUpdate\"?\\s*[:=]\\s*true",
+      "message": "Skills autoUpdate: must be false"
+    },
+    {
+      "id": "skills-autoinstall-off",
+      "appliesWhen": "autoInstall",
+      "mustNotMatch": "autoInstall\"?\\s*[:=]\\s*true",
+      "message": "Skills autoInstall: must be false"
+    },
+    {
+      "id": "skills-require-signature",
+      "appliesWhen": "requireSignature",
+      "mustNotMatch": "requireSignature\"?\\s*[:=]\\s*false",
+      "message": "Skills requireSignature: must be true"
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(.env*)",
+      "Read(.env*)",
+      "Edit(**/secrets/**)",
+      "Read(**/secrets/**)",
+      "Edit(.claude/baseline.config.json)",
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)",
+      "Edit(.claude/hooks/baseline/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"<BASELINE_PREFIX>/guardrails/command-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"<BASELINE_PREFIX>/dispatcher/post-write.sh\"",
+            "timeout": 90
+          }
+        ]
+      }
+    ]
+  }
+}

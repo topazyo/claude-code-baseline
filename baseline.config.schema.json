@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://openclaw.internal/claude-code-baseline/baseline.config.schema.json",
+  "title": "Claude Code Baseline Config",
+  "description": "Drives which baseline hooks run and whether they block. Consumed by hooks/lib/common.sh.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["enforcement", "guardrails", "modules"],
+  "properties": {
+    "version": { "type": "integer", "enum": [1] },
+    "minClaudeCodeVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "description": "Minimum Claude Code version (canonical semver MAJOR.MINOR.PATCH, no leading zeros) the baseline's behavior was verified against. install.sh detects the live 'claude --version' and prints an advisory warning (never blocks) when it is older. Bump only alongside a RELEASING.md re-verification."
+    },
+    "baselineVersion": {
+      "type": "string",
+      "description": "Revision stamp for this baseline template (distinct from the schema 'version' integer). Written verbatim on a fresh install (create path only) and mirrored in hooks/VERSION; tools/baseline-status.sh --drift uses it to detect repos on an old baseline. Bump alongside hooks/VERSION every release."
+    },
+    "enforcement": {
+      "type": "string",
+      "enum": ["block", "warn"],
+      "description": "Global posture. 'block': hooks fail the tool call on violation. 'warn': hooks advise but never fail."
+    },
+    "failClosed": {
+      "type": "boolean",
+      "description": "When a security control cannot RUN (missing/malformed rules file, or Python unavailable), fail closed: under 'block' posture the hook exits 2 with a loud message instead of silently passing. Default true. Set false to downgrade such degradations to warnings."
+    },
+    "guardrails": {
+      "type": "object",
+      "description": "Always-on safety hooks. Disable only with deliberate intent.",
+      "additionalProperties": false,
+      "properties": {
+        "commandGuard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "extraPatterns": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Additional case-insensitive substrings that block a Bash command."
+            }
+          }
+        },
+        "autoFormat": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean" } }
+        }
+      }
+    },
+    "modules": {
+      "type": "object",
+      "description": "Opt-in hooks. Off by default; enable per repo.",
+      "additionalProperties": false,
+      "properties": {
+        "securityDefaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "rulesFile": { "type": "string", "description": "Path (repo-relative or absolute) to the declarative rules file." }
+          }
+        },
+        "fixTags": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "tagMarker": { "type": "string" },
+            "fileRegex": { "type": "string" },
+            "requireWhenEnv": { "type": "string", "description": "If non-empty, only enforce when this environment variable is set." }
+          }
+        },
+        "scopeGuard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "scopeFile": { "type": "string" }
+          }
+        },
+        "configGuard": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ConfigChange tamper-detection. When enabled, watches in-session changes to .claude/settings.json (project_settings) and blocks/warns if the baseline hook wiring or deny-list is stripped, or disableAllHooks is set.",
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "runTests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "trackerReminder": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "commitGrep": { "type": "string", "description": "Literal substring matched against recent commit subjects (fixed-string, not a regex)." },
+            "tracker": { "type": "string" }
+          }
+        },
+        "autoStage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean" } }
+        }
+      }
+    }
+  }
+}

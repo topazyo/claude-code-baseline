@@ -1,0 +1,52 @@
+{
+  "$schema": "./baseline.config.schema.json",
+  "version": 1,
+  "_comment": "Org baseline for Claude Code hooks. Guardrails are always-on; modules are opt-in. 'enforcement' is the global posture: 'block' (hooks fail the tool call) or 'warn' (hooks advise only). The installer copies this file to a target repo's .claude/baseline.config.json only if one is not already present, so local customizations are never clobbered.",
+  "_minClaudeCodeVersionRationale": "Floor for behavior this baseline depends on. v2.1.80 is the release where a hook/permission 'allow' could no longer bypass a 'deny' rule; the tamper-protection deny-list (Edit(.claude/settings.json) etc.) relies on deny being unconditionally enforced. install.sh compares the detected 'claude --version' against this and warns (advisory, never blocks) if older. Re-confirm per release via RELEASING.md.",
+  "minClaudeCodeVersion": "2.1.80",
+  "_baselineVersionRationale": "Revision stamp for THIS baseline template (distinct from the schema 'version' integer above). install.sh copies it verbatim onto a NEW install (create path only — an existing config is never rewritten), and the same value ships in hooks/VERSION, which install.sh recopies into every repo on each run. tools/baseline-status.sh --drift compares a repo's installed .claude/hooks/baseline/VERSION against this value to surface repos on an old baseline. Bump this AND hooks/VERSION together on release (see RELEASING.md); tests/run.sh asserts the two match.",
+  "baselineVersion": "2026-05-31",
+  "enforcement": "block",
+  "failClosed": true,
+
+  "guardrails": {
+    "commandGuard": {
+      "enabled": true,
+      "extraPatterns": []
+    },
+    "autoFormat": {
+      "enabled": true
+    }
+  },
+
+  "modules": {
+    "securityDefaults": {
+      "enabled": false,
+      "rulesFile": ".claude/security-defaults.json"
+    },
+    "fixTags": {
+      "enabled": false,
+      "tagMarker": "FIX:",
+      "fileRegex": "\\.(py|sh|bash|ps1|yml|yaml)$|Dockerfile|Makefile",
+      "requireWhenEnv": ""
+    },
+    "scopeGuard": {
+      "enabled": false,
+      "scopeFile": ".claude/active-issue-scope.txt"
+    },
+    "configGuard": {
+      "enabled": false
+    },
+    "runTests": {
+      "enabled": false
+    },
+    "trackerReminder": {
+      "enabled": false,
+      "commitGrep": "",
+      "tracker": ""
+    },
+    "autoStage": {
+      "enabled": false
+    }
+  }
+}

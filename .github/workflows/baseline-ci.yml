@@ -1,0 +1,39 @@
+# claude-code-baseline CI (ROADMAP R3).
+#
+# Runs the adversarial test suite and enforces the policy-change release gate.
+# NOTE: GitHub Actions only runs workflows under the REPOSITORY ROOT's
+# .github/workflows/. This file is therefore active once claude-code-baseline is
+# its own repository (its intended home). While the directory is vendored inside
+# another repo it is dormant; run `bash tests/run.sh` locally instead.
+name: claude-code-baseline CI
+
+on:
+  push:
+    paths: ["hooks/**", "tests/**", "lib/**", "*.json", "install.sh"]
+  pull_request:
+    paths: ["hooks/**", "tests/**", "lib/**", "*.json", "install.sh"]
+
+jobs:
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run baseline test suite
+        run: bash tests/run.sh
+
+  policy-gate:
+    name: Policy-change release gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base ref
+        run: git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+      - name: Require updated fixtures when policy/matcher changes
+        run: bash tests/policy-change-gate.sh "origin/${{ github.base_ref }}"

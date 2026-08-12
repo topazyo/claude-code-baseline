@@ -1,0 +1,73 @@
+{
+  "_comment": "Baseline-managed fragment merged into a target repo's .claude/settings.json by install.sh. Hook commands all point under .claude/hooks/baseline/ so they never collide with a repo's own hooks, and the merge is idempotent (it replaces any existing entry whose command references /.claude/hooks/baseline/). permissions.deny is unioned with whatever the repo already denies; the repo's allow list is left untouched. The deny-list SELF-PROTECTS the baseline: it refuses agent Edit() to .claude/baseline.config.json, .claude/settings.json, and .claude/hooks/baseline/** so the posture and hooks that govern every control can't be silently downgraded in-session by a prompt-injected or careless agent. The deny-list only governs the AGENT's tools; the opt-in ConfigChange config-guard hook below additionally detects HUMAN/external edits to .claude/settings.json that strip the baseline wiring/deny-list or set disableAllHooks. If you change the deny entries here, update EXPECTED_DENY in modules/config-guard.sh too (tests/policy-change-gate.sh enforces a fixture update).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/guardrails/command-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/scope-guard.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/dispatcher/post-write.sh\"",
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/tracker-reminder.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "matcher": "project_settings",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/config-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Edit(.env*)",
+      "Read(.env*)",
+      "Edit(**/secrets/**)",
+      "Read(**/secrets/**)",
+      "Edit(.claude/baseline.config.json)",
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/hooks/baseline/**)"
+    ]
+  }
+}
