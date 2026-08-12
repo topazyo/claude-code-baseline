@@ -1,7 +1,10 @@
-# Shell scripts and the hook payload MUST stay LF. This repo is authored on
-# Windows; without these rules a clone with core.autocrlf=true would check out
-# CRLF and every `#!/usr/bin/env bash` script would fail on Linux/macOS with
-# "bad interpreter: no such file or directory".
+# The LAST matching line wins in gitattributes, so the catch-all must come FIRST.
+# With it last, `* text=auto` overrode the specific `*.sh text eol=lf` below and
+# CRLF written by a Windows editor was committed verbatim — which ships shell
+# scripts that die on Linux with "bad interpreter: no such file or directory".
+* text=auto eol=lf
+
+# Explicit, for the files where a stray CR is fatal rather than cosmetic.
 *.sh        text eol=lf
 *.py        text eol=lf
 *.json      text eol=lf
@@ -10,6 +13,3 @@
 *.md        text eol=lf
 VERSION     text eol=lf
 CODEOWNERS  text eol=lf
-
-# Everything else: let git decide, but normalize in the index.
-* text=auto
