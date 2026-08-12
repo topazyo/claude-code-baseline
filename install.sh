@@ -43,17 +43,50 @@ if [[ -z "$PY" ]]; then
   exit 1
 fi
 
+# Refuse a --target containing shell metacharacters. Nothing below interpolates the
+# path into a shell string any more (run() execs an argument vector directly), so
+# this is not what stops injection — it is a second line of defence in case a future
+# edit reintroduces one, and it keeps an install from landing somewhere other than
+# the directory the operator named. Only characters a shell would act on are
+# rejected, so a path with spaces, a drive letter, a backslash or non-ASCII
+# components (an accented user directory, say) still installs normally.
+assert_safe_path() {
+  case "$1" in
+    *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'"'*|*"'"*|*$'\n'*)
+      echo "ERROR: refusing a target path containing shell metacharacters:" >&2
+      echo "       $1" >&2
+      exit 2 ;;
+  esac
+}
+assert_safe_path "$TARGET"
+
 TARGET="$(cd "$TARGET" 2>/dev/null && pwd || true)"
 if [[ -z "$TARGET" || ! -d "$TARGET" ]]; then
   echo "ERROR: target directory does not exist." >&2
   exit 1
 fi
+# Re-check after canonicalisation: a symlink can resolve somewhere unexpected.
+assert_safe_path "$TARGET"
 if [[ ! -d "$TARGET/.git" ]]; then
   echo "NOTE: $TARGET is not a git repository root — installing anyway." >&2
 fi
 
 say() { echo "  $*"; }
-run() { if [[ $DRY -eq 1 ]]; then echo "  [dry-run] $*"; else eval "$@"; fi; }
+# run <cmd> <arg>...  — executes an argument vector. It must never eval: every
+# argument below carries the caller-supplied $TARGET, and inside an eval a quoted
+# "$(...)", backtick or $VAR in that path is expanded by the shell, so a crafted
+# --target would both execute code and install into a directory other than the one
+# reported. Dry-run prints %q-quoted arguments, so what is shown is exactly what
+# would be exec'd, with no second round of interpretation.
+run() {
+  if [[ $DRY -eq 1 ]]; then
+    printf '  [dry-run]'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
 
 echo "claude-code-baseline → installing into: $TARGET"
 [[ $DRY -eq 1 ]] && echo "(dry run — no files will be changed)"
@@ -103,11 +136,14 @@ HOOKS_DST="$CLAUDE_DIR/hooks/baseline"
 #    repo's own hooks). Wipe the baseline subtree first so removed hooks don't
 #    linger across upgrades, then copy fresh.
 echo "› hooks"
-run "mkdir -p \"$HOOKS_DST\""
-run "rm -rf \"$HOOKS_DST\"/{lib,guardrails,modules,dispatcher}"
-run "cp -R \"$SRC/hooks/.\" \"$HOOKS_DST/\""
+run mkdir -p "$HOOKS_DST"
+run rm -rf "$HOOKS_DST/lib" "$HOOKS_DST/guardrails" "$HOOKS_DST/modules" "$HOOKS_DST/dispatcher"
+run cp -R "$SRC/hooks/." "$HOOKS_DST/"
 if [[ $DRY -eq 0 ]]; then
   find "$HOOKS_DST" -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
+  # Never propagate compiled bytecode into a consumer repo: .pyc files embed the
+  # absolute path of the machine that built them and go stale against the source.
+  find "$HOOKS_DST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 fi
 say "copied lib/ guardrails/ modules/ dispatcher/ → .claude/hooks/baseline/"
 
@@ -116,7 +152,7 @@ echo "› config"
 if [[ -f "$CLAUDE_DIR/baseline.config.json" ]]; then
   say "kept existing .claude/baseline.config.json (not overwritten)"
 else
-  run "cp \"$SRC/baseline.config.json\" \"$CLAUDE_DIR/baseline.config.json\""
+  run cp "$SRC/baseline.config.json" "$CLAUDE_DIR/baseline.config.json"
   say "wrote default .claude/baseline.config.json"
   # Stamp note (create path only — never rewrites an existing config). The value
   # itself rides along in the copied config; hooks/VERSION (recopied below) is the
@@ -126,25 +162,56 @@ try: sys.stdout.write(str(json.load(open(sys.argv[1],encoding="utf-8")).get("bas
 except Exception: pass' "$SRC/baseline.config.json" 2>/dev/null || true)"
   [[ -n "$BLV" ]] && say "stamped baselineVersion: $BLV"
 fi
-run "cp \"$SRC/baseline.config.schema.json\" \"$CLAUDE_DIR/baseline.config.schema.json\""
+run cp "$SRC/baseline.config.schema.json" "$CLAUDE_DIR/baseline.config.schema.json"
 say "refreshed .claude/baseline.config.schema.json"
 
 # 3. Settings merge (back up first, then idempotent merge).
 echo "› settings.json"
 SETTINGS="$CLAUDE_DIR/settings.json"
 TMP="$CLAUDE_DIR/.settings.merge.$$"
+# The merge always writes to $TMP and is only moved into place on success, so an
+# interrupted or failed merge can never leave a truncated settings.json behind.
+trap 'rm -f "${TMP:-}" 2>/dev/null || true' EXIT
+
+# merge_failed <exit-code> — the merge is the one step that can destroy consumer
+# configuration, so it is the one step whose exit status is never assumed. Rather
+# than treating an unparseable settings.json as empty (which would silently drop
+# the repo's own deny rules, hooks, allow list and model), merge_settings.py exits
+# non-zero and says why on stderr; we report where the untouched original is and
+# stop before the mv. The original stays byte-identical.
+merge_failed() {
+  rm -f "$TMP" 2>/dev/null || true
+  echo "" >&2
+  echo "INSTALL INCOMPLETE — settings.json was NOT merged (merge exited $1)." >&2
+  echo "  Your settings.json was not modified: $SETTINGS" >&2
+  # An explicit if, not `[[ ]] && echo`: under set -e a false && list would abort
+  # this function and swallow the guidance below it.
+  if [[ -n "${BACKUP:-}" ]]; then
+    echo "  Backup taken by this run:       $BACKUP" >&2
+  fi
+  echo "  Hook files WERE written under $CLAUDE_DIR/hooks/baseline/, but nothing is" >&2
+  echo "  wired up until the merge succeeds — this install grants NO guardrails yet." >&2
+  echo "  Fix the JSON error reported above, then re-run this installer." >&2
+  exit 1
+}
+
 if [[ -f "$SETTINGS" ]]; then
   BACKUP="$SETTINGS.bak.$(date +%Y%m%d%H%M%S)"
-  run "cp \"$SETTINGS\" \"$BACKUP\""
+  run cp "$SETTINGS" "$BACKUP"
   say "backed up existing settings.json → $(basename "$BACKUP")"
   if [[ $DRY -eq 0 ]]; then
-    "$PY" "$SRC/lib/merge_settings.py" "$SETTINGS" "$SRC/settings.template.json" "$TMP"
+    MERGE_RC=0
+    "$PY" "$SRC/lib/merge_settings.py" "$SETTINGS" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
+    [[ $MERGE_RC -eq 0 ]] || merge_failed "$MERGE_RC"
     mv "$TMP" "$SETTINGS"
   fi
   say "merged baseline hooks + deny-list into existing settings.json"
 else
   if [[ $DRY -eq 0 ]]; then
-    "$PY" "$SRC/lib/merge_settings.py" "-" "$SRC/settings.template.json" "$SETTINGS"
+    MERGE_RC=0
+    "$PY" "$SRC/lib/merge_settings.py" "-" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
+    [[ $MERGE_RC -eq 0 ]] || merge_failed "$MERGE_RC"
+    mv "$TMP" "$SETTINGS"
   fi
   say "created settings.json from baseline"
 fi
@@ -155,16 +222,35 @@ if [[ $WITH_OPENCLAW -eq 1 ]]; then
   if [[ -f "$CLAUDE_DIR/security-defaults.json" ]]; then
     say "kept existing .claude/security-defaults.json"
   else
-    run "cp \"$SRC/examples/security-defaults.openclaw.json\" \"$CLAUDE_DIR/security-defaults.json\""
+    run cp "$SRC/examples/security-defaults.openclaw.json" "$CLAUDE_DIR/security-defaults.json"
     say "wrote .claude/security-defaults.json (enable via modules.securityDefaults.enabled)"
   fi
 fi
 
+# Closing banner. It states what was WRITTEN — not that anything is "active":
+# the installer copies files and edits settings.json, and never runs a hook or
+# checks that one fires, so any stronger claim here would be unverified. Under
+# --dry-run nothing was written at all, so the tense changes too.
+if [[ $DRY -eq 1 ]]; then
+  HEADLINE="Dry run complete. NOTHING was written. A real run would write:"
+else
+  HEADLINE="Baseline written. What this installer did, and only this:"
+fi
 cat <<EOF
 
-Done. Always-on guardrails are active (command-guard + auto-format + deny-list).
-Opt-in modules are OFF by default — enable them in:
+$HEADLINE
+  • the hook tree  → $CLAUDE_DIR/hooks/baseline/
+  • the hook wiring from settings.template.json → $CLAUDE_DIR/settings.json
+  • the deny-list, merged into permissions.deny in that same file
+
+Nothing here has been verified to fire. Which guardrails and modules actually run
+is decided by:
   $CLAUDE_DIR/baseline.config.json
+Several are off by default — auto-format among them, because it runs formatters
+resolved from the repo it is invoked in, which is code execution.
+
+These are defense-in-depth defaults, not a security boundary. Read the README
+section "What this does not protect against" before relying on them.
 
 Recommended next steps:
   • Commit .claude/hooks/baseline/, .claude/baseline.config.json, and the schema.
