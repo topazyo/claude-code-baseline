@@ -30,13 +30,20 @@ A="$(winpath "$TMP/repoA")"; B="$(winpath "$TMP/repoB")"
 mkdir -p "$A" "$B"
 ( cd "$A" && git init -q )
 ( cd "$B" && git init -q )
-bash "$SRC/install.sh" --target "$A" >/dev/null 2>&1
+# Same stdin hazard as test_hooks.sh: install.sh probes `claude --version`, and the
+# real CLI inherits this harness's stdin and never returns. Stub it, and close stdin
+# on every install so a blocked read fails fast instead of hanging the suite.
+STUBBIN="$TMP/stubbin"; mkdir -p "$STUBBIN"
+printf '#!/usr/bin/env bash\necho "99.0.0 (Claude Code)"\n' > "$STUBBIN/claude"
+chmod +x "$STUBBIN/claude"
+PATH="$STUBBIN:$PATH"; export PATH
+timeout -k 5 120 bash "$SRC/install.sh" --target "$A" >/dev/null 2>&1 </dev/null
 # Enable one module (and leave another off) to exercise single-source-of-truth.
 "$PY" -c "import json;p=r'$A/.claude/baseline.config.json';c=json.load(open(p));c['modules']['fixTags']['enabled']=True;json.dump(c,open(p,'w'))"
 
 echo "== baseline-status: JSON shape + drift fields =="
 OUT="$(winpath "$TMP/out.json")"
-bash "$STATUS" --drift --json "$OUT" "$A" "$B" >/dev/null 2>&1 || no "non-strict run should exit 0"
+timeout -k 5 60 bash "$STATUS" --drift --json "$OUT" "$A" "$B" >/dev/null 2>&1 || no "non-strict run should exit 0"
 if "$PY" - "$OUT" "$A" "$B" <<'PY'
 import json, sys
 out, A, B = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -68,11 +75,11 @@ dscope="$(CLAUDE_PROJECT_DIR="$A" bash -c "source '$COMMON'; bcl_module_enabled 
 
 echo "== baseline-status: --strict exits non-zero on drift, zero when matched =="
 echo "1970-01-01" > "$A/.claude/hooks/baseline/VERSION"   # hand-edit to an old version
-if bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on drifted VERSION"; else ok; fi
-bash "$SRC/install.sh" --target "$A" >/dev/null 2>&1       # re-run reconciles (recopies VERSION)
-if bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else no "--strict should PASS after reinstall"; fi
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on drifted VERSION"; else ok; fi
+timeout -k 5 120 bash "$SRC/install.sh" --target "$A" >/dev/null 2>&1 </dev/null  # re-run reconciles (recopies VERSION)
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else no "--strict should PASS after reinstall"; fi
 # A not-installed repo must NOT trip --strict (it is "not adopted", not "behind").
-if bash "$STATUS" --strict "$B" >/dev/null 2>&1; then ok; else no "--strict should pass for a not-installed repo"; fi
+if timeout -k 5 60 bash "$STATUS" --strict "$B" >/dev/null 2>&1; then ok; else no "--strict should pass for a not-installed repo"; fi
 
 echo "== baseline-status: local-only (no network primitives in source) =="
 if grep -E '(curl|wget|nc |/dev/tcp|ssh |scp |https?://)' "$STATUS" >/dev/null 2>&1; then
@@ -82,7 +89,7 @@ else ok; fi
 echo "== baseline-status: no writes to CWD without --json =="
 RO="$(winpath "$TMP/ro")"; mkdir -p "$RO"
 before="$(cd "$RO" && ls -a | sort)"
-( cd "$RO" && bash "$STATUS" --drift "$A" >/dev/null 2>&1 )
+( cd "$RO" && timeout -k 5 60 bash "$STATUS" --drift "$A" >/dev/null 2>&1 )
 after="$(cd "$RO" && ls -a | sort)"
 [ "$before" = "$after" ] && ok || no "running without --json wrote into CWD"
 

@@ -38,7 +38,7 @@ expected_deny = base_deny | {"Edit(.claude/settings.local.json)"}
 
 # Expected guardrail wiring: event -> (matcher, script the command must reference).
 EXPECTED_HOOKS = {
-    "PreToolUse":  ("Bash",       "guardrails/command-guard.sh"),
+    "PreToolUse":  ("Bash|PowerShell", "guardrails/command-guard.sh"),
     "PostToolUse": ("Write|Edit", "dispatcher/post-write.sh"),
 }
 

@@ -1,10 +1,10 @@
 # tools/ — local, read-only baseline reporting
 
-These are **operator** helpers (not hooks). They are **read-only** and **local-only**:
-they read on-disk files and shell out to `python3`/`git` to parse them, make **no
-remote requests**, and write nothing unless you explicitly ask for a JSON file. This
-honors the org's no-telemetry / no-webhook rule — every signal here is collectable
-from disk, and nothing phones home.
+These are **operator** helpers (not hooks). They are **read-only** and make **no network
+requests**: they read on-disk files, shell out to `python3`/`git` to parse them, and
+write nothing unless you explicitly ask for a JSON file. That is the no-telemetry /
+no-webhook rule this project is built under — every signal here is collectable from
+disk, and nothing phones home.
 
 > Why a script at all (and not just one-liners)? See **"What is deferred, and why"**
 > below. The one capability a one-liner cannot give you — a single, CI-gateable
@@ -23,7 +23,7 @@ For each repo it reports:
 
 | Column | Meaning |
 |--------|---------|
-| `installed` | Is `.claude/hooks/baseline/` present? (Has the baseline been adopted at all.) |
+| `installed` | Is `.claude/hooks/baseline/` present? (Has the baseline been adopted at all.) The tool never opens `settings.json`, so this says the hook *files* are on disk — not that anything is wired to run them. A repo whose install copied the scripts but failed before merging `settings.json` reports `installed=yes` with no hooks firing. |
 | `posture` | `enforcement` (`block`/`warn`), resolved via `common.sh`'s `bcl_posture`. |
 | `failClosed` | The global fail-closed toggle. |
 | `version` | The repo's **installed** `.claude/hooks/baseline/VERSION` (the baseline revision its hooks came from). |
@@ -42,7 +42,18 @@ Modes:
 
 **Reconciling drift:** re-run `install.sh --target <repo>`. The installer recopies the
 hook subtree wholesale every run, so the installed `VERSION` is refreshed to the source
-value (always truthful — it is not a hand-editable config stamp).
+value.
+
+> **`VERSION` is a convention stamp, not an integrity check.** Earlier revisions of this
+> file called it "always truthful… deny-protected," and it is neither. It is a plain
+> one-line text file. `Edit(.claude/hooks/baseline/**)` binds one *tool*; the path-text
+> `Bash(*.claude/hooks/baseline/*)` rule catches only the form where that path appears
+> literally in the command; and neither is a filesystem permission, so a shell redirect —
+> or a human, a Makefile, a CI job — writes it freely. Nothing verifies that its contents
+> describe the tree sitting beside it, so a stale or locally-weakened hook tree with a
+> forged stamp reports `drift=OK`, including under `--strict`. Read `drift` as *"which
+> install probably ran here."* If you need it to be trustworthy, the fix is a checksum of
+> the installed tree against source, not a stricter reading of this file.
 
 ### Single source of truth (why it sources `common.sh`)
 
@@ -59,18 +70,25 @@ exactly this reason.)
 > unaffected. If the table feels slow in practice, batch the per-repo reads behind one
 > `python3` call — but do **not** re-implement config parsing outside `common.sh`.
 
-### `--strict`'s CI consumer is currently dormant (owner decision)
+### `--strict` has no CI consumer in this repository
 
-`--strict` exists to be wired into CI (`baseline-ci.yml`), which fails a build on drift.
-That workflow is **dormant today** — it only runs once `claude-code-baseline/` is its own
-repository (while it is vendored inside another repo, GitHub Actions does not run it). So
-right now `--strict`'s only exerciser is `tests/test_status.sh`. The script still earns its
-place via the on-demand, cross-repo `--drift` check a human would otherwise eyeball N
-times. **If you prefer to defer the script until CI is live**, the data layer alone
-(`baselineVersion` + `hooks/VERSION`) plus the interim one-liner below is a fully valid
-smaller footprint — that's an owner call.
+`--strict` is intended for an **operator-run or org-level** job that fails on drift.
+**`.github/workflows/baseline-ci.yml` does not invoke it** — that workflow's only run
+steps are `tests/run.sh`, a `git fetch`, and `tests/policy-change-gate.sh`; it never
+mentions `baseline-status.sh`, `--strict`, or drift. An earlier revision of this file
+blamed the inertness on the workflow being dormant while vendored, implying `--strict`
+would start working once this directory became its own repository. It does not, and it
+cannot: a cross-repo drift check needs the *consumer* repos checked out, which this
+repo's CI has no access to. Today `--strict`'s only exerciser is `tests/test_status.sh`.
 
-Interim cross-repo drift one-liner (no script), if you go that route:
+The script still earns its place via the on-demand, cross-repo `--drift` check a human
+would otherwise eyeball N times — run it from wherever your repo checkouts live (a
+scheduled job on an admin box, or an org-level workflow that clones the fleet).
+**If you'd rather not maintain a script at all**, the data layer alone
+(`baselineVersion` + `hooks/VERSION`) plus the one-liner below is a fully valid smaller
+footprint.
+
+Cross-repo drift one-liner (no script), if you go that route:
 
 ```bash
 src=$(python3 -c 'import json;print(json.load(open("claude-code-baseline/baseline.config.json"))["baselineVersion"])')

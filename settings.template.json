@@ -1,9 +1,12 @@
 {
-  "_comment": "Baseline-managed fragment merged into a target repo's .claude/settings.json by install.sh. Hook commands all point under .claude/hooks/baseline/ so they never collide with a repo's own hooks, and the merge is idempotent (it replaces any existing entry whose command references /.claude/hooks/baseline/). permissions.deny is unioned with whatever the repo already denies; the repo's allow list is left untouched. The deny-list SELF-PROTECTS the baseline: it refuses agent Edit() to .claude/baseline.config.json, .claude/settings.json, and .claude/hooks/baseline/** so the posture and hooks that govern every control can't be silently downgraded in-session by a prompt-injected or careless agent. The deny-list only governs the AGENT's tools; the opt-in ConfigChange config-guard hook below additionally detects HUMAN/external edits to .claude/settings.json that strip the baseline wiring/deny-list or set disableAllHooks. If you change the deny entries here, update EXPECTED_DENY in modules/config-guard.sh too (tests/policy-change-gate.sh enforces a fixture update).",
+  "_comment": "Baseline-managed fragment merged into a target repo's .claude/settings.json by install.sh. Hook commands all point under .claude/hooks/baseline/ so they never collide with a repo's own hooks, and the merge is idempotent (it replaces any existing entry whose command references /.claude/hooks/baseline/). permissions.deny is unioned with whatever the repo already denies; the repo's allow list is left untouched. Every _comment* key in this file is stripped by lib/merge_settings.py and never reaches the consumer's settings.json. If you change the deny entries here, update EXPECTED_DENY in modules/config-guard.sh too (tests/policy-change-gate.sh enforces a fixture update).",
+
+  "_comment_matchers": "The shell matchers are \"Bash|PowerShell\" because the PowerShell tool is default-on on Windows and, on a Windows host without Git Bash, Claude Code does not register the Bash tool at all - a hook matching only \"Bash\" would never fire there. Matchers are regex, so the alternation is the documented form (hooks reference: 'Match Bash|PowerShell in hooks that inspect shell commands'). NOTE the residual gap this does not close: the hook command itself is `bash \"...command-guard.sh\"`, so on a Windows box with no bash on PATH the hook is invoked and fails to launch, and Claude Code treats a hook that never launches as fail-open. On such a host the permissions.deny entries below - which the CLI enforces itself, with no shell involved - are the only control that actually runs.",
+
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
@@ -46,9 +49,20 @@
         ]
       }
     ],
+    "_comment_configchange": "Two ConfigChange groups, not one: the documented matcher values are the config SOURCE (user_settings, project_settings, local_settings, policy_settings, skills), and .claude/settings.local.json - which overrides .claude/settings.json and is the file the README tells people not to commit - arrives as local_settings. Watching project_settings alone left the higher-precedence file unobserved, so a disableAllHooks written there was neither denied nor detected. config-guard.sh must handle the local_settings source; until it does, this group is wired but inert.",
     "ConfigChange": [
       {
         "matcher": "project_settings",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/config-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "local_settings",
         "hooks": [
           {
             "type": "command",
@@ -60,6 +74,7 @@
     ]
   },
   "permissions": {
+    "_comment_deny_scope": "WHAT THESE RULES BIND, EXACTLY. Read()/Edit() rules bind Claude's built-in file tools AND the file commands Claude Code recognizes inside a shell command (cat, head, tail, sed, grep). They do NOT bind arbitrary subprocesses: `python -c \"open('.claude/baseline.config.json','w')...\"` or `node -e ...` write the file with no rule consulted. The Bash()/PowerShell() rules below close the common shell shapes the Edit() rules miss (`>` redirection, tee, cp, mv, rm, chmod, truncate) by matching the PATH TEXT rather than the verb - deny wins over allow, and a `*` in a Bash/PowerShell rule matches at any position, so any command whose text contains one of these paths is refused whatever the verb is. Understand the limit before relying on it: this is a TEXT match on the command string. `cd .claude && sed -i s/block/warn/ baseline.config.json`, `sed -i ... \"$CFG\"`, or any other spelling of the same file does not contain the literal path and is NOT caught here - those depend on command-guard's tamper rule, which in turn depends on the hook actually launching. Treat the pair as defense in depth, not as a boundary. Deliberate side effect: these rules also refuse READ-ONLY shell access to the same paths (`cat .claude/settings.json`, `git add .claude/settings.json`). That is intended - posture is reported by tools/baseline-status.sh, and a verb-scoped rule would have to enumerate write verbs and would silently miss the next one.",
     "deny": [
       "Edit(.env*)",
       "Read(.env*)",
@@ -67,7 +82,41 @@
       "Read(**/secrets/**)",
       "Edit(.claude/baseline.config.json)",
       "Edit(.claude/settings.json)",
-      "Edit(.claude/hooks/baseline/**)"
-    ]
+      "Edit(.claude/settings.local.json)",
+      "Edit(.claude/hooks/baseline/**)",
+
+      "Bash(*.claude/baseline.config.json*)",
+      "Bash(*.claude/settings.json*)",
+      "Bash(*.claude/settings.local.json*)",
+      "Bash(*.claude/hooks/baseline/*)",
+
+      "PowerShell(*.claude/baseline.config.json*)",
+      "PowerShell(*.claude\\baseline.config.json*)",
+      "PowerShell(*.claude/settings.json*)",
+      "PowerShell(*.claude\\settings.json*)",
+      "PowerShell(*.claude/settings.local.json*)",
+      "PowerShell(*.claude\\settings.local.json*)",
+      "PowerShell(*.claude/hooks/baseline/*)",
+      "PowerShell(*.claude\\hooks\\baseline\\*)",
+
+      "PowerShell(Remove-Item *)",
+      "PowerShell(rm *)",
+      "PowerShell(rm.exe *)",
+      "PowerShell(del *)",
+      "PowerShell(rmdir *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(iwr *)",
+      "PowerShell(Invoke-RestMethod *)",
+      "PowerShell(irm *)",
+      "PowerShell(curl *)",
+      "PowerShell(curl.exe *)",
+      "PowerShell(wget *)",
+      "PowerShell(wget.exe *)",
+      "PowerShell(Invoke-Expression *)",
+      "PowerShell(iex *)",
+      "PowerShell(git push*--force*)",
+      "PowerShell(git.exe push*--force*)"
+    ],
+    "_comment_deny_powershell": "Why the PowerShell block is coarser than command-guard. (1) Remove-Item is denied outright rather than only in its `-Recurse -Force` form: rules match text, and PowerShell accepts those flags in any order, abbreviated (-Rec), or before the path - a pattern targeting one spelling would be a rule that only appears to work. A repo that genuinely needs shell deletion must remove this entry deliberately; a deny cannot be re-opened by an allow rule. (2) The alias entries are not redundant with the cmdlet entries: a rule written for a cmdlet also matches that cmdlet's aliases, but under PowerShell 7 `curl`/`wget` are NOT aliases of Invoke-WebRequest - they resolve to native curl.exe/wget.exe, which alias matching cannot reach, hence the explicit and .exe forms. (3) This is a floor, not parity with command-guard: it covers destructive deletion, remote fetch, Invoke-Expression and force-push only. Everything else on the PowerShell side (git reset --hard, +refspec force pushes, a download cradle under another binary name) is matched by command-guard, which needs bash on PATH to run at all."
   }
 }

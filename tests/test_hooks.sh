@@ -19,12 +19,43 @@ command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
 winpath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# cd out of $TMP before removing it. The harness cd's into $WT below, and a live
+# cwd inside the directory makes removal fail with "Device or resource busy" —
+# which is what left stray temp dirs behind whenever this suite was interrupted.
+#
+# The signal handlers must exit explicitly. A bash trap on INT/TERM does NOT end
+# the script by itself, so a handler that only cleans up would delete $TMP and
+# then let the rest of the suite run against a directory that no longer exists —
+# every later assertion failing with exit 127 as though the installer were
+# broken. The hooks wrap their children in `timeout`, which signals its process
+# group, so a stray TERM reaching this harness is a real scenario, not a
+# theoretical one.
+cleanup() { cd "$SRC" 2>/dev/null || true; rm -rf "$TMP"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+# install.sh runs `claude --version` whenever a `claude` binary is on PATH. Run this
+# suite from inside a Claude Code session — or any agent orchestrator — and that is
+# the REAL CLI, which inherits the harness stdin and never reaches EOF. The suite
+# then blocks forever instead of failing, and since the parent never exits the EXIT
+# trap above never fires either. Shadow `claude` with a stub for the whole run; the
+# version-check tests below prepend their own bin dir, so they still win over this.
+STUBBIN="$TMP/stubbin"; mkdir -p "$STUBBIN"
+printf '#!/usr/bin/env bash\necho "99.0.0 (Claude Code)"\n' > "$STUBBIN/claude"
+chmod +x "$STUBBIN/claude"
+PATH="$STUBBIN:$PATH"; export PATH
 WT="$(winpath "$TMP")"     # Python/payload-facing form of the temp dir
 cd "$WT" || exit 1
 git init -q
 git config user.email t@example.com; git config user.name tester
-bash "$SRC/install.sh" --target "$WT" >/dev/null 2>&1
+# A global commit.gpgsign or core.hooksPath inherited from the developer's own
+# config would prompt for a passphrase, or run another stdin-reading hook, inside
+# the harness. Neutralise both for this scratch repo.
+git config commit.gpgsign false; git config core.hooksPath ""
+# Every child that could read stdin gets /dev/null. A blocked read looks exactly
+# like a slow test, so an unbounded wait turns what should be a FAIL into a hang.
+timeout -k 5 120 bash "$SRC/install.sh" --target "$WT" >/dev/null 2>&1 </dev/null
 cp "$WT/.claude/baseline.config.json" "$WT/.claude/_pristine.json"
 
 H="$WT/.claude/hooks/baseline"
@@ -88,7 +119,7 @@ run "unparseable -> 2"       modules/scope-guard.sh '{ not json' 2
 resetcfg
 
 echo "== fix-tags (PostToolUse) =="
-printf 'x = 1\n' > "$WT/app.py"; git add app.py; git commit -qm add
+printf 'x = 1\n' > "$WT/app.py"; git add app.py; git commit -qm add </dev/null
 printf 'x = 1\ny = 2\n' > "$WT/app.py"   # untagged added line
 setcfg "c['modules']['fixTags']['enabled']=True"
 run "untagged change -> 2"   modules/fix-tags.sh "$(write_payload "$WT/app.py")" 2
@@ -156,13 +187,19 @@ if printf '%s' "$rpt" | grep -qF "Binary file"; then fail=$((fail + 1)); echo " 
 # BOTH settings.template.json and config-guard.sh — they must stay identical or the
 # integrity check would block valid installs / miss real tamper.
 if "$PY" - "$SRC" <<'PY'
-import json, re, sys
+import ast, json, re, sys
 src = sys.argv[1]
 tmpl = json.load(open(src + "/settings.template.json", encoding="utf-8"))
 guard = open(src + "/hooks/modules/config-guard.sh", encoding="utf-8").read()
 def pylist(name):
-    m = re.search(name + r" = \[(.*?)\]", guard, re.S)
-    return re.findall(r'"([^"]+)"', m.group(1)) if m else []
+    # Parse the literal rather than scraping the source text between quotes. An entry
+    # containing a backslash — the Windows path forms among the PowerShell deny rules —
+    # is written "\\" in the source but denotes ONE backslash, so a regex scrape
+    # reports drift between two files that actually agree. (Writing a single backslash
+    # in the source to satisfy the scrape would be worse: "\\baseline" as one
+    # backslash is the escape \\b, a backspace.)
+    m = re.search(name + r" = (\[.*?\])", guard, re.S)
+    return list(ast.literal_eval(m.group(1))) if m else []
 # deny-list coupling
 deny_ok = sorted(tmpl["permissions"]["deny"]) == sorted(pylist("EXPECTED_DENY")) and pylist("EXPECTED_DENY")
 # wired-scripts coupling: every script the template `bash`-invokes must be in REQUIRED_HOOK_CMDS, and vice-versa
@@ -188,7 +225,7 @@ echo "== baseline version stamp + config-keep contract (Q3) =="
 # snapshot it, re-run install, and assert byte-identical (the keep path wrote nothing).
 setcfg "c['modules']['fixTags']['enabled']=True; c['guardrails']['commandGuard']['extraPatterns']=['terraform destroy']"
 cp "$CFG" "$WT/.claude/_precontract.json"
-bash "$SRC/install.sh" --target "$WT" >/dev/null 2>&1
+timeout -k 5 120 bash "$SRC/install.sh" --target "$WT" >/dev/null 2>&1 </dev/null
 if cmp -s "$CFG" "$WT/.claude/_precontract.json"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install.sh re-run clobbered an existing baseline.config.json]"; fi
 # Marker freshness: the installed VERSION equals the source hooks/VERSION after a re-run
 # (install.sh:107 cp -R recopies the hook subtree wholesale, so the marker is always truthful).
@@ -198,7 +235,7 @@ if [ -n "$srcver" ] && [ "$srcver" = "$instver" ]; then pass=$((pass + 1)); else
 resetcfg
 # Create-path stamp: a FRESH install prints the stamped baselineVersion in its output.
 FRESH="$(winpath "$TMP/fresh")"; mkdir -p "$FRESH"; ( cd "$FRESH" && git init -q )
-fout="$(bash "$SRC/install.sh" --target "$FRESH" 2>&1)"
+fout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$FRESH" 2>&1 </dev/null)"
 if printf '%s' "$fout" | grep -qF "$srcver"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install create-path did not print baselineVersion $srcver]"; fi
 
 echo "== install.sh version check (R4) =="
@@ -216,7 +253,7 @@ vcheck() {
   local desc="$1" ver="$2" want="$3" out
   rm -rf "$VTARGET"; mkdir -p "$VTARGET"; ( cd "$VTARGET" && git init -q )
   make_claude "$ver"
-  out="$(PATH="$VBIN:$PATH" bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1)"
+  out="$(PATH="$VBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1 </dev/null)"
   if printf '%s' "$out" | grep -qF "$want"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] missing: $want"; fi
 }
 vcheck "old version warns"        "2.0.0" "is older than the baseline's required"
@@ -232,7 +269,7 @@ vcheck "unparseable version skips" "none"  "could not detect a 'claude' CLI"
 # first-semver grep would pick 0.0.1 and warn; with anchoring it picks 2.1.80 and OKs.
 printf '#!/usr/bin/env bash\necho "node v0.0.1 runtime"\necho "2.1.80 (Claude Code)"\n' > "$VBIN/claude"; chmod +x "$VBIN/claude"
 rm -rf "$VTARGET"; mkdir -p "$VTARGET"; ( cd "$VTARGET" && git init -q )
-out="$(PATH="$VBIN:$PATH" bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1)"
+out="$(PATH="$VBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1 </dev/null)"
 if printf '%s' "$out" | grep -qF "Claude Code v2.1.80 detected"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [marker anchoring picks Claude Code semver]"; fi
 
 echo ""

@@ -1,5 +1,5 @@
 {
-  "_comment": "EXAMPLE allowlist-primary profile (ROADMAP R7) — adapt the allow list to your repo; NOT turnkey. defaultMode 'dontAsk' auto-denies anything not in permissions.allow, BUT read-only Bash (cat/rg/grep/head/…) still runs, so the Read(.env*) deny does NOT stop `cat .env` via Bash — it only governs Claude's Read/Glob/Grep tools. Protect repo-local secrets with hygiene (don't commit real secrets; use env injection / a secret manager) and the network sandbox below (limits exfiltration), not with this deny alone. See managed/README.md 'Allowlist-primary profile (R7)'. Verified against code.claude.com 2026-05-31.",
+  "_comment": "EXAMPLE allowlist-primary profile (ROADMAP R7) - adapt the allow list to your repo; NOT turnkey. defaultMode 'dontAsk' auto-denies anything not in permissions.allow. What the Read(.env*) deny actually covers: Claude's own file tools AND the file commands Claude Code recognizes inside a shell command (cat, head, tail, sed, grep), so `cat .env` IS refused. What it does not cover is a subprocess that opens the file itself - `python -c \"print(open('.env').read())\"`, `node -e ...`, an interpreter buried in a build script. That residual gap is closed one layer down by sandbox.filesystem.denyRead below, which is enforced for every child process, not just Claude's tools - which is why ./.env, ./.env.* and ./secrets appear there as well as in permissions.deny. Keep the hygiene rules anyway (do not commit real secrets; inject them from the environment or a secret manager): the sandbox is a per-session control, not a property of the repository. See managed/README.md 'Allowlist-primary profile (R7)'. Verified against code.claude.com 2026-08-12.",
   "permissions": {
     "defaultMode": "dontAsk",
     "allow": [
@@ -16,6 +16,7 @@
       "Bash(npm run:*)",
       "Bash(pytest:*)"
     ],
+    "_comment_deny": "The Bash()/PowerShell() entries are not redundant under defaultMode 'dontAsk'. Deny is evaluated before allow, and the allow list above hands out whole command families - `Bash(git add:*)` would otherwise reach .claude/settings.json, and Read(./**)/Edit(./**) cover the baseline's own files. They match the command TEXT wherever the path appears, so they do not survive a `cd .claude` first or a path built from a variable; command-guard's tamper rule is the other half. The PowerShell command floor from settings.template.json (Remove-Item, Invoke-WebRequest, ...) is deliberately absent here: under 'dontAsk' every PowerShell command is denied unless it is in the allow list, so an enumerated deny would add nothing.",
     "deny": [
       "Edit(.env*)",
       "Read(.env*)",
@@ -24,18 +25,65 @@
       "Edit(.claude/baseline.config.json)",
       "Edit(.claude/settings.json)",
       "Edit(.claude/settings.local.json)",
-      "Edit(.claude/hooks/baseline/**)"
+      "Edit(.claude/hooks/baseline/**)",
+      "Bash(*.claude/baseline.config.json*)",
+      "Bash(*.claude/settings.json*)",
+      "Bash(*.claude/settings.local.json*)",
+      "Bash(*.claude/hooks/baseline/*)",
+      "PowerShell(*.claude/baseline.config.json*)",
+      "PowerShell(*.claude\\baseline.config.json*)",
+      "PowerShell(*.claude/settings.json*)",
+      "PowerShell(*.claude\\settings.json*)",
+      "PowerShell(*.claude/settings.local.json*)",
+      "PowerShell(*.claude\\settings.local.json*)",
+      "PowerShell(*.claude/hooks/baseline/*)",
+      "PowerShell(*.claude\\hooks\\baseline\\*)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(rm *)",
+      "PowerShell(rm.exe *)",
+      "PowerShell(del *)",
+      "PowerShell(rmdir *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(iwr *)",
+      "PowerShell(Invoke-RestMethod *)",
+      "PowerShell(irm *)",
+      "PowerShell(curl *)",
+      "PowerShell(curl.exe *)",
+      "PowerShell(wget *)",
+      "PowerShell(wget.exe *)",
+      "PowerShell(Invoke-Expression *)",
+      "PowerShell(iex *)",
+      "PowerShell(git push*--force*)",
+      "PowerShell(git.exe push*--force*)"
     ],
     "additionalDirectories": []
   },
+  "_comment_sandbox": "Two things about this block are easy to get wrong. (1) SCOPE: strictAllowlist is honored from user settings, managed settings, or a CLI --settings file ONLY. In a repository's own .claude/settings.json it has no effect, so deploying this profile per-repo leaves the network allowlist in PROMPT mode - allowedDomains merely pre-approves the listed hosts, and an unlisted host asks instead of failing. Deploy this file through MDM/managed settings (or the org-wide allowManagedDomainsOnly) if you need egress to be a block rather than a question. (2) PATH FORM: './' or no prefix is relative to the project root for project settings - the '//' absolute-path convention belongs to permission rules, not to the sandbox. Note also what the sandbox does not reach: it governs Bash/PowerShell subprocesses, so the WebFetch tool is not sandbox-governed. Domains from WebFetch(domain:...) ALLOW rules do, however, join allowedDomains in the same allowlist strictAllowlist enforces.",
   "sandbox": {
     "enabled": true,
     "filesystem": {
-      "denyRead": ["~/.aws", "~/.ssh", "~/.gnupg", "~/.config/gh", "~/.kube", "~/.docker/config.json"],
-      "allowWrite": ["/tmp/claude-build"]
+      "denyRead": [
+        "~/.aws",
+        "~/.ssh",
+        "~/.gnupg",
+        "~/.config/gh",
+        "~/.kube",
+        "~/.docker/config.json"
+      ],
+      "allowWrite": [
+        "/tmp/claude-build"
+      ],
+      "_comment_denyRead": "sandbox.filesystem.denyRead/denyWrite are enforced by the OS against child processes, so unlike a Read() permission deny they DO bound `python -c \"open('.env').read()\"` and similar subprocess reads. They are omitted here on purpose: this file is deployed as MANAGED settings, which have no project root, and project-relative './' paths are not supported at this scope. Add absolute paths (or '~/'-anchored ones) for the checkouts you actually deploy to."
     },
     "network": {
-      "allowedDomains": ["github.com", "*.githubusercontent.com", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org"]
+      "strictAllowlist": true,
+      "allowedDomains": [
+        "github.com",
+        "*.githubusercontent.com",
+        "registry.npmjs.org",
+        "pypi.org",
+        "files.pythonhosted.org"
+      ]
     }
   }
 }

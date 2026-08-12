@@ -1,8 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://openclaw.internal/claude-code-baseline/baseline.config.schema.json",
   "title": "Claude Code Baseline Config",
-  "description": "Drives which baseline hooks run and whether they block. Consumed by hooks/lib/common.sh.",
+  "description": "Drives which baseline hooks run and whether they block. Consumed by hooks/lib/common.sh. Resolution is purely relative - baseline.config.json points at this file with \"$schema\": \"./baseline.config.schema.json\" - so the schema deliberately carries no $id. DEGRADED-STATE CONTRACT, which no schema keyword can express: a config file that exists but does not parse is not equivalent to an absent one. Absent means 'defaults apply'; malformed means every key silently reverts to its default, so module gating reads false and commandGuard.extraPatterns vanishes. The hooks therefore test bcl_config_malformed before their enabled-gate and route that state through bcl_failclosed_exit. The 'default' keywords below document the value common.sh substitutes when a key is missing; they are annotations, not behavior - validators do not inject them.",
   "type": "object",
   "additionalProperties": true,
   "required": ["enforcement", "guardrails", "modules"],
@@ -20,46 +19,50 @@
     "enforcement": {
       "type": "string",
       "enum": ["block", "warn"],
-      "description": "Global posture. 'block': hooks fail the tool call on violation. 'warn': hooks advise but never fail."
+      "default": "block",
+      "description": "Global posture. 'block': hooks fail the tool call on violation. 'warn': hooks advise but never fail. Note the event asymmetry: only PreToolUse hooks can fail a tool call. A PostToolUse hook exits after the write has already happened, so under 'block' it reports the violation to Claude rather than undoing it."
     },
     "failClosed": {
       "type": "boolean",
-      "description": "When a security control cannot RUN (missing/malformed rules file, or Python unavailable), fail closed: under 'block' posture the hook exits 2 with a loud message instead of silently passing. Default true. Set false to downgrade such degradations to warnings."
+      "default": true,
+      "description": "When a security control cannot RUN - missing or malformed rules file, malformed baseline.config.json, or Python unavailable - fail closed: under 'block' posture the hook exits 2 with a loud message instead of silently passing. Defaults to true, and the default is what a hook gets when this file is unreadable, so the degraded path is fail-closed by construction. Set false to downgrade such degradations to warnings. It does not cover a hook that never launches (deleted or non-executable script): Claude Code's exit-code semantics make that a fail-open no hook can intercept."
     },
     "guardrails": {
       "type": "object",
-      "description": "Always-on safety hooks. Disable only with deliberate intent.",
+      "description": "Guardrails that only INSPECT are on unless disabled, so an absent config never means absent enforcement. autoFormat is the exception - it executes code and is opt-in. Disable an inspecting guardrail only with deliberate intent.",
       "additionalProperties": false,
       "properties": {
         "commandGuard": {
           "type": "object",
           "additionalProperties": false,
+          "description": "PreToolUse inspection of proposed shell commands (matcher Bash|PowerShell). Inspects only; executes nothing from the repo, so it is on by default.",
           "properties": {
-            "enabled": { "type": "boolean" },
+            "enabled": { "type": "boolean", "default": true },
             "extraPatterns": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Additional case-insensitive substrings that block a Bash command."
+              "description": "Additional case-insensitive substrings that block a shell command (Bash or PowerShell). Silently dropped if this file does not parse, which is why the hooks fail closed on a malformed config."
             }
           }
         },
         "autoFormat": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "enabled": { "type": "boolean" } }
+          "description": "Runs the repo's formatters after a write. DEFAULT FALSE, and the only guardrail that executes repo-supplied code: ./node_modules/.bin/prettier and ./node_modules/.bin/eslint are the target repository's own binaries, their config files (prettier.config.js, eslint.config.js) and plugins are repo-controlled, and 'dotnet format' builds the project. Enable it only for a repo whose toolchain you trust. The hook reads this key with bcl_guardrail_opted_in, so only a literal true in a readable config enables it - a missing key, a missing config or an unreadable one keeps it off.",
+          "properties": { "enabled": { "type": "boolean", "default": false } }
         }
       }
     },
     "modules": {
       "type": "object",
-      "description": "Opt-in hooks. Off by default; enable per repo.",
+      "description": "Opt-in hooks. Off by default; enable per repo. 'Off by default' is also the fallback when this file cannot be read, so a corrupted config never silently enables a module - but it does silently DISABLE the ones you enabled, which is why the hooks fail closed on a malformed config instead of treating it as absent.",
       "additionalProperties": false,
       "properties": {
         "securityDefaults": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
+            "enabled": { "type": "boolean", "default": false },
             "rulesFile": { "type": "string", "description": "Path (repo-relative or absolute) to the declarative rules file." }
           }
         },
@@ -67,7 +70,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
+            "enabled": { "type": "boolean", "default": false },
             "tagMarker": { "type": "string" },
             "fileRegex": { "type": "string" },
             "requireWhenEnv": { "type": "string", "description": "If non-empty, only enforce when this environment variable is set." }
@@ -77,26 +80,26 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
+            "enabled": { "type": "boolean", "default": false },
             "scopeFile": { "type": "string" }
           }
         },
         "configGuard": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ConfigChange tamper-detection. When enabled, watches in-session changes to .claude/settings.json (project_settings) and blocks/warns if the baseline hook wiring or deny-list is stripped, or disableAllHooks is set.",
-          "properties": { "enabled": { "type": "boolean" } }
+          "description": "ConfigChange tamper-detection. When enabled, watches in-session changes to the settings files the baseline wires it to - .claude/settings.json (source project_settings) and .claude/settings.local.json (source local_settings, which overrides it) - and blocks/warns if the baseline hook wiring or deny-list is stripped, or disableAllHooks is set. Detection after the fact, in-session only: it sees a change Claude Code reports, not an edit made while no session is running, and it does not watch baseline.config.json or the hook scripts themselves.",
+          "properties": { "enabled": { "type": "boolean", "default": false } }
         },
         "runTests": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "enabled": { "type": "boolean" } }
+          "properties": { "enabled": { "type": "boolean", "default": false } }
         },
         "trackerReminder": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
+            "enabled": { "type": "boolean", "default": false },
             "commitGrep": { "type": "string", "description": "Literal substring matched against recent commit subjects (fixed-string, not a regex)." },
             "tracker": { "type": "string" }
           }
@@ -104,7 +107,7 @@
         "autoStage": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "enabled": { "type": "boolean" } }
+          "properties": { "enabled": { "type": "boolean", "default": false } }
         }
       }
     }

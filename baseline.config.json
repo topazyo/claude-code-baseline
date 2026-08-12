@@ -2,12 +2,15 @@
   "$schema": "./baseline.config.schema.json",
   "version": 1,
   "_comment": "Org baseline for Claude Code hooks. Guardrails are always-on; modules are opt-in. 'enforcement' is the global posture: 'block' (hooks fail the tool call) or 'warn' (hooks advise only). The installer copies this file to a target repo's .claude/baseline.config.json only if one is not already present, so local customizations are never clobbered.",
+  "_malformedConfigRationale": "If this file EXISTS but does not parse, every lookup silently returns its built-in default: module gating reads false (scope-guard, config-guard and the rest quietly stop), and commandGuard.extraPatterns disappears while command-guard keeps reporting success. A single trailing comma therefore used to disable controls with no signal anywhere. The safe state is now the fallback: the guardrail and module hooks test bcl_config_malformed BEFORE their enabled-gate and route a malformed config through bcl_failclosed_exit, i.e. under failClosed:true + enforcement:block it is a loud exit 2 ('control could not run'), not a silent pass. A file that is simply ABSENT is a different case and still means 'defaults apply' - that is a fresh checkout, not a degraded one.",
   "_minClaudeCodeVersionRationale": "Floor for behavior this baseline depends on. v2.1.80 is the release where a hook/permission 'allow' could no longer bypass a 'deny' rule; the tamper-protection deny-list (Edit(.claude/settings.json) etc.) relies on deny being unconditionally enforced. install.sh compares the detected 'claude --version' against this and warns (advisory, never blocks) if older. Re-confirm per release via RELEASING.md.",
   "minClaudeCodeVersion": "2.1.80",
-  "_baselineVersionRationale": "Revision stamp for THIS baseline template (distinct from the schema 'version' integer above). install.sh copies it verbatim onto a NEW install (create path only — an existing config is never rewritten), and the same value ships in hooks/VERSION, which install.sh recopies into every repo on each run. tools/baseline-status.sh --drift compares a repo's installed .claude/hooks/baseline/VERSION against this value to surface repos on an old baseline. Bump this AND hooks/VERSION together on release (see RELEASING.md); tests/run.sh asserts the two match.",
+  "_baselineVersionRationale": "Revision stamp for THIS baseline template (distinct from the schema 'version' integer above). install.sh copies it verbatim onto a NEW install (create path only - an existing config is never rewritten), and the same value ships in hooks/VERSION, which install.sh recopies into every repo on each run. tools/baseline-status.sh --drift compares a repo's installed .claude/hooks/baseline/VERSION against this value to surface repos on an old baseline. Bump this AND hooks/VERSION together on release (see RELEASING.md); tests/run.sh asserts the two match.",
   "baselineVersion": "2026-05-31",
   "enforcement": "block",
   "failClosed": true,
+
+  "_autoFormatRationale": "autoFormat ships DISABLED, unlike the other guardrail. It is the one hook in this baseline that EXECUTES code the target repository supplies: after cd'ing to the repo root it runs ./node_modules/.bin/prettier and ./node_modules/.bin/eslint when present - repo-controlled binaries - honouring repo-controlled prettier.config.js / eslint.config.js and their plugins, and 'dotnet format' additionally builds the project. Cloning a repo and letting an agent touch one file would then be enough to run whatever that repo planted, which is the same primitive as the repo-defined-hook auto-execution the baseline exists to contain. Enabling it is a deliberate trade for a repo whose toolchain you trust: set guardrails.autoFormat.enabled true here. The hook reads that key with bcl_guardrail_opted_in, so ONLY a literal true in a readable config turns it on - a missing key, a missing config or an unreadable one keeps it off. Every other guardrail only inspects, so those keep the default-on gate (absent config must not mean absent enforcement).",
 
   "guardrails": {
     "commandGuard": {
@@ -15,7 +18,7 @@
       "extraPatterns": []
     },
     "autoFormat": {
-      "enabled": true
+      "enabled": false
     }
   },
 

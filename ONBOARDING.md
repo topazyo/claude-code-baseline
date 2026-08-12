@@ -1,13 +1,3 @@
-<!-- Maintainer notes (safe to keep or strip before publishing):
-  • Security-lead contact is set to Topaz Hurvitz <topazhu@postil.com> (Part 6).
-    Optional: add a quickstart screen-recording link in Part 0 if/when one exists.
-  • Hook mechanics (events, exit codes, payload) are sourced from Anthropic's
-    Claude Code docs and were verified during research. The hook/permissions
-    surface evolves between Claude Code versions — re-verify against the live docs
-    each time you cut a baseline release, and pin a minimum Claude Code version.
-  • Pedagogy/rollout claims are vendor/community-sourced (Snyk, Cycode, OWASP).
--->
-
 # Onboarding: Claude Code Hooks & Our Security Baseline
 
 > **New to Claude Code? New to hooks? Start here.** By the end you'll understand
@@ -22,7 +12,7 @@
 ## What you'll be able to do after this
 
 - Explain, in one sentence each, what a Claude Code **hook**, **event**, **matcher**, and **exit code** are.
-- Describe *why* an AI coding agent needs **guardrails**, and name the three always-on protections (two guardrail hooks + the secrets deny-list rule).
+- Describe *why* an AI coding agent needs **guardrails**, and name the two always-on protections (the command-guard hook + the secrets deny-list rule).
 - Decide which **optional modules** to enable for your repo — and justify the choice.
 - React correctly when a hook **blocks** you (fix vs. legitimate, reviewed override).
 - Install and upgrade the baseline in a repo you own.
@@ -47,16 +37,25 @@ and **merged** safe defaults into `.claude/settings.json` (backing up any existi
 one first). It adds a secrets deny-list to `permissions.deny`, but never touches
 your `permissions.allow` list or `model`.
 
-You now have **three always-on protections** (explained in Part 2). Everything
+You now have **two always-on protections** (explained in Part 2). Everything
 else is **opt-in and off by default** — you turn modules on deliberately, later.
 
 > 🧪 **Try it:** ask Claude to run `git push --force` and watch it get **blocked**
 > with a message. That's the command-guard. *(Why these commands? Part 2.)*
 >
-> The guard normalizes + tokenizes the command (Part 2.3), so it catches common
-> evasions (extra spaces, quotes, flag reordering, wrappers). It's scoped to
+> The guard tokenizes the command the way a shell would (Part 2.3), so it catches
+> the common evasions — extra spaces, quotes inside a word, `${IFS}`, `.exe`
+> suffixes, subshells, newline sub-commands, wrappers. It's scoped to
 > *catastrophic* targets: `rm -rf /` is blocked, while a targeted `rm -rf ./build`
 > is intentionally allowed. Defense-in-depth — not an evasion-proof wall.
+
+> ⚠️ **Know this before you rely on it.** At the per-repo tier everything you just
+> installed is *ordinary repo files*. `baseline.config.json`, the hook scripts, and
+> `settings.json` can be edited or deleted by you, by a collaborator, and — through
+> a shell command the deny rules don't happen to match — by the agent. One config
+> key (`guardrails.commandGuard.enabled: false`) turns the blocker into a no-op for
+> the session. A floor nobody can disable exists only at the **managed settings**
+> tier (Part 7). Read Part 1.5 before treating a green run as proof.
 
 > ✅ **Check:** you can see `.claude/hooks/baseline/` and
 > `.claude/baseline.config.json` in your repo, and `git push --force` is refused.
@@ -102,7 +101,7 @@ The events our baseline uses:
 
 | Event | Cadence | When it fires | We use it for | Can it block? |
 |-------|---------|---------------|---------------|---------------|
-| `PreToolUse` | per tool call | *before* a tool runs | command-guard (Bash), scope-guard (Write/Edit) | ✅ **yes** |
+| `PreToolUse` | per tool call | *before* a tool runs | command-guard (Bash, PowerShell), scope-guard (Write/Edit) | ✅ **yes** |
 | `PostToolUse` | per tool call | *after* a tool ran | auto-format, security-defaults, fix-tags, run-tests, auto-stage | ❌ no — tool already ran |
 | `Stop` | per turn | when Claude finishes responding | tracker-reminder *(opt-in — see Part 4)* | ✅ yes (keeps it going) |
 | `ConfigChange` | on settings change | a settings file is edited mid-session | config-guard *(opt-in — Part 7)* | ✅ yes (rejects the change) |
@@ -130,8 +129,26 @@ name. `"Bash"` matches shell commands; `"Write|Edit"` matches either file-writin
 tool; an omitted matcher (as on `Stop`) matches everything. Only matching tool
 calls trigger the hook.
 
-In our baseline: command-guard matches `Bash`; the file-related hooks (auto-format,
-security-defaults, scope-guard, …) match `Write|Edit`; tracker-reminder is on `Stop`.
+In our baseline: command-guard matches `Bash|PowerShell`; the file-related hooks
+(auto-format, security-defaults, scope-guard, …) match `Write|Edit`;
+tracker-reminder is on `Stop`.
+
+> ⚠️ **Why `Bash|PowerShell` and not just `Bash`.** On Windows *without* Git Bash,
+> Claude Code doesn't register the Bash tool at all — it enables the PowerShell tool
+> instead. A hook matching only `Bash` never fires there, silently, while the repo
+> still looks protected. Matching both is the fix. Note the second half of that
+> problem, which a matcher cannot solve: our hook commands are `bash "…/…sh"`, so on
+> a box with no `bash` on PATH the command can't launch at all, and Claude Code
+> treats a hook that fails to launch as *no objection*. On such a host the
+> `permissions.deny` rules — which need nothing installed — are the only control
+> that actually runs.
+
+> 💡 **The coverage boundary, stated once so you can hold it.** The baseline hooks
+> only ever see two families of tool call: shell commands (`Bash|PowerShell`) and
+> file writes (`Write|Edit`). **`WebFetch`, `WebSearch`, and every `mcp__*` tool are
+> unhooked** — no baseline hook inspects them and no baseline deny rule covers them.
+> That is a deliberate scope, not an oversight, but it means "the baseline is
+> installed" says nothing about what an MCP server or a fetch tool can do.
 
 ### 1.4 How a hook receives information — the JSON payload
 
@@ -177,6 +194,15 @@ What exit `2` does, per event:
 proceeds; on `PostToolUse` the tool already ran, so the only difference from exit
 `2` is *how much* of your stderr Claude sees — the first line vs. the full report.)
 
+> ⚠️ **The corollary nobody enjoys: a hook that never launches fails *open*.**
+> Our wiring is `bash "…/command-guard.sh"`. If that file is missing, unreadable,
+> or `bash` isn't on PATH, the command exits non-zero *without ever running our
+> code* — and by the table above, a non-`2` exit lets the action proceed. Our
+> `failClosed` setting (Part 3) covers a hook that **runs and cannot finish its
+> check**; it cannot cover a hook that never started. Deleting a hook script is not
+> an `Edit` tool call, so the deny-list doesn't see it either. This is the strongest
+> single reason the managed tier (Part 7) exists.
+
 > ⚠️ **The single most important mechanic:** real *prevention* happens at
 > `PreToolUse`. Our `PostToolUse` security checks can't un-write a file — they
 > surface the violation so Claude corrects it on the next step. That's why the
@@ -188,8 +214,17 @@ proceeds; on `PostToolUse` the tool already ran, so the only difference from exi
 > (`permissionDecision: "deny"`) — equivalent to exit `2`. Crucially, an exit-`2`
 > `PreToolUse` block fires *before* permission rules, so it overrides even an
 > "allow" rule or `--dangerously-skip-permissions` (the flag that normally tells
-> Claude Code to skip its per-action approval prompts). That's what makes it
-> *enforceable*, not just advisory. *Source: Anthropic hooks / permissions docs.*
+> Claude Code to skip its per-action approval prompts). *Source: Anthropic hooks /
+> permissions docs.*
+>
+> ⚠️ **Read that as "enforceable *if it runs*," not "enforceable."** Exit 2
+> outranks the permission rules — but only for a hook that actually fires. At the
+> per-repo tier the hook script and `baseline.config.json` are ordinary files in
+> your repo: the developer can edit them, and so can the agent through any shell
+> command the deny rules don't happen to match. `guardrails.commandGuard.enabled:
+> false` is a one-key disarm, and a deleted script is the fail-open above. Only
+> **managed settings** are non-overridable (Part 7). Everything in Parts 0–6 is a
+> raised floor, not a boundary.
 
 > ✅ **Check your understanding (Part 1):**
 > 1. Which event fires *before* a shell command runs? *(PreToolUse.)*
@@ -235,7 +270,9 @@ reasons guardrails matter (use these to motivate the team):
 The baseline is split into two tiers, and one switch decides how strict it is:
 
 - **Guardrails** — universal safety that *everyone* gets, on by default. Hard to
-  justify turning off. (command-guard, auto-format, the secrets deny-list.)
+  justify turning off. (command-guard, the secrets deny-list.) One guardrail —
+  `autoFormat` — ships **off**, because it is the only hook here that *executes*
+  code the repository supplies; see 2.3.
 - **Modules** — workflow-specific checks, **off by default**. You enable the ones
   that fit your repo. (securityDefaults, fixTags, scopeGuard, configGuard, runTests,
   trackerReminder, autoStage.)
@@ -243,20 +280,21 @@ The baseline is split into two tiers, and one switch decides how strict it is:
   action / feeds it back to Claude) or `"warn"` (advise only, never fail).
 
 > 💡 **Recommended ramp** (the industry "visibility-first, then enforce" pattern,
-> reconciled with our security floor): keep **all three always-on guardrails on from
-> day one** — command-guard in `block`, the secrets deny-list always enforced, and
-> auto-format (which never blocks anyway) — since they cover irreversible,
-> universally-bad actions. Then introduce each **opt-in module in `warn` first**,
+> reconciled with our security floor): keep **both always-on guardrails on from
+> day one** — command-guard in `block` and the secrets deny-list always enforced —
+> since they cover irreversible, universally-bad actions and neither one runs
+> anything. Then introduce each **opt-in module in `warn` first**,
 > watch it for a week, and dial it to `block` once the team trusts it. Staying in
 > `warn` *forever* trains people to ignore it, so the goal is always to graduate to
 > `block`. *(Snyk; Cycode.)*
 
-### 2.3 The three always-on guardrails (and *why* each)
+### 2.3 The two always-on guardrails (and *why* each)
 
-**1. command-guard** — a `PreToolUse:Bash` hook that **blocks** a curated list of
-destructive or unapproved shell commands via a **token-aware matcher** (it
-lowercases, strips quotes/backslashes, collapses whitespace, splits compound
-commands, and matches on tokens — hardened against common evasions). The list,
+**1. command-guard** — a `PreToolUse:Bash|PowerShell` hook that **blocks** a curated
+list of destructive or unapproved shell commands via a **shell-aware matcher**: it
+tokenizes each line the way a shell would (so a quote inside a word no longer splits
+it), inspects every sub-command of a compound line, resolves the command word past a
+path and a `.exe`/`.cmd` suffix, and looks through wrappers and subshells. The list,
 and why each entry is on it:
 
 | Blocked | Why |
@@ -265,27 +303,59 @@ and why each entry is on it:
 | `git push --force`, `git push -f` | irreversible remote history loss |
 | `git reset --hard` | irreversible local work loss |
 | `drop table`, `truncate table`, `delete from` | destructive data operations |
-| `curl http…`, `wget http…` | unreviewed remote fetch (injection / supply-chain) |
+| `curl`/`wget` at a remote host (with or without a `scheme://`) | unreviewed remote fetch (injection / supply-chain) |
 | `npm install`, `pnpm install`, `yarn add`, `pip install` | unvetted dependency (supply-chain) |
+| PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | the same three categories, in the shell Windows sessions actually get |
 
 You can extend it per-repo via `guardrails.commandGuard.extraPatterns` (e.g.
 `["terraform destroy"]`). *(Anthropic ships a near-identical `block-rm.sh` example —
-this is the officially recommended pattern.)* The matcher resists common evasions
-(whitespace, quoting, flag reordering, `/bin/rm` wrappers, `&&`/`;`/`|` chains) but
-is **defense-in-depth, not a wall** — encoding (base64), arbitrary variable
-indirection (the literal `$HOME`/`${HOME}` *are* caught; other `$VAR`s are not), and
-runtime aliases can still bypass it. Its delete scope is deliberately *catastrophic-
-only* (e.g. `/`, `.`, `./`, `~`, `~/`, `*`, `/*`, `$HOME`), so a targeted
-`rm -rf ./build` is intentionally allowed.
+this is the officially recommended pattern.)* Its delete scope is deliberately
+*catastrophic-only* (e.g. `/`, `.`, `./`, `~`, `~/`, `*`, `/*`, `$HOME`), so a
+targeted `rm -rf ./build` is intentionally allowed.
 
-**2. auto-format** — a `PostToolUse:Write|Edit` hook that runs whatever formatter
-is available for the changed file (prettier/eslint, black, `dotnet format`). It
-**never blocks** — formatting is a convenience, not a gate.
+> 💡 **What it now catches, and what it still doesn't.** The tokenizer rewrite closed
+> the named bypasses this project used to carry as known gaps: `r''m -rf /`,
+> `git push --fo"rce"`, `rm${IFS}-rf${IFS}/`, `git.exe push --force`, a second
+> command hidden after a newline, `(rm -rf /)` and `{ rm -rf /; }`, `git push origin
+> +main`, `rm -rf ~/*`, and `echo / | xargs rm -rf` all block today, with a fixture
+> pinning each one. Still **not** caught, by design: base64 or other encoding,
+> *arbitrary* variable indirection (the literal `$HOME`/`${HOME}` **are** caught;
+> `$X` where `X` was set earlier is not), runtime aliases and shell functions, and
+> any binary that isn't on the list. A blocklist raises the cost of a destructive
+> action; it does not make one impossible. **Defense-in-depth, not a wall.**
 
-**3. secrets deny-list** — entries in `permissions.deny` that refuse reads and
-edits to `.env*` and `**/secrets/**`. Note the distinction: this is a **permission
-rule**, not a hook — Claude Code enforces it directly, and a managed deny can't be
-overridden. *(This mirrors OWASP's prescribed secret-blocking patterns.)*
+**2. secrets deny-list** — entries in `permissions.deny` that refuse reads and edits
+to `.env*` and `**/secrets/**`, plus path rules protecting the baseline's own files.
+This is a **permission rule**, not a hook — Claude Code enforces it directly, so it
+needs no Python, no `bash`, and no hook wiring. *(This mirrors OWASP's prescribed
+secret-blocking patterns.)*
+
+> ⚠️ **What a `Read`/`Edit` deny rule actually binds — the part people get backwards.**
+> It binds Claude's own file tools **and the file commands Claude Code recognizes
+> inside a shell command** — `cat`, `head`, `tail`, `sed`, `grep`. So `cat .env`
+> **is refused**. What it does *not* bind is an arbitrary subprocess that opens the
+> file itself: `python -c "print(open('.env').read())"`, `node -e …`, or an
+> interpreter buried three levels down a build script sail straight through, because
+> Claude Code cannot see what they will do before they do it. The answer to *that*
+> gap is not a permission rule — it is `sandbox.filesystem.denyRead`, which the OS
+> enforces against every child process (Part 7), plus the hygiene rule that beats
+> both: don't keep real secrets on disk in a repo an agent can touch.
+>
+> Note also which tier you are on. A **managed** deny cannot be overridden by
+> anyone below it. A deny in your repo's own `settings.json` is a file in your repo —
+> it protects you from the agent, not from an edit.
+
+**Not always-on: auto-format.** The baseline also ships a `PostToolUse:Write|Edit`
+formatter hook (prettier/eslint, black, `dotnet format`) that never blocks — but it
+is `enabled: false` out of the box, and it is the only hook here that **executes code
+the target repository supplies**. After it `cd`s to the repo root it prefers
+`./node_modules/.bin/prettier` and `./node_modules/.bin/eslint` — repo-controlled
+binaries — honoring repo-controlled `prettier.config.js` / `eslint.config.js` and
+their plugins, and `dotnet format` additionally *builds* the project. Cloning a repo
+and letting an agent touch one file would then be enough to run whatever that repo
+planted: the same primitive as CVE-2025-59536 above. Turn it on
+(`guardrails.autoFormat.enabled: true`) only for a repo whose toolchain you already
+trust — a convenience you opt into, not a protection you get.
 
 > 💡 **Teaching point:** guardrails target **irreversible or outward-facing**
 > actions. Reversible mistakes are fine — that's what review and git are for.
@@ -294,6 +364,7 @@ overridden. *(This mirrors OWASP's prescribed secret-blocking patterns.)*
 > 1. Name one thing command-guard blocks and why it's irreversible. *(e.g. `git push --force` — overwrites remote history.)*
 > 2. What's the difference between a guardrail and a module? *(Guardrails are always-on universal safety; modules are opt-in and workflow-specific.)*
 > 3. Is the secrets deny-list a hook? *(No — it's a permission rule enforced by Claude Code itself.)*
+> 4. Does `Read(.env*)` in `deny` stop `cat .env`? What about `python -c "open('.env')"`? *(Yes to `cat` — Claude Code recognizes it as a file command. No to the Python one — an arbitrary subprocess is outside what a permission rule can see; that needs the sandbox.)*
 
 ---
 
@@ -310,8 +381,8 @@ overridden. *(This mirrors OWASP's prescribed secret-blocking patterns.)*
 └── hooks/baseline/
     ├── lib/common.sh             ← shared helpers (config reads, payload parsing)
     ├── guardrails/
-    │   ├── command-guard.sh      ← PreToolUse:Bash  (always on)
-    │   └── auto-format.sh        ← PostToolUse      (always on, never blocks)
+    │   ├── command-guard.sh      ← PreToolUse:Bash|PowerShell  (always on)
+    │   └── auto-format.sh        ← PostToolUse (never blocks; ships DISABLED — 2.3)
     ├── dispatcher/post-write.sh  ← single PostToolUse entry point
     └── modules/                  ← opt-in: security-defaults, fix-tags, scope-guard,
                                      config-guard (ConfigChange), run-tests,
@@ -326,7 +397,11 @@ overridden. *(This mirrors OWASP's prescribed secret-blocking patterns.)*
   `dispatcher/post-write.sh`, which runs the file hooks in a fixed, safe order:
   **auto-format → security-defaults → fix-tags → run-tests → auto-stage**. If a
   blocking check fails, the chain short-circuits, so `auto-stage` never stages a
-  file that just failed a gate.
+  file that just failed a gate. Out of the box the chain effectively starts at
+  `security-defaults`, since `autoFormat` and every module ship disabled — a
+  freshly-installed repo runs no `PostToolUse` work at all until you enable
+  something. The whole chain shares one `PostToolUse` timeout, which is the other
+  reason not to put a project build (`dotnet format`) at the front of it.
   > ⚠️ **Terminology, told honestly:** for these `PostToolUse` modules, "block"
   > means *fail the step and hand the full report back to Claude to fix* — the edit
   > already happened (see 1.5). Only the `PreToolUse` guardrails truly *prevent* an
@@ -361,6 +436,12 @@ overridden. *(This mirrors OWASP's prescribed secret-blocking patterns.)*
 > Keys you'll meet in the lab: `securityDefaults.rulesFile`,
 > `trackerReminder.commitGrep` + `.tracker`, `fixTags.tagMarker` + `.requireWhenEnv`,
 > `scopeGuard.scopeFile`.
+
+> **One opt-in lives outside this table:** `guardrails.autoFormat.enabled`. It is
+> filed as a guardrail because it is universal in *scope*, but it ships off for a
+> security reason rather than a workflow one — it runs the target repo's own
+> formatter binaries and config (see 2.3). Decide it like a trust question about the
+> repository, not like a friction question about your team.
 
 **Pick by repo profile:**
 
@@ -458,7 +539,9 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
         a. Temporary local unblock: set enforcement: "warn", finish, set it back.
         b. Recurring/legitimate: open a PR that changes the config (add an allowed
            pattern, scope/relax a rule) so the exception is reviewed and recorded.
-        c. Unsure or security-relevant → ping the security lead (Topaz Hurvitz, topazhu@postil.com).
+        c. Unsure or security-relevant → escalate to whoever owns .claude/** in
+           CODEOWNERS for this repo. If it looks like a *bypass* of the guardrail
+           rather than a false positive, report it privately — see SECURITY.md.
 ```
 > ⚠️ **Never silently delete or weaken a guardrail** to get unblocked. The
 > sanctioned override path is a *reviewed config change* (or, for a hard floor,
@@ -471,7 +554,12 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
   scripts, preserves your `baseline.config.json`, and re-merges `settings.json`
   (with a fresh backup). Pin a **minimum Claude Code version** for your team — the
   hook/permissions surface changes between releases.
-- **Getting help / escalation.** Security lead: **Topaz Hurvitz** — topazhu@postil.com.
+- **Getting help / escalation.** For questions and false positives, ask the owners
+  listed for `.claude/**` in this repo's `CODEOWNERS`. For anything that looks like a
+  way *around* a guardrail — a command-guard bypass, a deny rule that doesn't hold —
+  do **not** open a public issue: use GitHub's **Report a vulnerability** button
+  (Private Vulnerability Reporting) on the baseline repository. The process, the
+  scope, and the response window are in [`SECURITY.md`](SECURITY.md).
 
 ---
 
@@ -486,12 +574,23 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
   `.claude/hooks/baseline/`, `.claude/baseline.config.json`, and the schema.
   **Do not commit** `.claude/settings.local.json` (per-developer overrides) or the
   `settings.json.bak.*` backups.
+  > ⚠️ **What you are committing is executable content that auto-runs.** Those hook
+  > scripts, and the `settings.json` wiring that launches them, execute on every
+  > collaborator's machine the next time Claude Code opens the repo — which is the
+  > exact shape of CVE-2025-59536 above, just with the scripts being yours. Before
+  > you commit them, put `.claude/**` (and `hooks/**` if you vendor the source) in
+  > `CODEOWNERS` with a security owner, and turn on branch protection so that
+  > ownership means a required review. A one-line PR to `common.sh` runs on
+  > everyone. Review these files the way you'd review a CI runner script, not the
+  > way you'd review a config file.
 - **Org rollout (multi-repo).** Loop `install.sh --target <repo>` over your repo
   list; upgrades are just a re-run. Each install stamps a **`baselineVersion`** (in
   `baseline.config.json`, mirrored into `.claude/hooks/baseline/VERSION`), so you can
   keep all repos on one baseline and spot stragglers with
-  `tools/baseline-status.sh --drift <repos…>` (add `--strict` for a CI gate). Re-run
-  `install.sh` on a regular cadence to reconcile drift. *(Education should precede
+  `tools/baseline-status.sh --drift <repos…>` (`--strict` turns the same check into a
+  non-zero exit for an operator-run or org-level job — this repo's own CI does not
+  invoke it; see [`tools/README.md`](tools/README.md)). Re-run `install.sh` on a
+  regular cadence to reconcile drift. *(Education should precede
   rollout: share this guide and the "why" before flipping anything on, and pair each
   tightening with comms — Snyk.)*
 - **Measuring it (with our no-external-telemetry constraint).** Our org rules forbid
@@ -506,24 +605,33 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
 - **Enterprise enforcement — a non-overridable floor.** *(Shipped — see [`managed/`](managed/README.md).)*
   When you need a floor individual devs *cannot* disable, deploy the `managed/` profile
   via Claude Code **managed settings** (an org-admin action: MDM / golden image, at the
-  per-OS `managed-settings.json` path). A managed `deny` can't be overridden — not by
-  `--allowedTools`, not by `--dangerously-skip-permissions` — and managed hooks survive a
-  user `disableAllHooks`. `managed-settings.json` gives the deny-list + guardrails as a
-  low-disruption floor; `managed-settings.strict.json` adds `allowManagedHooksOnly`,
-  `allowManagedPermissionRulesOnly`, and `strictPluginOnlyCustomization` (≥ v2.1.82) to
-  allow *only* managed/plugin sources. This is also where the `configGuard` residual below
-  gets non-overridable, org-wide coverage.
+  per-OS `managed-settings.json` path). Two properties are documented and are the ones
+  the floor rests on: a managed `deny` can't be overridden — not by `--allowedTools`,
+  not by `--dangerously-skip-permissions` — and managed hooks survive a
+  `disableAllHooks` set anywhere below the managed tier. (Those two are what
+  `managed/README.md`'s acceptance test proves; don't extrapolate a third.)
+  `managed-settings.json` gives the deny-list + guardrails as a low-disruption floor;
+  `managed-settings.strict.json` adds `allowManagedHooksOnly`,
+  `allowManagedPermissionRulesOnly`, and `strictPluginOnlyCustomization` to allow
+  *only* managed/plugin sources — the exact release that introduced that last key is
+  not documented in the changelog, so verify it against the settings docs for the
+  version you deploy. This is also where the `configGuard` residual below gets
+  non-overridable, org-wide coverage.
 - **Allowlist-primary posture (OWASP).** *(Shipped — see [`managed/allowlist.example.json`](managed/allowlist.example.json).)*
   Our deny-list blocks *known-bad*; the inverse — grant only what's needed, deny the rest —
   is OWASP's preferred posture. The supported mechanism is `permissions.defaultMode: "dontAsk"`
   (auto-denies anything not in `permissions.allow`) + a minimal `allow`, with the secrets
-  `deny` kept as a backstop for Claude's Read *tool* (deny beats allow, so the Read tool can't
-  read a repo `.env` even though `Read(./**)` is allowlisted) and an OS-level `sandbox`
-  (macOS/Linux/WSL2). Two honest limits: **a catch-all `deny(**)` + narrow `allow` does NOT
-  work** (deny is categorical and always wins), and **no setting stops `cat .env` via a Bash
-  subprocess** (the deny is Read-tool-only; `dontAsk` still runs read-only Bash) — so repo
-  secrets rely on hygiene (don't keep them on disk) + the sandbox's network egress allowlist.
-  High friction (every action pre-approved); best for high-assurance repos.
+  `deny` kept as a backstop (deny beats allow, so `.env` stays unreadable even though
+  `Read(./**)` is allowlisted — and that covers `cat .env` too, per 2.3) and an OS-level
+  `sandbox` (macOS/Linux/WSL2). Three honest limits: **a catch-all `deny(**)` + narrow
+  `allow` does NOT work** (deny is categorical and always wins); **a permission rule
+  cannot stop a subprocess that opens the file itself** (`python -c "open('.env')"`) —
+  that one is closed by `sandbox.filesystem.denyRead`, which the OS enforces against
+  every child process and which *does* accept project-relative `./.env` in project
+  settings; and **the network allowlist only prompts unless `strictAllowlist: true`**,
+  which is honored from user, managed, or `--settings` scope and has no effect in a
+  repo's own `settings.json` — so a per-repo deployment leaves egress as a question,
+  not a block. High friction (every action pre-approved); best for high-assurance repos.
 - **In-session settings-tamper detection.** *(Shipped — opt-in `configGuard`.)* The
   `ConfigChange` hook `modules/config-guard.sh` watches `.claude/settings.json`
   (`source: project_settings`) and, on each change, rejects (block) or reports (warn)
@@ -532,8 +640,14 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
   governs the agent's tools). Anthropic's team-security guidance recommends this, and
   CVE-2025-59536 is why it matters. **Scope note:** `ConfigChange` fires only for
   Claude Code *settings* files, so it does **not** cover `.claude/baseline.config.json`
-  or the hook scripts — those remain protected against the agent by the deny-list, and
-  a non-overridable floor for human/external edits is the managed-settings work above.
+  or the hook scripts. Those are covered against the agent by deny rules — including
+  `Bash(*.claude/baseline.config.json*)` and its PowerShell/backslash variants, which
+  match the command **text**, so they stop `sed -i … .claude/baseline.config.json` but
+  not a `cd .claude` first or a path assembled from a variable; command-guard's own
+  tamper rule is the other half of that. A non-overridable floor for human/external
+  edits is the managed-settings work above. Note the deliberate side effect of a
+  text match: read-only shell access to those paths (`cat .claude/settings.json`,
+  `git add .claude/settings.json`) is refused too.
 - **Gate baseline changes in CI.** *(Shipped — see `tests/`.)* `bash tests/run.sh`
   runs the versioned adversarial suite (`test_command_guard.py` matcher fixtures
   incl. evasions + `test_hooks.sh` end-to-end), and `tests/policy-change-gate.sh`
@@ -595,7 +709,7 @@ live event.
 - **Matcher** — which tool(s) a hook watches (`Bash`, `Write|Edit`, …).
 - **Payload** — the JSON about the tool call, delivered to the hook on stdin.
 - **Exit code** — how a hook reports back; `2` = "stop / here's feedback", `0` = no objection.
-- **Guardrail** — an always-on safety *control*: a hook *or* a permission rule. Our three: command-guard and auto-format (hooks) + the secrets deny-list (a `permissions.deny` rule).
+- **Guardrail** — a universal safety *control*: a hook *or* a permission rule. The two always-on ones are command-guard (a hook) and the secrets deny-list (a `permissions.deny` rule); `autoFormat` is a guardrail that ships disabled because it executes repo-supplied code.
 - **Module** — an opt-in, workflow-specific hook (off by default).
 - **Posture** — the global `enforcement` setting: `block` or `warn`.
 - **Dispatcher** — the single `PostToolUse` entry point that runs the file hooks in order.
@@ -610,7 +724,8 @@ Enable a module .......... edit .claude/baseline.config.json → modules.<name>.
 Switch posture ........... .claude/baseline.config.json → "enforcement": "block" | "warn"
 Add a blocked command .... guardrails.commandGuard.extraPatterns: ["terraform destroy"]
 See a hook fire .......... echo '<payload>' | CLAUDE_PROJECT_DIR="$PWD" bash .claude/hooks/baseline/<hook>; echo $?
-Blocked? ................. read stderr → fix it, OR open a config PR, OR ping the security lead
+Blocked? ................. read stderr → fix it, OR open a config PR, OR ask .claude/** CODEOWNERS
+Found a bypass? .......... do NOT open a public issue → SECURITY.md (private reporting)
 ```
 
 ### C. Troubleshooting
@@ -626,6 +741,16 @@ Blocked? ................. read stderr → fix it, OR open a config PR, OR ping 
   unaffected. Set `failClosed: false` to downgrade to warnings.
 - **Windows / WSL / Git Bash paths.** Hooks run via `bash` and already handle CRLF
   and Windows-style paths; `CLAUDE_PROJECT_DIR` is set by Claude Code.
+- **Windows *without* Git Bash — the one configuration where the hooks don't run.**
+  There, Claude Code doesn't register the Bash tool; it uses the PowerShell tool.
+  The matcher is `Bash|PowerShell` so it does fire — but the hook *command* is
+  `bash "…/command-guard.sh"`, and with no `bash` on PATH that command can't launch.
+  Claude Code treats a hook that fails to launch as no objection, so command-guard is
+  absent, silently, while `tools/baseline-status.sh` still reports the baseline
+  installed. What still works on such a host is the `permissions.deny` list
+  (including the `PowerShell(Remove-Item *)` / `Invoke-WebRequest` / `Invoke-Expression`
+  floor), because permission rules need nothing installed. Install Git Bash or run
+  Claude Code inside WSL2 if you want the hook layer.
 - **A hook is too aggressive.** Switch that repo to `warn`, or narrow the rule /
   pattern via a reviewed config PR — don't edit the hook script in place.
 - **A `securityDefaults` rule isn't blocking, or every infra edit suddenly fails.**

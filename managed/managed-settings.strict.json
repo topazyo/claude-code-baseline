@@ -8,16 +8,48 @@
       "Edit(.claude/baseline.config.json)",
       "Edit(.claude/settings.json)",
       "Edit(.claude/settings.local.json)",
-      "Edit(.claude/hooks/baseline/**)"
+      "Edit(.claude/hooks/baseline/**)",
+
+      "Bash(*.claude/baseline.config.json*)",
+      "Bash(*.claude/settings.json*)",
+      "Bash(*.claude/settings.local.json*)",
+      "Bash(*.claude/hooks/baseline/*)",
+
+      "PowerShell(*.claude/baseline.config.json*)",
+      "PowerShell(*.claude\\baseline.config.json*)",
+      "PowerShell(*.claude/settings.json*)",
+      "PowerShell(*.claude\\settings.json*)",
+      "PowerShell(*.claude/settings.local.json*)",
+      "PowerShell(*.claude\\settings.local.json*)",
+      "PowerShell(*.claude/hooks/baseline/*)",
+      "PowerShell(*.claude\\hooks\\baseline\\*)",
+
+      "PowerShell(Remove-Item *)",
+      "PowerShell(rm *)",
+      "PowerShell(rm.exe *)",
+      "PowerShell(del *)",
+      "PowerShell(rmdir *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(iwr *)",
+      "PowerShell(Invoke-RestMethod *)",
+      "PowerShell(irm *)",
+      "PowerShell(curl *)",
+      "PowerShell(curl.exe *)",
+      "PowerShell(wget *)",
+      "PowerShell(wget.exe *)",
+      "PowerShell(Invoke-Expression *)",
+      "PowerShell(iex *)",
+      "PowerShell(git push*--force*)",
+      "PowerShell(git.exe push*--force*)"
     ]
   },
   "allowManagedPermissionRulesOnly": true,
   "allowManagedHooksOnly": true,
-  "strictPluginOnlyCustomization": ["skills", "hooks", "agents", "mcpServers"],
+  "strictPluginOnlyCustomization": ["skills", "hooks", "agents", "mcp"],
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
