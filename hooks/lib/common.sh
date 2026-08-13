@@ -31,9 +31,29 @@ unset _BCL_PY _bcl_v
 # (and keeps the PostToolUse chain inside its hook budget — see bcl_cfg).
 bcl_python() {
   if [[ -n "${_BCL_PY+x}" ]]; then printf '%s' "$_BCL_PY"; return 0; fi
-  if command -v python3 >/dev/null 2>&1; then _BCL_PY=python3
-  elif command -v python >/dev/null 2>&1; then _BCL_PY=python
-  else _BCL_PY=""; fi
+  local cand path
+  _BCL_PY=""
+  for cand in python3 python; do
+    path="$(command -v "$cand" 2>/dev/null)" || continue
+    [[ -z "$path" ]] && continue
+    # Skip the Windows Store "app execution alias". On a default Windows install
+    # `python3` resolves to %LOCALAPPDATA%\Microsoft\WindowsApps\python3, a stub that
+    # routes every launch through the Store app layer: measured ~2000ms per start
+    # versus ~220ms for the same CPython invoked directly, and `-S -E` does not help
+    # because the cost is the alias, not site-packages. Hooks run per tool call and
+    # spawn an interpreter per helper, so that difference is the whole latency budget.
+    case "$path" in
+      *[Ww]indows[Aa]pps*) continue ;;
+    esac
+    _BCL_PY="$cand"; break
+  done
+  # If the alias is the ONLY interpreter, use it anyway — slow beats inert, since an
+  # unresolvable interpreter silently disables every opt-in module.
+  if [[ -z "$_BCL_PY" ]]; then
+    if command -v python3 >/dev/null 2>&1; then _BCL_PY=python3
+    elif command -v python >/dev/null 2>&1; then _BCL_PY=python
+    fi
+  fi
   printf '%s' "$_BCL_PY"
 }
 
