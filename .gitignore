@@ -1,6 +1,7 @@
 # Local Claude Code / OMC session state — never publish
 .omc/
-.claude/settings.local.json
+.claude/
+CLAUDE.md
 
 # Python build artifacts (these embed absolute authoring paths)
 __pycache__/
@@ -17,3 +18,4 @@ OPEN-QUESTIONS-PLAN.md
 .DS_Store
 Thumbs.db
 *.swp
+session-logs/
