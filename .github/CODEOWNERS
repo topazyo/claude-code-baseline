@@ -5,14 +5,14 @@
 # Consumers who install this baseline should add the equivalent rule to their
 # own repo:  /.claude/**  @their-security-team
 #
-# Replace @OWNER with the maintaining GitHub user or team before publishing.
+# Maintainer. Replace with a security team handle if ownership moves.
 
-/hooks/                     @OWNER
-/lib/                       @OWNER
-/managed/                   @OWNER
-/settings.template.json     @OWNER
-/baseline.config.json       @OWNER
-/install.sh                 @OWNER
-/tests/                     @OWNER
-/.github/                   @OWNER
-/SECURITY.md                @OWNER
+/hooks/                     @topazyo
+/lib/                       @topazyo
+/managed/                   @topazyo
+/settings.template.json     @topazyo
+/baseline.config.json       @topazyo
+/install.sh                 @topazyo
+/tests/                     @topazyo
+/.github/                   @topazyo
+/SECURITY.md                @topazyo
