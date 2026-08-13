@@ -13,13 +13,31 @@
 
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]%/*} rather than $(dirname ...): dirname is an external binary
+# under Git Bash and a fork measures ~21ms here — paid by every hook, on every tool call.
+HERE="${BASH_SOURCE[0]%/*}"
+[[ "$HERE" == "${BASH_SOURCE[0]}" ]] && HERE=.
+HERE="$(cd "$HERE" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
 
+# Bounded read before the gate, so one prime can cover both the config and the
+# payload. `cat` blocked until EOF and nothing guarantees EOF; a wedged hook is
+# killed by Claude Code without ever running its checks.
+read_rc=0
+bcl_read_payload PAYLOAD || read_rc=1
+bcl_prime "$PAYLOAD"
+
 bcl_module_enabled runTests || exit 0
 
-PAYLOAD="$(cat 2>/dev/null || true)"
+# An unread payload is not fatal HERE, unlike in the guards: the dispatcher passes
+# the changed file separately in CLAUDE_TOOL_FILE, and the last-resort target is
+# "." — the whole suite, i.e. more checking rather than less. Say so anyway; a
+# silent switch to a different target is how a "passed" line stops meaning anything.
+if [[ $read_rc -ne 0 ]]; then
+  echo "[run-tests] NOTE: could not read the tool payload from stdin ($BCL_READ_ERROR); falling back to CLAUDE_TOOL_FILE${CLAUDE_TOOL_FILE:+ ($CLAUDE_TOOL_FILE)}." >&2
+fi
+
 cd "$(bcl_repo_root)" || { echo "[run-tests] could not enter repo root — checks skipped." >&2; exit 0; }
 
 # Prefer the explicit changed file passed by the dispatcher; fall back to payload.

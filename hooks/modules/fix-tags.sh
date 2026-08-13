@@ -16,9 +16,18 @@
 
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]%/*} rather than $(dirname ...): dirname is an external binary
+# under Git Bash and a fork measures ~21ms here — paid by every hook, on every tool call.
+HERE="${BASH_SOURCE[0]%/*}"
+[[ "$HERE" == "${BASH_SOURCE[0]}" ]] && HERE=.
+HERE="$(cd "$HERE" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
+
+# ONE interpreter for every config key this module reads (the enable gate, the env
+# gate, tagMarker, fileRegex) instead of one per key. No argument: this hook does not
+# read stdin, so the payload helpers stay on their per-call path.
+bcl_prime
 
 bcl_module_enabled fixTags || exit 0
 

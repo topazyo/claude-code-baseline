@@ -43,14 +43,34 @@
 
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]%/*} rather than $(dirname ...): dirname is an external binary
+# under Git Bash and a fork measures ~21ms here — paid by every hook, on every tool call.
+HERE="${BASH_SOURCE[0]%/*}"
+[[ "$HERE" == "${BASH_SOURCE[0]}" ]] && HERE=.
+HERE="$(cd "$HERE" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
+
+# Bounded read before the gate, so one prime covers the config and the payload.
+# `cat` blocked until EOF, and this is the child the dispatcher already treats as
+# the unbounded one — a wedged read here is exactly what the reordering in
+# dispatcher/post-write.sh was written to stop being able to starve the gates.
+read_rc=0
+bcl_read_payload PAYLOAD || read_rc=1
+bcl_prime "$PAYLOAD"
 
 # Deliberately bcl_guardrail_opted_in (default FALSE), not bcl_guardrail_enabled
 # (default true): a guardrail that executes code must never run because a config
 # file was missing or unreadable.
 bcl_guardrail_opted_in autoFormat || exit 0
+
+# No payload means no file list, and formatting is a best-effort side effect that
+# must never block a write. Announce and stop — running formatters against a target
+# we did not actually read would be worse than doing nothing.
+if [[ $read_rc -ne 0 ]]; then
+  echo "[auto-format] NOTE: could not read the tool payload from stdin ($BCL_READ_ERROR); nothing was formatted." >&2
+  exit 0
+fi
 
 # Second gate for repo-supplied executables. Computed once, checked at each call
 # site, so no future edit can reach a ./node_modules/.bin exec without it.
@@ -60,8 +80,6 @@ REPO_BINARIES_OK=0
 # Run from the repo root so repo-relative paths (and, when explicitly allowed,
 # project-local tool binaries) resolve regardless of the hook's working directory.
 cd "$(bcl_repo_root)" 2>/dev/null || true
-
-PAYLOAD="$(cat 2>/dev/null || true)"
 
 run_if_available() { command -v "$1" >/dev/null 2>&1; }
 

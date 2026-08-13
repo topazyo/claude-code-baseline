@@ -27,7 +27,11 @@
 
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]%/*} rather than $(dirname ...): dirname is an external binary
+# under Git Bash and a fork measures ~21ms here — paid by every hook, on every tool call.
+HERE="${BASH_SOURCE[0]%/*}"
+[[ "$HERE" == "${BASH_SOURCE[0]}" ]] && HERE=.
+HERE="$(cd "$HERE" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
 
@@ -36,6 +40,18 @@ source "$HERE/../lib/common.sh"
 # treated as disabled), like every other opt-in module. The no-Python case is
 # covered elsewhere: the always-on command-guard guardrail fails closed without
 # Python, and the secrets/tamper deny-list is a permission rule (no Python needed).
+# Read stdin BEFORE the enable-gate, then prime once from what we read: the gate
+# needs the config and priming needs the payload, and doing them separately would
+# cost two interpreter starts. Acting on a read failure is deferred until after the
+# gate so a repo that disabled configGuard still exits 0 rather than being blocked.
+read_rc=0
+bcl_read_payload PAYLOAD || read_rc=1
+
+# ONE interpreter for the config, the payload state, and both payload fields this
+# module extracts. That is 5 interpreter starts down to 2 — this prime, plus the
+# settings integrity check below, which is the only one doing real work.
+bcl_prime "$PAYLOAD"
+
 bcl_module_enabled configGuard || exit 0
 
 # Reaching here means the module is enabled, which required Python above. Resolve it
@@ -46,7 +62,15 @@ if [[ -z "$PY" ]]; then
   bcl_failclosed_exit; exit $?
 fi
 
-PAYLOAD="$(cat 2>/dev/null || true)"
+# Could not read stdin at all: distinct from both "empty" and "unparseable", and
+# reported separately so the cause stays diagnosable. `cat` used to block until EOF,
+# so this hook ran until Claude Code killed it — and a killed hook never reaches the
+# fail-closed branches at all, meaning the tamper check silently did not run.
+if [[ $read_rc -ne 0 ]]; then
+  echo "[config-guard] CONTROL COULD NOT RUN — could not read the ConfigChange payload from stdin: $BCL_READ_ERROR; the change was NOT integrity-checked." >&2
+  bcl_failclosed_exit; exit $?
+fi
+
 # Empty payload => nothing to inspect (consistent with the other guards). A
 # present-but-unparseable payload IS a "control could not read its input" state.
 [[ -z "${PAYLOAD//[[:space:]]/}" ]] && exit 0

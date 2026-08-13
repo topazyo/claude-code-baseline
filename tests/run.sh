@@ -53,6 +53,18 @@ else
 fi
 bash "$ROOT/tests/test_status.sh" || fail=1
 
+echo "== 7. hot-path hook latency budgets =="
+# Every other step here asserts exit codes, and an exit code has no clock on it —
+# which is how a 17.4s post-write dispatcher survived a full review. This step times
+# the hooks that run on every tool call and fails if one is an order of magnitude
+# over budget. It installs the baseline, so it needs git like step 4; it skips
+# cleanly (exit 0) on a host whose `date` has no nanosecond precision.
+if command -v git >/dev/null 2>&1; then
+  bash "$ROOT/tests/test_latency.sh" || fail=1
+else
+  echo "   SKIP (git not available)"
+fi
+
 echo ""
 if [ "$fail" -eq 0 ]; then echo "ALL GREEN"; else echo "FAILURES ABOVE"; fi
 exit $fail

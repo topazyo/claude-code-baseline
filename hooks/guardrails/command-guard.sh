@@ -31,13 +31,38 @@
 
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]%/*} rather than $(dirname ...): dirname is an external binary
+# under Git Bash and a fork measures ~21ms here — paid by every hook, on every tool call.
+HERE="${BASH_SOURCE[0]%/*}"
+[[ "$HERE" == "${BASH_SOURCE[0]}" ]] && HERE=.
+HERE="$(cd "$HERE" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
 
+# Read stdin BEFORE the enable-gate, then prime once from what we read. The gate
+# needs the config, priming needs the payload, and each extra prime is a whole
+# interpreter start on the hook that runs before EVERY Bash call — so we do both in
+# one call and defer *acting* on a read failure until after the gate, below. A
+# repo that disabled commandGuard must still exit 0, not get blocked by our stdin.
+read_rc=0
+bcl_read_payload PAYLOAD || read_rc=1
+
+# ONE interpreter for the guardrail gate and the payload state, leaving the matcher
+# below as the only other process this guard starts. It runs before EVERY Bash tool
+# call, so this is the hook where a saved interpreter start is felt most.
+bcl_prime "$PAYLOAD"
+
 bcl_guardrail_enabled commandGuard || exit 0
 
-PAYLOAD="$(cat)"
+# A guard that could not read its input must not wave the command through. `cat`
+# used to block until EOF, so a caller that left stdin open wedged this hook until
+# Claude Code killed it — and a killed PreToolUse hook emits no exit 2, so the
+# command ran uninspected. Distinct message from the unparseable case below so the
+# two causes stay diagnosable.
+if [[ $read_rc -ne 0 ]]; then
+  echo "[command-guard] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR; the command was NOT inspected." >&2
+  if bcl_failclosed_exit; then exit 0; else exit 2; fi
+fi
 
 # Empty payload -> no command to inspect (nothing to check) -> allow. (Without
 # this, an empty payload would reach the matcher and trip its parse-error path.)

@@ -17,9 +17,10 @@ on any failure. Runs under Linux, WSL, macOS, and Git Bash on Windows.
 
 | File | What it checks |
 |------|----------------|
-| `run.sh` | Aggregate runner: shell `bash -n`, Python `py_compile`, then the two suites below. |
+| `run.sh` | Aggregate runner: shell `bash -n`, Python `py_compile`, then the suites below. |
 | `test_command_guard.py` | Pure unit fixtures for the matcher (`hooks/lib/command_guard_match.py:evaluate`): the original blocklist, evasion variants (whitespace, quoting, flag reordering, wrappers, compound commands, `//`/`$HOME/`/`./*`, `--force-with-lease=ref`, `python -mpip`…), intentional non-targets (`rm -rf ./build` stays allowed), false-positive regressions (`grep -e "delete from"`, `git rm -rf .`, `npm run install:ci`…), and documented known-limits (base64 / `$VAR` indirection). |
 | `test_hooks.sh` | End-to-end: installs the baseline into a throwaway repo and exercises each hook's exit codes — command-guard, security-defaults fail-closed (missing/malformed/empty rules), exit-2 semantics, posture (`block`/`warn`/`failClosed`) toggles, malformed-config, scope-guard, fix-tags. |
+| `test_latency.sh` | **Latency regression gate** (`run.sh` step 7). Installs the baseline into a throwaway repo and times the hot-path hooks — command-guard (every Bash call), the post-write dispatcher (every Write/Edit), scope-guard, and config-guard — failing if one exceeds its budget. |
 | `policy-change-gate.sh` | **Release gate.** Fails if a change touches `command-guard.sh`, the matcher, `common.sh`, or `settings.template.json` (the deny-list) without also touching `tests/`. |
 
 ## Adding a rule? Add a fixture.
@@ -62,6 +63,43 @@ command-traffic denominator, so any percentage would be theater). The budget is 
 
 A new *blocked* pattern is the mirror image: add the `B` fixture + its evasions + a
 near-miss `A`, never flipping an existing `A` to blocked.
+
+## Latency budgets (`test_latency.sh`)
+
+Every other test here asserts on exit codes, and an exit code has no clock on it.
+That is how a **17.4s** post-write dispatcher and a **5.6s** command-guard — one on
+every file write, the other on every Bash call — survived a full adversarial review.
+A security control that costs seconds per command gets switched off, and a control
+that is switched off is a security outcome, so latency is a tested property here.
+
+**What it measures.** The hooks on the hot path, each fed a payload on stdin and
+timed as a process. The test is deliberately behavioural (payload in, exit code out):
+it knows nothing about interpreter counts, memoisation, or `common.sh` internals, so
+it survives refactors of them. It also asserts the expected exit code for each run —
+without that, a hook that crashed on line 1 would post a superb time and pass.
+
+**Why min-of-N, not a mean or a single sample.** Windows antivirus and filesystem
+noise produce large one-off spikes: a bare interpreter start was observed at both
+61ms and 1150ms on the same machine in one session. A mean inherits every spike and
+makes the gate flaky, which is how latency tests get muted rather than fixed. The
+minimum answers "how fast can this hook go on this host" — the property a real
+regression actually moves, since a regression slows the fast path too. `REPS=5`.
+
+**Budgets are ceilings, not targets**, and each sits in the empty band between the
+healthy and the regressed population (~3-6x above measured, comfortably below the
+pre-fix value). To adjust one, edit the `BUDGET_*` constants near the top of
+`test_latency.sh` — and update the measured-numbers comment above them in the same
+change, so drift stays visible to the next reader. The measurement for every hook is
+printed on **every** run, passing or failing, so a hook creeping from 500ms toward
+its budget is visible in CI logs before it crosses.
+
+Raising a budget is a finding to explain, not a chore: the usual cause of a failure
+is a helper that spawns its own interpreter per call, and the fix belongs in the
+hook, not in the constant.
+
+**Skips cleanly** (exit 0, with a message) where `date +%s%N` has no nanosecond
+precision — BSD/macOS `date` prints a literal `N`. A latency test that reports a
+false failure on a developer's machine gets deleted, not fixed.
 
 ## CI
 

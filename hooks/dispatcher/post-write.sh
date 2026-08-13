@@ -29,11 +29,31 @@
 
 set -uo pipefail
 
-HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ${BASH_SOURCE[0]%/*} rather than $(dirname ...): dirname is an external binary
+# under Git Bash and a fork measures ~21ms here — paid on every tool call.
+HOOKS_DIR="${BASH_SOURCE[0]%/*}"
+[[ "$HOOKS_DIR" == "${BASH_SOURCE[0]}" ]] && HOOKS_DIR=.
+HOOKS_DIR="$(cd "$HOOKS_DIR/.." && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HOOKS_DIR/lib/common.sh"
 
-PAYLOAD="$(cat 2>/dev/null || true)"
+# Bounded read. `cat` blocked until EOF and nothing guarantees EOF; a caller that
+# leaves stdin open used to wedge this hook until Claude Code KILLED it, and a killed
+# hook never reaches the fail-closed branches below. A read that fails is not an
+# empty payload, so it lands here rather than in the "nothing to inspect" path.
+if ! bcl_read_payload PAYLOAD; then
+  {
+    echo "[baseline] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR."
+    echo "   No PostToolUse check ran for this edit; the changed files were NOT inspected."
+  } >&2
+  bcl_failclosed_exit; exit $?
+fi
+
+# ONE interpreter for the whole hook: this parses baseline.config.json and the
+# payload in a single process and publishes the results as shell variables, so the
+# three checks below (config state, payload state, path extraction) cost no further
+# spawns. They used to cost one interpreter start each.
+bcl_prime "$PAYLOAD"
 
 # Fail-closed visibility: without Python, every config-driven check is dark
 # (module enable-state, posture, rules, and path extraction all need it). Never
@@ -75,11 +95,14 @@ export CLAUDE_TOOL_FILE="$FIRST_FILE"
 # Claude Code kills produces no exit code at all and the write stands unreviewed.
 # If you raise one of these, raise the wired timeout by at least as much.
 #
-# Sizing note: the gates are generous because their cost is dominated by Python
-# process startup, which is cheap on Linux/macOS but measured in SECONDS per spawn
-# under Git Bash on Windows. A gate that overruns is a loud fail-closed block, not a
-# silent pass — if a slow host trips one, raise its constant AND the wired timeout
-# together, or set failClosed:false to downgrade the overrun to a warning.
+# Sizing note: the gates are generous because their FIXED cost is process startup,
+# not the checking. Each child now pays one interpreter start (bcl_prime) plus a
+# handful of forks; measured under Git Bash on Windows that is ~60ms for the
+# interpreter and ~27ms per fork, against ~5ms and well under 1ms on Linux. The
+# budgets are sized for the slow end of that range and for the real work on top.
+# A gate that overruns is a loud fail-closed block, not a silent pass — if a slow
+# host trips one, raise its constant AND the wired timeout together, or set
+# failClosed:false to downgrade the overrun to a warning.
 TO_SECURITY_DEFAULTS=25
 TO_FIX_TAGS=18
 TO_RUN_TESTS=27

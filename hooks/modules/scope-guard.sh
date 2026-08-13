@@ -14,13 +14,34 @@
 
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]%/*} rather than $(dirname ...): dirname is an external binary
+# under Git Bash and a fork measures ~21ms here — paid by every hook, on every tool call.
+HERE="${BASH_SOURCE[0]%/*}"
+[[ "$HERE" == "${BASH_SOURCE[0]}" ]] && HERE=.
+HERE="$(cd "$HERE" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
 
+# Read stdin BEFORE the enable-gate, then prime once: the gate needs the config and
+# priming needs the payload, so doing them separately costs two interpreter starts.
+# Acting on a read failure is deferred until after the gate, so a repo that disabled
+# scopeGuard still exits 0 rather than having its edits blocked by our stdin.
+read_rc=0
+bcl_read_payload PAYLOAD || read_rc=1
+
+# ONE interpreter for the config, the payload state and the extracted file_path.
+bcl_prime "$PAYLOAD"
+
 bcl_module_enabled scopeGuard || exit 0
 
-PAYLOAD="$(cat 2>/dev/null || true)"
+# Could not read stdin: `cat` blocked until EOF, so a caller that left stdin open
+# wedged this hook until Claude Code killed it — and a killed PreToolUse hook emits
+# no exit 2, so the edit proceeded unchecked. Same fail-closed destination as an
+# unparseable payload, with its own message so the two causes stay distinguishable.
+if [[ $read_rc -ne 0 ]]; then
+  echo "[scope-guard] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR; edit was NOT scope-checked." >&2
+  bcl_failclosed_exit; exit $?
+fi
 
 # A PreToolUse control must not silently allow when it cannot read its input.
 # (No-Python disables this opt-in module's gating, but that degradation is
