@@ -7,22 +7,51 @@
 # another repo it is dormant; run `bash tests/run.sh` locally instead.
 name: claude-code-baseline CI
 
+# No `paths:` filter, deliberately. It previously listed hooks/tests/lib/*.json/
+# install.sh, which excluded managed/** and tools/** — the managed-settings
+# profiles and the drift reporter got ZERO CI, and the policy gate names two of
+# those managed files as high-risk. A filtered-out job reports no status rather
+# than a failing one, and an absent check reads as a green check on the PR page,
+# so the gap was invisible. Everything is cheap to run; run it on everything.
 on:
   push:
-    paths: ["hooks/**", "tests/**", "lib/**", "*.json", "install.sh"]
   pull_request:
-    paths: ["hooks/**", "tests/**", "lib/**", "*.json", "install.sh"]
+  workflow_dispatch:
+
+# Least privilege for GITHUB_TOKEN. Without this the token inherits the
+# repository default, which is often read/write on older repositories — far more
+# than a test run needs, and a standing target for anything that can influence a
+# build step. Jobs may narrow further, never widen.
+permissions:
+  contents: read
 
 jobs:
   test:
-    name: Test suite
-    runs-on: ubuntu-latest
+    name: Test suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report every OS independently: a Windows-only regression must not be
+      # masked by cancelling the matrix on the first Linux failure.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # Actions are pinned to a full commit SHA, not a tag. A tag is mutable: the
+      # publisher can repoint v7 at new code, so a tag reference is an unreviewed
+      # dependency that updates itself inside a job holding the repo token. The
+      # trailing comment carries the human-readable version, since the SHA alone
+      # tells a reviewer nothing about how stale the pin is.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
       - name: Run baseline test suite
+        # `shell: bash` on windows-latest uses the bundled Git Bash, which is the
+        # environment the install and hook scripts actually target on Windows.
+        # This job exists because the docs claim Windows support and nothing
+        # verified it: the interpreter-resolution and CRLF defects were both
+        # Windows-only and both reached main.
+        shell: bash
         run: bash tests/run.sh
 
   policy-gate:
@@ -30,10 +59,14 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Full history: the gate diffs against the merge base, which a shallow
+          # clone cannot compute.
           fetch-depth: 0
       - name: Fetch base ref
-        run: git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+        # Unshallowed fetch of the base branch. --depth=1 here would defeat the
+        # merge-base lookup the gate performs.
+        run: git fetch --no-tags origin "${{ github.base_ref }}"
       - name: Require updated fixtures when policy/matcher changes
         run: bash tests/policy-change-gate.sh "origin/${{ github.base_ref }}"
