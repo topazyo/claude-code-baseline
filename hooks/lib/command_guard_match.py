@@ -18,8 +18,9 @@ normalizer was defeated by ordinary shell quoting):
     quoted string is part of the string, and a trailing backslash continues the
     line, so a multi-line commit message, PR body or backslash-continued command is one
     command -- splitting those on every newline used to block them as unbalanced.
-    A logical line that spans several physical lines is inspected TWICE: tokenized
-    as a whole, and every physical line again with its quotes deleted. This quote
+    A logical line that spans several physical lines is also inspected piecewise:
+    every physical line, and every chain of continued lines ignoring quotes and
+    comments, each read with its quotes deleted and with quotes kept. This quote
     scanner does not model bash comments, the fresh quoting context inside "$(...)",
     $'...' strings or heredoc bodies, and a divergence there could otherwise pass a
     real command off as part of a string; the quote-blind pass still inspects it,
@@ -76,6 +77,9 @@ import sys
 
 # Hard input cap. Anything larger is blocked unparsed (see docstring; review S1).
 _MAX_INSPECT_LEN = 4096
+# Cap on the text the continuation-chain pass may build from one command (it is
+# quadratic in the length of a run of continued lines). Past it: BLOCK.
+_MAX_CHAIN_CHARS = 131072
 
 # Catastrophic delete "roots" (after canonicalization). Targeted paths are allowed.
 _DANGER_ROOTS = {"/", ".", "..", "*", "~", "$home", "${home}", "/*"}
@@ -540,7 +544,10 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash"):
         # ValueError (unbalanced quoting) -> caller blocks
         segments.extend(_words_to_segments(shlex.split(logical, posix=True)))
         if len(physical) > 1:
-            for line in physical:
+            # Physical lines, plus every continuation chain regardless of quote
+            # state: a desync that leaves the scanner inside a quote also stops it
+            # joining `git push \` + newline + `--force`, which bash still joins.
+            for line in dict.fromkeys(physical + _cont_chains(physical)):
                 for toks in _words_to_segments(_lenient_words(line)):
                     lenient.append(toks)
                     lenient.extend(_lenient_inline(toks))
@@ -599,6 +606,41 @@ def _lenient_inline(toks):
     return out
 
 
+class _Uninspectable(ValueError):
+    """Input the extra passes refuse to expand; evaluate() blocks it."""
+
+
+def _continues(line: str) -> bool:
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
+
+
+def _cont_chains(physical):
+    """Every continuation chain: from EACH line, joined with the lines it continues into.
+
+    Quotes are ignored, and so are comments: bash never continues a comment line,
+    but whether a `#` starts a comment depends on the quoting this pass does not
+    trust. So a chain starts at every line, not only at the first line of a run of
+    continued lines -- `echo ok #\\` + `git push \\` + `--force` must yield the
+    chain starting at `git push`. That is quadratic in the run length, so the
+    joined text is capped and anything past the cap is blocked, never skipped.
+    """
+    out, total, n = [], 0, len(physical)
+    for s in range(n):
+        if not _continues(physical[s]):
+            continue                     # a lone line is inspected on its own already
+        buf, j = "", s
+        while j < n and _continues(physical[j]):
+            buf += physical[j][:-1]
+            j += 1
+        chain = buf + (physical[j] if j < n else "")
+        total += len(chain)
+        if total > _MAX_CHAIN_CHARS:
+            raise _Uninspectable(
+                f"continued lines too long to inspect (> {_MAX_CHAIN_CHARS} chars joined)")
+        out.append(chain)
+    return out
+
+
 def _is_c_bundle(tok: str) -> bool:
     """A short-flag bundle containing c (-c, -lc, -xc), not a --long option."""
     return tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]
@@ -620,6 +662,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
 
     try:
         segments = _segments(raw, shell=shell)
+    except _Uninspectable as exc:
+        return [f"uninspectable command ({exc})"]
     except ValueError as exc:
         # Unbalanced quoting: the real command words cannot be recovered, so this
         # must not be waved through. Fail closed, like the hook's other

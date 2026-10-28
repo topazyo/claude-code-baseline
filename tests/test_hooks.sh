@@ -244,8 +244,9 @@ echo "== install.sh --enable-security-defaults (post-write demo path) =="
 # step, and refuses unless a rules file will exist: an enabled module with no rules
 # fails closed on every infra write.
 SD1="$(winpath "$TMP/sd-norules")"; mkdir -p "$SD1"; ( cd "$SD1" && git init -q )
-timeout -k 5 120 bash "$SRC/install.sh" --target "$SD1" --enable-security-defaults >/dev/null 2>&1 </dev/null; rc=$?
-if [ "$rc" = 2 ] && [ ! -e "$SD1/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [enable without rules must exit 2 and write nothing (rc=$rc)]"; fi
+sdout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$SD1" --enable-security-defaults 2>&1 </dev/null)"; rc=$?
+# The message, not just rc=2: an installer without the flag also exits 2 ("unknown argument").
+if [ "$rc" = 2 ] && [ ! -e "$SD1/.claude" ] && printf '%s' "$sdout" | grep -qF "needs a rules file"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [enable without rules must refuse with the rules-file message and write nothing (rc=$rc)]"; fi
 SD2="$(winpath "$TMP/sd-demo")"; mkdir -p "$SD2"; ( cd "$SD2" && git init -q )
 sdout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$SD2" --with-openclaw-rules --enable-security-defaults --dry-run 2>&1 </dev/null)"
 if [ ! -e "$SD2/.claude" ] && printf '%s' "$sdout" | grep -qF "would set modules.securityDefaults.enabled"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [dry-run with --enable-security-defaults wrote files or did not say what it would enable]"; fi
@@ -256,10 +257,11 @@ if [ "$sd_on" = "True" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo
 printf 'services:\n  app:\n    image: x\n    user: root\n' > "$SD2/docker-compose.yml"
 ( cd "$SD2" && printf '%s' "$(write_payload "$SD2/docker-compose.yml")" | CLAUDE_PROJECT_DIR="$SD2" bash "$SD2/.claude/hooks/baseline/dispatcher/post-write.sh" >/dev/null 2>&1 ); rc=$?
 if [ "$rc" = 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [post-write violation after enable must exit 2 (rc=$rc)]"; fi
-# An existing config is never rewritten, even with the flag.
-cp "$SD2/.claude/baseline.config.json" "$SD2/.claude/_presd.json"
-timeout -k 5 120 bash "$SRC/install.sh" --target "$SD2" --enable-security-defaults >/dev/null 2>&1 </dev/null
-if cmp -s "$SD2/.claude/baseline.config.json" "$SD2/.claude/_presd.json"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [--enable-security-defaults rewrote an existing config]"; fi
+# An existing config is never rewritten, even with the flag: FRESH (installed above
+# without it) keeps securityDefaults off, the run succeeds, and says so.
+cp "$FRESH/.claude/baseline.config.json" "$FRESH/.claude/_presd.json"
+sdout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$FRESH" --enable-security-defaults 2>&1 </dev/null)"; rc=$?
+if [ "$rc" = 0 ] && cmp -s "$FRESH/.claude/baseline.config.json" "$FRESH/.claude/_presd.json" && printf '%s' "$sdout" | grep -qF "was NOT changed"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [--enable-security-defaults on an existing config must succeed, say so, and not rewrite it (rc=$rc)]"; fi
 
 echo "== install.sh version check (R4) =="
 # Stub a fake 'claude' on PATH (prepended, so it wins over any real CLI) and assert
