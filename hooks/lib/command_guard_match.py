@@ -718,8 +718,9 @@ def _logical_lines(text: str, shell: str = "bash"):
     backslash is joined with the backslash-newline removed, as bash does. For a
     PowerShell payload, an @'...'@ / @"..."@ here-string becomes one POSIX
     single-quoted word; an unterminated one is left raw, so it fails to tokenize and
-    is blocked. Split points are str.splitlines()'s, the same as before this change,
-    so a command whose every line already tokenizes yields logical == physical lines.
+    is blocked. _segments() only passes text whose line breaks are all "\n" (see
+    _WORD_BREAKS), so splitlines() splits exactly there, and a command whose every
+    line already tokenizes yields logical == physical lines.
     """
     phys = text.splitlines()
     ps = shell == "powershell"
@@ -993,6 +994,20 @@ def _lenient_words(line: str):
     return resolved.replace("'", "").replace('"', "").split()
 
 
+# Characters str.splitlines() treats as line breaks but bash reads as part of a word:
+# `rm -rf <VT> ~` is two harmless lines to splitlines() and deletes ~ in bash. Text
+# containing any of them is split in two readings, and the segments of both are
+# judged: each character as a line break (what splitlines() did, and how a line-based
+# shell may read it) and as a space (closest to bash, where it only glues onto a
+# word). CRLF stays one line break in both; backslash-CR-LF is not a continuation in
+# bash, and the line reading keeps that. _segments() applies this to every text it
+# splits, so an inline script whose $'...' decodes to one (`bash -c $'rm -rf \v ~'`)
+# is covered too.
+_WORD_BREAKS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+_AS_LINE_BREAK = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\n"))
+_AS_SPACE = str.maketrans(dict.fromkeys(_WORD_BREAKS, " "))
+
+
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
               piped: bool = False, lenient_on_error: bool = False):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
@@ -1002,6 +1017,12 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     operator tokens end a segment. A logical line that spans several physical lines
     is ALSO inspected line by line, leniently (see _lenient_words).
     """
+    if any(c in raw for c in _WORD_BREAKS):
+        lf = raw.replace("\r\n", "\n")
+        kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
+                  lenient_on_error=lenient_on_error)
+        return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
+                + _segments(lf.translate(_AS_SPACE), _depth, **kw))
     segments, lenient = [], []
     text = _expand_ifs(_slashify_windows_paths(raw))
     if shell == "powershell" and ps_slashes:
@@ -1131,6 +1152,7 @@ def _cont_chains(physical):
 def _is_c_bundle(tok: str) -> bool:
     """A short-flag bundle containing c (-c, -lc, -xc), not a --long option."""
     return tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]
+
 
 
 def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):

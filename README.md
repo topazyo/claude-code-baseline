@@ -65,9 +65,10 @@ rather than waving it through as clean.
   `guardrails.commandGuard.extraPatterns`.
 - **auto-format** — `PostToolUse(Write|Edit)`, **disabled by default**. Formats
   changed files with prettier/eslint, black, or `dotnet format`. It ships off
-  because it is the one hook that *executes code the target repository
-  supplies* — `./node_modules/.bin/*`, repo-controlled `prettier.config.js` /
+  because it *executes code the target repository supplies* —
+  `./node_modules/.bin/*`, repo-controlled `prettier.config.js` /
   `eslint.config.js` and their plugins, and `dotnet format` builds the project.
+  (The opt-in `runTests` module does too: it runs the repo's own tests.)
   Enabling it is a deliberate trade for a repo whose toolchain you trust; see
   [Configure](#configure).
 
@@ -160,6 +161,18 @@ limit — not a bug. Read it before you rely on any of the above.
   binaries — any other runtime (`python -c "urllib.request.urlopen(…)"`,
   `nc`, a language SDK) reaches the network freely. **Egress control belongs to
   the OS sandbox, not to this baseline.**
+- **The hooks trust the interpreter `PATH` gives them.** The baseline's own
+  helpers run the first `python3` (else `python`) on `PATH`, skipping the Windows
+  Store alias unless it is all there is, and always with `-I -S -X utf8`, so
+  nothing in the project, on `PYTHONPATH` or in `site-packages` is imported. An
+  interpreter that itself lives inside the project (an activated in-project
+  virtualenv), in a directory the agent can write, or one a version-manager shim
+  (pyenv, asdf, mise) picks from a project file such as `.python-version` is only
+  as trustworthy as that directory. One that is found but does not run makes
+  command-guard and the post-write checks fail closed; the opt-in scope-guard and
+  config-guard go inert, as they do with no Python at all. The opt-in `autoFormat`
+  and `runTests` deliberately run the repo's own formatter and tests without this
+  isolation.
 - **Below Claude Code v2.1.295, a hook that cannot start most likely fails
   open.** From 2.1.295 the two guards' `"onFailure": "block"` refuses the call
   when the hook can't start, times out, or exits with anything but 0 or 2. Older

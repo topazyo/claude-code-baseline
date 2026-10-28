@@ -109,7 +109,7 @@ fi
 # routes through the fail-closed path — which also covers a pathological command
 # crafted to make the matcher slow.
 match_rc=0
-REASON="$(printf '%s' "$PAYLOAD" | bcl_timeout 5 "$PY" "$MATCHER" "$(bcl_config_path)")" || match_rc=$?
+REASON="$(printf '%s' "$PAYLOAD" | bcl_timeout 5 "$PY" -I -S -X utf8 "$MATCHER" "$(bcl_config_path)")" || match_rc=$?
 
 if [[ $match_rc -eq 124 ]]; then
   echo "[command-guard] CONTROL COULD NOT RUN — matcher exceeded its 5s budget and was killed; the command was NOT fully inspected." >&2

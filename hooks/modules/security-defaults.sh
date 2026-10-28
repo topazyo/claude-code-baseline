@@ -59,14 +59,15 @@ if [[ ! -f "$RULES" ]]; then
   bcl_failclosed_exit; exit $?
 fi
 
-# PYTHONIOENCODING=utf-8: rule messages come from the repo's rules file and routinely
+# -X utf8 (UTF-8 mode): rule messages come from the repo's rules file and routinely
 # contain non-ASCII (an em-dash in examples/security-defaults.openclaw.json). Without
-# it, Windows Python encodes stdout in the legacy code page and one em-dash arrives as
-# the lone byte 0x97 — invalid UTF-8, which is exactly what made the old grep pipeline
-# below declare this stream "binary" and drop the violation text.
+# it, Windows Python encodes stdout in the legacy code page: one em-dash arrives as the
+# lone byte 0x97 — invalid UTF-8, which made the old grep pipeline below declare this
+# stream "binary" and drop the violation text — and a character outside that code page
+# fails to print at all. PYTHONIOENCODING used to do this job; -I ignores it.
 REPO_ROOT="$(bcl_repo_root)"
 py_rc=0
-OUT="$(PYTHONIOENCODING=utf-8 "$PY" - "$RULES" "$REPO_ROOT" "${PATHS[@]}" <<'PY'
+OUT="$("$PY" -I -S -X utf8 - "$RULES" "$REPO_ROOT" "${PATHS[@]}" <<'PY'
 import json, os, re, sys
 rules_path = sys.argv[1]
 repo_root = sys.argv[2]

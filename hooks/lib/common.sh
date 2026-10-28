@@ -79,6 +79,30 @@ BCL_READ_ERROR=""       # set by bcl_read_payload on failure
 # hook's own shell (see its `eval` contract); without a prime this memo is a no-op
 # and each call redoes the `command -v` probes. Those are builtins, so the cost is
 # microseconds — unlike bcl_cfg, whose misses used to cost a whole interpreter start.
+#
+# Every launch of this interpreter by the baseline's own helpers passes `-I -S -X utf8`,
+# right after the interpreter (auto-format's black and run-tests' pytest run the repo's
+# own code by design and are not isolated). Without it, `python -c` and `python -` put the working directory —
+# normally the project the agent is editing — first on sys.path, every launch honours
+# PYTHONPATH and the user site, and the interpreter's site-packages runs its .pth files
+# (an activated in-project .venv puts that directory inside the project). Any of these
+# lets a file written into the project be imported by the hooks' own helpers and decide
+# what they report.
+#   -I       drops the working and script directories from sys.path, and ignores
+#            PYTHON* variables and the user site.
+#   -S       skips site-packages entirely (.pth files, sitecustomize). The helpers
+#            import only the standard library, so they need nothing from it.
+#   -X utf8  decodes stdin and encodes stdout as UTF-8 on every platform. -I ignores
+#            PYTHONUTF8/PYTHONIOENCODING, and without UTF-8 mode Windows reads
+#            a non-ASCII command, or prints a non-ASCII rule message, in its
+#            ANSI code page.
+# tests/test_hooks.sh checks that every launch keeps all three.
+#
+# What this does not cover: the interpreter itself is the first python3/python on
+# PATH. One that lives inside the project (an in-project virtualenv), or that a
+# version-manager shim picks from a project file such as .python-version, is only
+# as trustworthy as that directory. One that is found but cannot run is caught by
+# bcl_prime, which then reports no interpreter.
 bcl_python() {
   if [[ -n "${_BCL_PY+x}" ]]; then printf '%s' "$_BCL_PY"; return 0; fi
   local cand path
@@ -386,9 +410,25 @@ bcl_prime() {
   # for the left-hand side. It appends a newline, which JSON parsing and the
   # empty-payload test both ignore.
   if [[ $want -eq 1 ]]; then
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -c "$_BCL_PRIME_SRC" "$_BCL_PRIME_KEY" 1 <<< "$1")" || rc=$?
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_PRIME_SRC" "$_BCL_PRIME_KEY" 1 <<< "$1")" || rc=$?
   else
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -c "$_BCL_PRIME_SRC" "$_BCL_PRIME_KEY" 0 </dev/null)" || rc=$?
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_PRIME_SRC" "$_BCL_PRIME_KEY" 0 </dev/null)" || rc=$?
+  fi
+  # No output at all, other than the script's own bounds exit (3) or a timeout
+  # (124/137), and the interpreter cannot even import the modules the helpers use: it
+  # can run none of them — a stub, a broken shim, one that rejects -I/-S, a legacy
+  # virtualenv whose stdlib only its own site.py adds, one that needs PYTHONHOME.
+  # Treat it as no interpreter, so every hook takes its "Python unavailable" branch
+  # and fails closed. Left to the per-call helpers, the same broken interpreter made
+  # bcl_cfg return "" for every key, so command-guard read itself as disabled and
+  # allowed the call. The import probe runs only on this failure path; when it
+  # succeeds, the prime script itself failed (e.g. on an unencodable value) and the
+  # per-call helpers below take over as before.
+  if [[ -z "$out" && $rc -ne 3 && $rc -ne 124 && $rc -ne 137 ]] \
+     && ! bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c 'import json, os, re, shlex, sys' >/dev/null 2>&1 </dev/null; then
+    _BCL_PY=""
+    _BCL_PRIME_STATE=nopy
+    return 0
   fi
   if [[ $rc -ne 0 || -z "$out" ]]; then
     # Bounds exceeded, interpreter error, or we killed it. Leave every primed value
@@ -474,7 +514,7 @@ bcl_cfg() {
   if [[ -z "$py" || ! -f "$cfg" ]]; then
     printf '%s' "$default"; return 0
   fi
-  val="$("$py" - "$cfg" "$key" "$default" <<'PY'
+  val="$("$py" -I -S -X utf8 - "$cfg" "$key" "$default" <<'PY'
 import json, sys
 cfg, key, default = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "")
 try:
@@ -495,7 +535,7 @@ elif cur is None:
 else:
     print(cur)
 PY
-)"
+)" || val="$default"   # the script itself always exits 0; non-zero = the interpreter failed
   printf '%s' "$val"
 }
 
@@ -562,7 +602,7 @@ bcl_payload_unparseable() {
   py="$(bcl_python)"
   [[ -z "$py" ]] && return 1
   [[ -z "${payload//[[:space:]]/}" ]] && return 1
-  printf '%s' "$payload" | "$py" -c 'import json,sys
+  printf '%s' "$payload" | "$py" -I -S -X utf8 -c 'import json,sys
 try:
     json.load(sys.stdin)
 except Exception:
@@ -585,7 +625,7 @@ bcl_config_malformed() {
   fi
   py="$(bcl_python)"; cfg="$(bcl_config_path)"
   [[ -z "$py" || ! -f "$cfg" ]] && return 1
-  "$py" -c 'import json,sys
+  "$py" -I -S -X utf8 -c 'import json,sys
 try:
     json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
@@ -609,7 +649,7 @@ bcl_extract_paths() {
   fi
   py="$(bcl_python)"
   [[ -z "$py" ]] && return 0
-  printf '%s' "$payload" | "$py" -c '
+  printf '%s' "$payload" | "$py" -I -S -X utf8 -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -645,7 +685,7 @@ bcl_extract_value() {
   fi
   py="$(bcl_python)"
   [[ -z "$py" ]] && return 0
-  printf '%s' "$payload" | "$py" -c '
+  printf '%s' "$payload" | "$py" -I -S -X utf8 -c '
 import json, sys
 key = sys.argv[1]
 try:

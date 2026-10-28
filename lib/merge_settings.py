@@ -118,9 +118,8 @@ def load(path: str, label: str) -> dict:
         fatal(
             EXIT_PARSE,
             f"{label} {p} is not UTF-8 text: {exc}",
-            # ASCII only: this goes to stderr, and a legacy console code page (cp437)
-            # cannot encode punctuation like an em dash - it would raise
-            # UnicodeEncodeError and replace this explanation with a traceback.
+            # ASCII only: this goes to stderr, and plain ASCII reads the same on any
+            # console and in any log, whatever its code page.
             "If it was written by PowerShell '>' redirection it is probably UTF-16. "
             "Re-save it as UTF-8 and re-run.",
         )

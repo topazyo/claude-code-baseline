@@ -50,11 +50,16 @@ done
 
 PY="$(bcl_python)"
 [[ -z "$PY" ]] && { echo "python3 (or python) is required" >&2; exit 1; }
+# A Python that is found but cannot run (or cannot import the stdlib modules used
+# here) would make every config read fall back to its default, and the report would
+# present those defaults as the repo's settings.
+"$PY" -I -S -X utf8 -c 'import json, os, re, shlex, sys' >/dev/null 2>&1 </dev/null \
+  || { echo "python ($PY) is on PATH but cannot run the baseline's helpers; cannot read any config" >&2; exit 1; }
 [[ ${#REPOS[@]} -eq 0 ]] && { echo "usage: baseline-status.sh [--drift] [--strict] [--json <file>] <repo>..." >&2; exit 2; }
 
 # Read a top-level scalar key from the canonical SOURCE config (this tree).
 read_src_key() {
-  "$PY" - "$SRC_ROOT/baseline.config.json" "$1" <<'PY'
+  "$PY" -I -S -X utf8 - "$SRC_ROOT/baseline.config.json" "$1" <<'PY'
 import json, sys
 try:
     print(json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], "") or "")
@@ -117,7 +122,7 @@ if [[ -n "$JSON_OUT" ]]; then
   # NOTE: use `-c <code>` (code as an argument), NOT `python - <<HEREDOC`, because the
   # records arrive on STDIN via the pipe — a heredoc would itself claim stdin and the
   # piped records would never be read. (Same pattern as common.sh's bcl_extract_*.)
-  printf '%s' "$RECORDS" | "$PY" -c '
+  printf '%s' "$RECORDS" | "$PY" -I -S -X utf8 -c '
 import json, sys
 srcver, srcmin, out = sys.argv[1], sys.argv[2], sys.argv[3]
 recs = []

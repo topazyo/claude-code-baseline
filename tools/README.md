@@ -91,7 +91,7 @@ footprint.
 Cross-repo drift one-liner (no script), if you go that route:
 
 ```bash
-src=$(python3 -c 'import json;print(json.load(open("claude-code-baseline/baseline.config.json"))["baselineVersion"])')
+src=$(python3 -I -c 'import json;print(json.load(open("claude-code-baseline/baseline.config.json"))["baselineVersion"])')
 for r in <repo1> <repo2> …; do
   printf '%s\t%s\n' "$r" "$(tr -d "\r\n" < "$r/.claude/hooks/baseline/VERSION" 2>/dev/null || echo MISSING)"
 done | awk -v s="$src" '{print $0, ($2==s?"OK":"DRIFT")}'
