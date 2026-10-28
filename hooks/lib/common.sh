@@ -11,9 +11,25 @@
 # Windows note: Claude Code on Windows passes Windows-style paths and Python's
 # print() emits CRLF, so every path extracted here is stripped of trailing CR.
 
-# Guard against double-sourcing (dispatcher + module may both source us).
-[[ -n "${_BCL_SOURCED:-}" ]] && return 0
-_BCL_SOURCED=1
+# Guard against double-sourcing (dispatcher + module may both source us). Re-running
+# this file in a shell that already sourced it would wipe its primed state below.
+#
+# The guard is an ARRAY ELEMENT, index 1, never a plain variable. bash imports every
+# environment variable as a scalar, and a scalar's value sits at index 0; it cannot
+# import an array at all. So no environment variable can pre-set index 1, which matters
+# because this check runs before the scrub of inherited cache slots further down. As a
+# scalar it could: an inherited _BCL_SOURCED (a parent shell, a settings.json `env`
+# block) made every hook return from this file with no bcl_ helper defined, so each
+# guard failed instead of checking. The unset drops such an inherited value, export
+# included, before the array takes its name.
+# This covers environment VARIABLES only. Code that runs before this file — a BASH_ENV
+# startup file, an exported function, SHELLOPTS — can still interfere; that is outside
+# what any check in this file can stop.
+# Subshells inherit the array, so they still skip a second source; child processes
+# (the dispatcher runs each module with `bash`) inherit nothing and load fresh.
+[[ -n "${_BCL_SOURCED[1]:-}" ]] && return 0
+unset -v _BCL_SOURCED
+_BCL_SOURCED=([1]=1)
 
 # Drop any INHERITED cache slots before the helpers below can read them.
 # _BCL_PY / _BCL_CFG_* / _BCL_PL_* / _BCL_PRIME_* are process-local caches, never
@@ -30,8 +46,14 @@ _BCL_SOURCED=1
 # list of names, but compgen has to run inside a command substitution, and a fork
 # costs ~20ms under Git Bash on Windows — per prefix, on every one of the six
 # processes in a PostToolUse chain. This expansion forks nothing.
-for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@}; do unset "$_bcl_v"; done
-unset _BCL_PY _BCL_READ_ERROR _bcl_v
+for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@}; do unset -v "$_bcl_v"; done
+# BCL_READ_ERROR, _BCL_LOOKUP, _BCL_STDIN_TIMEOUT and _BCL_STDIN_MAX are reassigned
+# below; unsetting them first also drops the export an inherited copy carries, so it
+# is not handed on to every child process. A new global needs adding here too — but
+# never widen this to ${!_BCL_@}, which would also unset the source guard above.
+# _BCL_PY must stay UNSET, not empty: bcl_python tests ${_BCL_PY+x}, and an empty
+# value would be cached as "no interpreter".
+unset -v _BCL_PY BCL_READ_ERROR _BCL_LOOKUP _BCL_STDIN_TIMEOUT _BCL_STDIN_MAX _bcl_v
 
 # Primed state. Declared unconditionally so `set -u` is safe and so an inherited
 # scalar of the same name cannot masquerade as one of these arrays.

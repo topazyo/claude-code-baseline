@@ -125,6 +125,51 @@ setcfg "c['modules']['fixTags']['enabled']=True"
 run "untagged change -> 2"   modules/fix-tags.sh "$(write_payload "$WT/app.py")" 2
 resetcfg
 
+echo "== common.sh load guard ignores the environment =="
+# The library's double-source guard must not be settable from outside. An inherited
+# _BCL_SOURCED used to make every hook skip common.sh: command-guard died on its first
+# helper (rc 1, blocking only through onFailure) and the post-write dispatcher's
+# violation report was lost as a non-blocking error.
+# run_env <desc> <VAR=value> <hook-relpath> <payload> <expected-rc> <expected-output>
+run_env() {
+  local desc="$1" assign="$2" hook="$3" payload="$4" want="$5" needle="$6" got out
+  out="$(printf '%s' "$payload" | env "$assign" bash "$H/$hook" 2>&1)"; got=$?
+  if [ "$got" = "$want" ] && printf '%s' "$out" | grep -qF "$needle"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] want=$want got=$got"; fi
+}
+rm -f "$TMP/rules.saved" "$TMP/compose.saved"
+[ -f "$RULES" ] && cp "$RULES" "$TMP/rules.saved"
+[ -f "$WT/docker-compose.yml" ] && cp "$WT/docker-compose.yml" "$TMP/compose.saved"
+printf 'services:\n  app:\n    user: "0:0"\n' > "$WT/docker-compose.yml"
+setcfg "c['modules']['securityDefaults']['enabled']=True"
+valid_rules
+# The third value is a control: bash never imports a name that is not an identifier,
+# so it passed on the old scalar guard too. It pins the array design, not the old bug.
+for inherited in '_BCL_SOURCED=1' '_BCL_SOURCED=([1]=1)' '_BCL_SOURCED[1]=1'; do
+  run_env "command-guard, inherited $inherited"     "$inherited" guardrails/command-guard.sh "$(bash_payload 'git push --force origin main')" 2 "Blocked by Claude Code baseline command-guard"
+  run_env "post-write, inherited $inherited"        "$inherited" dispatcher/post-write.sh "$(write_payload "$WT/docker-compose.yml")" 2 "REGRESSION BLOCKER"
+  run_env "security-defaults, inherited $inherited" "$inherited" modules/security-defaults.sh "$(write_payload "$WT/docker-compose.yml")" 2 "REGRESSION BLOCKER"
+done
+resetcfg
+if [ -f "$TMP/rules.saved" ]; then cp "$TMP/rules.saved" "$RULES"; else rm -f "$RULES"; fi
+if [ -f "$TMP/compose.saved" ]; then cp "$TMP/compose.saved" "$WT/docker-compose.yml"; else rm -f "$WT/docker-compose.yml"; fi
+# ...and the guard itself still works: with a value inherited, the first source loads
+# the library, and a second source in the same shell or in a subshell returns early,
+# keeping the state the first one set (re-running the file would reset it).
+gs="$(env _BCL_SOURCED=1 bash -c 'set -euo pipefail
+  . "$1"; type bcl_python >/dev/null 2>&1 || { printf nolib; exit 0; }
+  _BCL_PRIME_STATE=sentinel; . "$1"; a="$_BCL_PRIME_STATE"
+  b="$( . "$1"; printf %s "$_BCL_PRIME_STATE" )"
+  printf "%s/%s" "$a" "$b"' _ "$H/lib/common.sh" 2>&1)"
+if [ "$gs" = "sentinel/sentinel" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [common.sh double-source guard: got '$gs', want sentinel/sentinel]"; fi
+# Inherited copies of the library's globals are dropped, not passed on: after loading,
+# a child process sees no _BCL_*/BCL_* variable at all.
+# An empty environment, so a variable that merely exists on the test machine cannot
+# count; the end marker proves the probe reached `env` (a dead probe reports noenv).
+leaked="$(env -i PATH="$PATH" _BCL_SOURCED=1 _BCL_LOOKUP=warn BCL_READ_ERROR=x _BCL_STDIN_MAX=1 _BCL_STDIN_TIMEOUT=0 \
+  bash -c 'set -euo pipefail; . "$1"; env; echo __env_done__' _ "$H/lib/common.sh" 2>&1 \
+  | awk '/^_?BCL_/ { n++ } /^__env_done__$/ { ok = 1 } END { print ok ? n + 0 : "noenv" }')"
+if [ "$leaked" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [common.sh passed inherited _BCL_/BCL_ variables on to a child: $leaked]"; fi
+
 echo "== config-guard (ConfigChange) tamper detection (R5) =="
 ccp() { printf '{"source":"%s","file_path":"%s"}' "$1" "$2"; }   # ConfigChange payload
 GOOD="$WT/.claude/settings.json"   # the real installed settings (baseline footprint intact)
