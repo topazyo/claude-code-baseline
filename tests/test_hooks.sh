@@ -238,6 +238,29 @@ FRESH="$(winpath "$TMP/fresh")"; mkdir -p "$FRESH"; ( cd "$FRESH" && git init -q
 fout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$FRESH" 2>&1 </dev/null)"
 if printf '%s' "$fout" | grep -qF "$srcver"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install create-path did not print baselineVersion $srcver]"; fi
 
+echo "== install.sh --enable-security-defaults (post-write demo path) =="
+# Every post-write module ships off, so a default install shows nothing on a bad
+# write. --enable-security-defaults turns securityDefaults on in a NEW config in one
+# step, and refuses unless a rules file will exist: an enabled module with no rules
+# fails closed on every infra write.
+SD1="$(winpath "$TMP/sd-norules")"; mkdir -p "$SD1"; ( cd "$SD1" && git init -q )
+timeout -k 5 120 bash "$SRC/install.sh" --target "$SD1" --enable-security-defaults >/dev/null 2>&1 </dev/null; rc=$?
+if [ "$rc" = 2 ] && [ ! -e "$SD1/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [enable without rules must exit 2 and write nothing (rc=$rc)]"; fi
+SD2="$(winpath "$TMP/sd-demo")"; mkdir -p "$SD2"; ( cd "$SD2" && git init -q )
+sdout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$SD2" --with-openclaw-rules --enable-security-defaults --dry-run 2>&1 </dev/null)"
+if [ ! -e "$SD2/.claude" ] && printf '%s' "$sdout" | grep -qF "would set modules.securityDefaults.enabled"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [dry-run with --enable-security-defaults wrote files or did not say what it would enable]"; fi
+timeout -k 5 120 bash "$SRC/install.sh" --target "$SD2" --with-openclaw-rules --enable-security-defaults >/dev/null 2>&1 </dev/null
+sd_on="$("$PY" -c "import json,sys;sys.stdout.write(str(json.load(open(r'$SD2/.claude/baseline.config.json'))['modules']['securityDefaults']['enabled']))" 2>/dev/null)"
+if [ "$sd_on" = "True" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [fresh install did not enable securityDefaults (got '$sd_on')]"; fi
+# The demo itself: a root-container write through the INSTALLED dispatcher is reported.
+printf 'services:\n  app:\n    image: x\n    user: root\n' > "$SD2/docker-compose.yml"
+( cd "$SD2" && printf '%s' "$(write_payload "$SD2/docker-compose.yml")" | CLAUDE_PROJECT_DIR="$SD2" bash "$SD2/.claude/hooks/baseline/dispatcher/post-write.sh" >/dev/null 2>&1 ); rc=$?
+if [ "$rc" = 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [post-write violation after enable must exit 2 (rc=$rc)]"; fi
+# An existing config is never rewritten, even with the flag.
+cp "$SD2/.claude/baseline.config.json" "$SD2/.claude/_presd.json"
+timeout -k 5 120 bash "$SRC/install.sh" --target "$SD2" --enable-security-defaults >/dev/null 2>&1 </dev/null
+if cmp -s "$SD2/.claude/baseline.config.json" "$SD2/.claude/_presd.json"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [--enable-security-defaults rewrote an existing config]"; fi
+
 echo "== install.sh version check (R4) =="
 # Stub a fake 'claude' on PATH (prepended, so it wins over any real CLI) and assert
 # install.sh's advisory version check. --dry-run runs the check but changes nothing.

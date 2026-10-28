@@ -13,10 +13,18 @@ normalizer was defeated by ordinary shell quoting):
     it is blocked as uninspectable. Parsing is linear here, but a guard that can
     be made slow can be made to hit the hook timeout, and a timed-out PreToolUse
     hook never emits exit 2 -- it fails OPEN. A cheap cap beats a clever parser.
-  * Split on NEWLINES FIRST, before any whitespace handling, so a two-line
-    "cd /tmp" + "rm -rf /" payload is two commands, not one. (The old normalizer
-    collapsed the newline into a space BEFORE the operator split, which made the
-    newline case dead code.)
+  * Split on UNQUOTED NEWLINES, before any whitespace handling, so a two-line
+    "cd /tmp" + "rm -rf /" payload is two commands, not one. A newline inside a
+    quoted string is part of the string, and a trailing backslash continues the
+    line, so a multi-line commit message, PR body or backslash-continued command is one
+    command -- splitting those on every newline used to block them as unbalanced.
+    A logical line that spans several physical lines is inspected TWICE: tokenized
+    as a whole, and every physical line again with its quotes deleted. This quote
+    scanner does not model bash comments, the fresh quoting context inside "$(...)",
+    $'...' strings or heredoc bodies, and a divergence there could otherwise pass a
+    real command off as part of a string; the quote-blind pass still inspects it,
+    including a `bash -c "..."` script on that line. A command whose every line
+    already tokenizes on its own is evaluated exactly as before.
   * Real tokenization per line via shlex(posix=True): quotes are REMOVED and
     backslash escapes are RESOLVED, so quote-splicing (--fo"rce", r''m) and
     escape-splicing (-r\f) tokenize to their bare equivalents instead of being
@@ -51,7 +59,13 @@ the tokenizer itself, stated here rather than claimed away elsewhere: POSIX esca
 resolution consumes backslashes, so an *unquoted* Windows path is only recovered
 for drive-letter/UNC forms (see _slashify_windows_paths); and a shell separator
 inside a quoted string still ends a segment -- conservative, so it can over-block
-a quoted sentence but never under-block a real command.
+a quoted sentence but never under-block a real command. Multi-line limits: the
+second, quote-blind pass over a multi-line string blocks a line of it that STARTS
+with a blocked command (a commit body line "git push --force ..."), or that names
+one in backticks ("Run `npm install` first" -- right for a plain -m "...", where
+bash runs it, a false positive inside a <<'EOF' heredoc body); an odd number of
+double quotes inside a "$(cat <<'EOF' ...)" body, or an unbalanced quote in a
+top-level heredoc body, still fails to tokenize and is blocked.
 """
 from __future__ import annotations
 
@@ -113,6 +127,9 @@ _LEAD_GROUP_CHARS = "{!"
 # tokenization would otherwise eat those separators; a single character class keeps
 # this linear (no backtracking), unlike a nested (?:[^\\]+\\)+ form.
 _WINPATH_RE = re.compile(r"(?i)(?:[a-z]:\\|\\\\)[^\s\"'|&;()<>]*")
+
+# A PowerShell here-string opener: @' or @" as the last thing on a line.
+_PS_HERESTRING_RE = re.compile(r"@['\"]\s*$")
 
 
 def _find_key(obj, key):
@@ -394,33 +411,150 @@ def _split_inline_script(toks):
     return toks, None
 
 
-def _segments(raw: str, _depth: int = 0):
+def _scan_line(line: str, state: str, ps_herestrings: bool = False):
+    """Advance the quote state across one physical line, exactly as shlex(posix) reads it.
+
+    state is "" (unquoted), "'" or '"'. Backslash escapes the next character outside
+    single quotes (shlex posix: inside double quotes it consumes the next character
+    too, so an escaped quote never closes the string). No comment handling, because
+    shlex.split(comments=False) has none either. Returns (state, continued, here_at):
+    continued is True when the line ends in an unescaped backslash outside single
+    quotes, a line continuation; here_at is the index of a PowerShell here-string
+    opener (@' or @" ending the line in unquoted state), if ps_herestrings is set.
+    """
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        if state == "'":
+            if c == "'":
+                state = ""
+        elif c == "\\":
+            if i + 1 >= n:
+                return state, True, None
+            i += 1                                   # escaped char cannot open/close
+        elif state == '"':
+            if c == '"':
+                state = ""
+        elif ps_herestrings and c == "@" and _PS_HERESTRING_RE.match(line, i):
+            return state, False, i
+        elif c in "'\"":
+            state = c
+        i += 1
+    return state, False, None
+
+
+def _logical_lines(text: str, shell: str = "bash"):
+    """Split on UNQUOTED newlines. Returns [(logical_line, physical_lines)].
+
+    A physical line that ends inside an open quote is joined to the next with the
+    newline kept (it is part of the string); one that ends in a continuation
+    backslash is joined with the backslash-newline removed, as bash does. For a
+    PowerShell payload, an @'...'@ / @"..."@ here-string becomes one POSIX
+    single-quoted word; an unterminated one is left raw, so it fails to tokenize and
+    is blocked. Split points are str.splitlines()'s, the same as before this change,
+    so a command whose every line already tokenizes yields logical == physical lines.
+    """
+    phys = text.splitlines()
+    ps = shell == "powershell"
+    out, i, n = [], 0, len(phys)
+    while i < n:
+        parts, members, state, cont = [], [], "", False
+        while i < n:
+            line = phys[i]
+            i += 1
+            members.append(line)
+            while True:
+                start = state
+                state, cont, here_at = _scan_line(line, start, ps)
+                if here_at is None:
+                    break
+                close = line[here_at + 1] + "@"      # '@ or "@, at the start of a line
+                j = i
+                while j < n and not phys[j].startswith(close):
+                    j += 1
+                if j >= n:                           # unterminated: leave it raw
+                    state, cont, _ = _scan_line(line, start, False)
+                    break
+                members.extend(phys[i:j + 1])
+                body = "\n".join(phys[i:j]).replace("'", "'\"'\"'")
+                parts.append(line[:here_at] + "'" + body + "'")
+                line, i, state = phys[j][2:], j + 1, ""
+            if cont:
+                parts.append(line[:-1])
+                continue
+            parts.append(line)
+            if not state:
+                break
+            parts.append("\n")
+        out.append(("".join(parts), members))
+    return out
+
+
+def _words_to_segments(words):
+    """Operator pieces end a segment; group/negation punctuation is stripped."""
+    segments, cur = [], []
+    for word in words:
+        for piece in _SEP_SPLIT_RE.split(word.lower()):
+            if not piece:
+                continue
+            if _SEP_ONLY_RE.match(piece):
+                if cur:
+                    segments.append(cur)
+                cur = []
+                continue
+            piece = piece.lstrip(_LEAD_GROUP_CHARS)
+            if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
+                continue
+            cur.append(piece)
+    if cur:
+        segments.append(cur)
+    return segments
+
+
+def _lenient_words(line: str):
+    """One physical line with escapes resolved and every quote character deleted.
+
+    Used only as a second pass over the lines of a multi-line logical line. Deleting
+    the quotes makes every separator on the line visible, so a command that bash would
+    run is inspected even where the quote scanner took it for part of a string -- the
+    scanner does not model comments, the fresh quoting context inside "$(...)", or
+    heredoc bodies, and a divergence there must not become a bypass.
+    """
+    resolved = re.sub(r"\\(.)", r"\1", line)
+    return resolved.replace("'", "").replace('"', "").split()
+
+
+def _segments(raw: str, _depth: int = 0, shell: str = "bash"):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
-    Returns a list of token lists. Newlines are split FIRST (before any whitespace
-    handling), then each line is really tokenized (shlex, posix), then operator
-    tokens end a segment.
+    Returns a list of token lists. The text is split on unquoted newlines (see
+    _logical_lines), each logical line is really tokenized (shlex, posix), then
+    operator tokens end a segment. A logical line that spans several physical lines
+    is ALSO inspected line by line, leniently (see _lenient_words).
     """
-    segments = []
-    for line in _expand_ifs(_slashify_windows_paths(raw)).splitlines():
-        if not line.strip():
+    segments, lenient = [], []
+    text = _expand_ifs(_slashify_windows_paths(raw))
+    for logical, physical in _logical_lines(text, shell):
+        if not logical.strip():
             continue
-        cur = []
-        for word in shlex.split(line, posix=True):   # ValueError -> caller blocks
-            for piece in _SEP_SPLIT_RE.split(word.lower()):
-                if not piece:
-                    continue
-                if _SEP_ONLY_RE.match(piece):
-                    if cur:
-                        segments.append(cur)
-                    cur = []
-                    continue
-                piece = piece.lstrip(_LEAD_GROUP_CHARS)
-                if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
-                    continue
-                cur.append(piece)
-        if cur:
-            segments.append(cur)
+        # ValueError (unbalanced quoting) -> caller blocks
+        segments.extend(_words_to_segments(shlex.split(logical, posix=True)))
+        if len(physical) > 1:
+            for line in physical:
+                for toks in _words_to_segments(_lenient_words(line)):
+                    lenient.append(toks)
+                    lenient.extend(_lenient_inline(toks))
+                # The quote-blind pass resolves backslashes and splits on spaces,
+                # which shreds a quoted Windows path ("C:\Program Files\Git\bin\
+                # bash.exe" -c ...). Also read the line on its own with quotes kept
+                # and backslashes as /, through the main pipeline (inline sh -c
+                # recursion included). A line that does not tokenize alone adds
+                # nothing; the passes above still cover it.
+                try:
+                    segments.extend(_words_to_segments(
+                        shlex.split(line.replace("\\", "/"), posix=True)))
+                except ValueError:
+                    pass
     # Re-tokenize inline `sh -c` scripts. Depth-bounded so a nested
     # `sh -c 'sh -c "..."'` chain cannot recurse without limit.
     if _depth < 3:
@@ -432,12 +566,48 @@ def _segments(raw: str, _depth: int = 0):
             if inline and inline.strip():
                 expanded.extend(_segments(inline, _depth + 1))
         segments = expanded
-    return segments
+    # Lenient segments skip the inline split: with the quotes deleted, the script
+    # of `bash -c "rm -rf ~"` is already bare tokens. Splitting would take only its
+    # first word as the script and strand the arguments; _lenient_inline judges
+    # every word after the -c instead.
+    return segments + lenient
 
 
-def evaluate(raw: str, extra_patterns=()):
+def _lenient_inline(toks):
+    """In a quote-blind segment, the words after EVERY shell -c flag, one segment each.
+
+    Judging the segment in place is not enough: a wrapper that takes an argument
+    (`timeout 5 bash -c ...`, `sudo -u root bash -c ...`) makes that argument the
+    command word. Any short-flag bundle containing c that follows a shell word
+    starts a segment -- every one, not just the first, so a nested
+    `sh -c "timeout 5 bash -c '...'"` reaches the innermost script, and option
+    values (`bash -o pipefail -c ...`) are stepped over. The stricter reading,
+    which a quote-blind pass can afford. Segments are whole suffixes, so a script's
+    arguments are never cut off. A c-bundle followed directly by another c-bundle
+    emits nothing: the later one emits a suffix that _effective_cmd_index, which
+    skips leading flags, resolves to the same command word. That keeps a
+    `sh -c -c -c ...` payload from emitting one long suffix per flag; the remaining
+    worst case is bounded by the input cap.
+    """
+    out, seen_shell = [], False
+    for j, a in enumerate(toks):
+        if _cmd_word(a) in _SHELLS:
+            seen_shell = True
+        elif (seen_shell and _is_c_bundle(a) and j + 1 < len(toks)
+              and not _is_c_bundle(toks[j + 1])):
+            out.append(toks[j + 1:])
+    return out
+
+
+def _is_c_bundle(tok: str) -> bool:
+    """A short-flag bundle containing c (-c, -lc, -xc), not a --long option."""
+    return tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]
+
+
+def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     """Return the list of block reasons for a raw command string (+ optional query).
-    Pure function -- no I/O -- so it is directly unit-testable."""
+    Pure function -- no I/O -- so it is directly unit-testable. shell is "bash" or
+    "powershell" (the payload's tool_name); it only enables here-string handling."""
     if raw is None:
         return []
     if len(raw) > _MAX_INSPECT_LEN:
@@ -449,7 +619,7 @@ def evaluate(raw: str, extra_patterns=()):
         return []
 
     try:
-        segments = _segments(raw)
+        segments = _segments(raw, shell=shell)
     except ValueError as exc:
         # Unbalanced quoting: the real command words cannot be recovered, so this
         # must not be waved through. Fail closed, like the hook's other
@@ -487,6 +657,8 @@ def main() -> int:
         return 0
 
     raw = " ".join(x for x in (_find_key(data, "command"), _find_key(data, "query")) if x)
+    tool = data.get("tool_name") if isinstance(data, dict) else ""
+    shell = "powershell" if str(tool or "").strip().lower() == "powershell" else "bash"
 
     extra = []
     try:
@@ -497,7 +669,7 @@ def main() -> int:
     except Exception:
         extra = []  # extraPatterns are optional; core rules still evaluated
 
-    reasons = evaluate(raw, extra)
+    reasons = evaluate(raw, extra, shell=shell)
     if reasons:
         print("; ".join(reasons))
     return 0

@@ -52,7 +52,10 @@ rather than waving it through as clean.
   and package installs (`npm/pnpm/yarn/pip install`). The matcher is
   token-aware: it resolves quoting, `${IFS}`, wrapper paths (`/bin/rm`,
   `sh -c`, `xargs`), `.exe` suffixes, newline-separated and compound commands,
-  and blocks anything it cannot parse. Extend per repo via
+  and blocks anything it cannot parse. A newline inside a quoted string (a
+  multi-line commit message or PR body, a PowerShell here-string) or after a
+  trailing `\` does not split the command; a line of such a string that starts
+  with a blocked command, or names one in backticks, is still blocked. Extend per repo via
   `guardrails.commandGuard.extraPatterns`.
 - **auto-format** — `PostToolUse(Write|Edit)`, **disabled by default**. Formats
   changed files with prettier/eslint, black, or `dotnet format`. It ships off
@@ -170,6 +173,20 @@ Or point at a repo explicitly, and optionally seed the example security rules:
 claude-code-baseline/install.sh --target ../some-repo --with-openclaw-rules
 claude-code-baseline/install.sh --dry-run         # preview, change nothing
 ```
+
+Every post-write module ships **off**, so on a default install writing a file
+triggers no visible check. To see one fire, install into a fresh repo with the
+example rules seeded and `securityDefaults` enabled in one step:
+
+```bash
+claude-code-baseline/install.sh --with-openclaw-rules --enable-security-defaults
+```
+
+Then have Claude write a `docker-compose.yml` containing `user: root`: the
+post-write check reports the violation back to Claude after the write (it cannot
+undo it). `--enable-security-defaults` refuses, writing nothing, unless a rules file
+will exist, and it only enables a config it is creating. On an existing install,
+set `modules.securityDefaults.enabled` to `true` yourself.
 
 What it does (idempotent — safe to re-run):
 
