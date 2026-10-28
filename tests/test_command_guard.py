@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 98
+FP_FLOOR = 109
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -545,6 +545,35 @@ PS_CASES = [
     # with a blocked command is inspected like a command.
     ("ps conservative: here-string line starting with rm -rf /",
      "Write-Output @'\nrm -rf /\n'@", B, ()),
+    # PowerShell expands backtick escapes and accepts typographic quotes before it starts
+    # a native program: bash receives the decoded text (see _ps_unescape).
+    ('ps backtick-t inside bash -c', 'bash -c "rm -rf `t ~"', B, ()),
+    ('ps backtick-v inside bash -c', 'bash -c "rm -rf `v ~"', B, ()),
+    ('ps backtick-n splits a bash -c script', 'bash -c "echo ok`nrm -rf ~"', B, ()),
+    ('ps backtick-u{2028} inside bash -c', 'bash -c "rm -rf `u{2028} ~"', B, ()),
+    ('ps backtick inside a word of a bash -c script', 'bash -c "r`m -rf ~"', B, ()),
+    ('ps backtick-f inside bash -c', 'bash -c "rm -rf `f ~"', B, ()),
+    ('ps backtick-r inside bash -c', 'bash -c "rm -rf `r ~"', B, ()),
+    ('ps typographic quotes around a bash -c script', 'bash -c \u201crm -rf ~\u201d', B, ()),
+    ('ps backtick-t in an expandable here-string for bash -c', 'bash -c @"\nrm -rf `t ~\n"@', B, ()),
+    ('ps backtick-v inside wsl bash -c', 'wsl bash -c "git push `v --force origin main"', B, ()),
+    ('ps fp backtick-escaped quotes in a commit message', 'git commit -m "Fix `"quotes`" handling"', A, ()),
+    ('ps fp backtick-n in a commit message', 'git commit -m "Line one`nLine two"', A, ()),
+    ('ps fp backtick-t in Write-Host', 'Write-Host "Total`t42"', A, ()),
+    ('ps fp backtick in a single-quoted string', "git commit -m 'use `t for tabs'", A, ()),
+    ('ps fp backslash path in a string', 'Get-Content "C:\\Users\\me\\notes.txt"', A, ()),
+    ('ps fp typographic quotes around text', 'Write-Output \u201chello\u201d', A, ()),
+    ('ps backtick-a next to an rm target in bash -c', 'bash -c "rm -rf `a ~"', B, ()),
+    ('ps fp trailing backslash in a double-quoted path', 'git add "C:\\dir\\"', A, ()),
+    ('ps backtick-t in an unquoted bash -c argument', 'bash -c rm`t-rf`t~', B, ()),
+    ('ps backtick-n in an unquoted bash -c argument', 'bash -c echo`nrm`t-rf`t~', B, ()),
+    ("ps mid-word @' is not a here-string", 'Write-Output x@\'\nhi\'\nbash -c "rm -rf `t ~"\n\'@\'', B, ()),
+    ('ps ${#} is a variable, not a comment', 'echo ${#}; bash -c "rm -rf `t ~"', B, ()),
+    ('ps mid-word <# is not a block comment', 'Write-Output x<#y; bash -c "rm -rf `t ~"', B, ()),
+    ('ps fp braced env variable', 'Write-Output ${env:USERPROFILE}', A, ()),
+    ('ps fp user@host argument', 'ssh user@host "uptime"', A, ()),
+    ('ps fp backtick escape inside a comment', 'git status # tabs are `t', A, ()),
+    ('ps fp backtick line continuation', 'git log `\n  --oneline', A, ()),
 ]
 
 # tool_name plumbing through main(): the same text is a PowerShell here-string only
@@ -553,6 +582,10 @@ MAIN_CASES = [
     ("main PowerShell tool_name enables here-strings", "PowerShell",
      "git commit -m @'\nIt's done\n'@", A),
     ("main Bash tool_name does not", "Bash", "git commit -m @'\nIt's done\n'@", B),
+    ("main PowerShell tool_name reads typographic quotes", "PowerShell",
+     'bash -c \u201crm -rf ~\u201d', B),
+    ("main PowerShell tool_name decodes backtick escapes", "PowerShell",
+     'bash -c "rm -rf `t ~"', B),
 ]
 
 

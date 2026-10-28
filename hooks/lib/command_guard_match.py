@@ -1155,6 +1155,217 @@ def _is_c_bundle(tok: str) -> bool:
 
 
 
+# PowerShell's escape character is the backtick. Inside a "..." string or an @"..."@
+# here-string body, `t `v `n `r `f `a `b `e `0 and `u{hex} become characters, and
+# anywhere outside a '...' string a backtick makes the next character literal.
+# PowerShell does this BEFORE it starts a native program, so `bash -c "rm -rf `t ~"`
+# hands bash a real TAB and bash deletes ~. The matcher's other readings take the
+# backtick for bash command substitution and misparse the line, so a PowerShell
+# payload that contains a backtick or a typographic quote is also judged as the POSIX
+# text _ps_unescape() rewrites it to: every word carries the value PowerShell gives it.
+# PowerShell also accepts typographic quotes as quote marks. `0 is NUL in PowerShell;
+# a native program's argument ends at a NUL, so it is decoded as nothing, which joins
+# its neighbours and errs toward blocking. `e and `u{} exist from PowerShell 6 on;
+# decoding them for 5.1 too only adds a stricter reading.
+_PS_ESCAPES = {"0": "", "a": "\a", "b": "\b", "e": "\x1b", "f": "\f", "n": "\n",
+               "r": "\r", "t": "\t", "v": "\v"}
+_PS_UNICODE_RE = re.compile(r"u\{([0-9A-Fa-f]{1,6})\}")
+_PS_DQ = {'"', chr(0x201C), chr(0x201D), chr(0x201E)}
+_PS_SQ = {"'", chr(0x2018), chr(0x2019), chr(0x201A), chr(0x201B)}
+_PS_TYPOGRAPHIC_QUOTES = (_PS_DQ | _PS_SQ) - {'"', "'"}
+_POSIX_BARE_SPECIAL = set(" \t\n\\'\"$`;&|<>()*?[]{}#~=!")
+
+
+def _ps_escape(text: str, i: int):
+    """Value of the PowerShell escape whose letter is text[i] (just after a backtick),
+    inside an expandable string. Returns (value, index after the escape)."""
+    c = text[i]
+    if c in _PS_ESCAPES:
+        return _PS_ESCAPES[c], i + 1
+    if c == "u":
+        m = _PS_UNICODE_RE.match(text, i)
+        if m and int(m.group(1), 16) <= 0x10FFFF:
+            return chr(int(m.group(1), 16)), m.end()
+    return c, i + 1
+
+
+def _ps_unescape(text: str) -> str:
+    """Rewrite a PowerShell command as POSIX text whose words carry PowerShell's values.
+
+    "..." becomes a POSIX "..." holding the decoded string (\\ " ` and an escaped $ are
+    backslash-escaped; an unescaped $ stays, so $var and $( ) still read as expansion);
+    '...' becomes a POSIX '...' ('' -> '\\''); a bareword keeps its characters, with a
+    backtick making the next one literal and backtick-newline a line continuation, and a
+    literal backslash doubled. An @"..."@ here-string keeps its delimiters with the body
+    decoded; @'...'@ and comments are copied as they are. Unterminated text is copied.
+    """
+    out, i, n = [], 0, len(text)
+    at_word_start = True
+    unclosed = set()          # here-string kinds with no closer left: skip re-scanning
+    while i < n:
+        c = text[i]
+        # here-string opener: @" or @' starting a word, with nothing but blanks after
+        # it on its line (x@' is the word x@ and an ordinary string)
+        if (c == "@" and at_word_start and i + 1 < n and text[i + 1] in "\"'"
+                and text[i + 1] not in unclosed):
+            eol = text.find("\n", i)
+            if eol != -1 and not text[i + 2:eol].strip():
+                close = text[i + 1] + "@"
+                j = eol + 1
+                end = -1
+                while j <= n:
+                    if text.startswith(close, j):
+                        end = j
+                        break
+                    nl = text.find("\n", j)
+                    if nl == -1:
+                        break
+                    j = nl + 1
+                if end == -1:
+                    unclosed.add(text[i + 1])
+                if end != -1:
+                    body = text[eol + 1:end]
+                    if text[i + 1] == '"':
+                        dec, k = [], 0
+                        while k < len(body):
+                            if body[k] == "`" and k + 1 < len(body):
+                                v, k = _ps_escape(body, k + 1)
+                                dec.append(v)
+                            else:
+                                dec.append(body[k])
+                                k += 1
+                        body = "".join(dec)
+                    out.append(text[i:eol + 1] + body + close)
+                    i = end + 2
+                    at_word_start = False
+                    continue
+        if c == "#" and at_word_start:                     # line comment
+            eol = text.find("\n", i)
+            eol = n if eol == -1 else eol
+            out.append(text[i:eol])
+            i = eol
+            continue
+        if c == "<" and at_word_start and text.startswith("<#", i):   # block comment
+            end = text.find("#>", i + 2)
+            end = n if end == -1 else end + 2
+            out.append(text[i:end])
+            i = end
+            continue
+        if c in _PS_DQ:
+            j, val = i + 1, []
+            closed = False
+            while j < n:
+                d = text[j]
+                if d == "`" and j + 1 < n:
+                    v, j = _ps_escape(text, j + 1)
+                    val.append(("lit", v))
+                elif d in _PS_DQ:
+                    if j + 1 < n and text[j + 1] in _PS_DQ:    # "" is a literal quote
+                        val.append(("lit", '"'))
+                        j += 2
+                    else:
+                        closed = True
+                        j += 1
+                        break
+                else:
+                    val.append(("raw", d))
+                    j += 1
+            if not closed:
+                out.append(text[i:])
+                break
+            enc = []
+            for kind, v in val:
+                for ch in v:
+                    if ch in '\\"`' or (ch == "$" and kind == "lit"):
+                        enc.append("\\" + ch)
+                    else:
+                        enc.append(ch)
+            out.append('"' + "".join(enc) + '"')
+            i = j
+            at_word_start = False
+            continue
+        if c in _PS_SQ:
+            j, val = i + 1, []
+            closed = False
+            while j < n:
+                d = text[j]
+                if d in _PS_SQ:
+                    if j + 1 < n and text[j + 1] in _PS_SQ:    # '' is a literal quote
+                        val.append("'")
+                        j += 2
+                    else:
+                        closed = True
+                        j += 1
+                        break
+                else:
+                    val.append(d)
+                    j += 1
+            if not closed:
+                out.append(text[i:])
+                break
+            out.append("'" + "".join(val).replace("'", "'\\''") + "'")
+            i = j
+            at_word_start = False
+            continue
+        if c == "`":
+            if i + 1 >= n:
+                i += 1
+                continue
+            nxt = text[i + 1]
+            if nxt == "\n":
+                out.append(" ")
+                i += 2
+            elif nxt == "\r" and text.startswith("\n", i + 2):
+                out.append(" ")
+                i += 3
+            else:
+                # PowerShell decodes the same escapes in a bareword (`echo a`tb` is the
+                # one argument a<TAB>b). A decoded character that would split or quote
+                # a POSIX word is emitted inside "..." so the word keeps its value.
+                v, i = _ps_escape(text, i + 1)
+                for ch in v:
+                    if ch in '\\"`$':
+                        out.append('"\\' + ch + '"')
+                    elif ch in _POSIX_BARE_SPECIAL or ch < " " or ch in _WORD_BREAKS:
+                        out.append('"' + ch + '"')
+                    else:
+                        out.append(ch)
+            at_word_start = False
+            continue
+        if c == "\\":
+            out.append("\\\\")
+            i += 1
+            at_word_start = False
+            continue
+        out.append(c)
+        # ${...} is a variable, not a script block: a # inside it starts no comment
+        at_word_start = c in " \t\r\n;|&(" or (c == "{" and (i == 0 or text[i - 1] != "$"))
+        i += 1
+    return "".join(out)
+
+
+def _ps_unescape_everywhere(text: str) -> str:
+    """Every backtick escape decoded, whatever quoting or comment _ps_unescape()
+    believes it is in: a backstop reading, so a scanner mistake about context cannot
+    leave a real escape undecoded (see evaluate())."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == "`" and i + 1 < n:
+            if text[i + 1] == "\n":
+                out.append(" ")
+                i += 2
+            elif text[i + 1] == "\r" and text.startswith("\n", i + 2):
+                out.append(" ")
+                i += 3
+            else:
+                v, i = _ps_escape(text, i + 1)
+                out.append(v)
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     """Return the list of block reasons for a raw command string (+ optional query).
     Pure function -- no I/O -- so it is directly unit-testable. shell is "bash" or
@@ -1180,6 +1391,15 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
             # instead of being dropped.
             segments = segments + _segments(raw, shell="powershell", ps_slashes=False,
                                             lenient_on_error=True)
+            # ...and the text PowerShell actually produces from its escapes and
+            # typographic quotes (see _ps_unescape), which is what a native program
+            # such as bash receives.
+            if "`" in raw or any(q in raw for q in _PS_TYPOGRAPHIC_QUOTES):
+                segments = segments + _segments(_ps_unescape(raw), shell="powershell",
+                                                ps_slashes=False, lenient_on_error=True)
+                segments = segments + _segments(_ps_unescape_everywhere(raw),
+                                                shell="powershell", ps_slashes=False,
+                                                lenient_on_error=True)
     except _Uninspectable as exc:
         return [f"uninspectable command ({exc})"]
     except ValueError as exc:
