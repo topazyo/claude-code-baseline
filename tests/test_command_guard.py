@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 47
+FP_FLOOR = 54
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -207,6 +207,123 @@ CASES = [
     ("s2 fp sh -c benign", "sh -c 'ls -la'", A, ()),
     ("s2 fp sh -c expands var", "sh -c 'echo $HOME'", A, ()),
     ("s2 fp busybox ls", "busybox ls -la", A, ()),
+
+    # --- multi-line commands: newlines inside quotes, continuations (must allow) ---
+    # Claude Code's own commit/PR forms. Splitting on every newline before
+    # tokenizing used to block all of these as "unbalanced quoting".
+    ("ml fp heredoc commit (claude code form)",
+     "git commit -m \"$(cat <<'EOF'\nFix the parser\n\nIt's quote-aware now.\n\n"
+     "Co-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\"", A, ()),
+    ("ml fp gh pr create heredoc body",
+     "gh pr create --title \"Fix parser\" --body \"$(cat <<'EOF'\n## Summary\n"
+     "- quote-aware newline split\n\n## Test plan\n- [x] fixtures pass\nEOF\n)\"", A, ()),
+    ("ml fp multi-line -m string", "git commit -m \"subject\n\nbody line\"", A, ()),
+    ("ml fp backslash continuation", "docker build \\\n  -t app:latest .", A, ()),
+    ("ml fp multi-line single-quoted", "echo 'line one\nline two'", A, ()),
+
+    # --- multi-line commands: what the join must NOT hide (must block) ---
+    ("ml real command after a multi-line string", "git commit -m \"a\nb\"\nrm -rf /", B, ()),
+    ("ml continuation carries --force", "git push origin main \\\n  --force", B, ()),
+    # Quotes inside "$(...)" open a fresh context in bash but not in shlex, so this
+    # balances in the scanner's view while bash runs rm on line 2. The quote-blind
+    # per-line pass must catch it.
+    ("ml divergence: quote inside $() hides a line",
+     "echo \"$(echo \"'\")\"\nrm -rf /\necho \"$(echo \"'\")\"", B, ()),
+    ("ml divergence: apostrophes in comments hide a line",
+     "# don't\nrm -rf /\n# it's fine", B, ()),
+    # The hidden line is a `bash -c` / `sh -c` script, not a bare command: the
+    # quote-blind pass must judge the script's words in place (implementation
+    # review: these all ran in Git Bash while an earlier draft allowed them).
+    ("ml divergence: comment apostrophe hides bash -c",
+     "echo ok # don't\nbash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: comment ending in backslash hides sh -c",
+     "echo ok #\\\nsh -c 'git push --force origin main'", B, ()),
+    ("ml divergence: heredoc body apostrophe hides bash -c",
+     "cat <<'EOF'\nit's done\nEOF\nbash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: ansi-c quote hides bash -c",
+     "echo $'it\\'s'\nbash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: quote inside $() hides bash -c",
+     "echo \"$(echo 'x\"y')\"\nbash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: CRLF continuation hides bash -c", "echo x\\\r\nbash -c \"rm -rf ~\"", B, ()),
+    ("ml divergence: continuation into a comment hides bash -c",
+     "echo a \\\n# don't\nbash -c \"rm -rf ~\"\n# '", B, ()),
+    # ...and when a wrapper that takes an argument precedes the shell, so that
+    # argument would be the command word if the segment were only judged in place.
+    ("ml divergence: comment apostrophe hides timeout 5 bash -c",
+     "echo ok # don't\ntimeout 5 bash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: comment apostrophe hides sudo -u root bash -c",
+     "echo ok # don't\nsudo -u root bash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: heredoc body apostrophe hides nice -n 10 sh -c",
+     "cat <<'EOF'\nit's done\nEOF\nnice -n 10 sh -c 'git push --force origin main'\n# '", B, ()),
+    ("ml divergence: comment apostrophe hides env -u FOO bash -c",
+     "echo ok # don't\nenv -u FOO bash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: comment apostrophe hides bash -o pipefail -c",
+     "echo ok # don't\nbash -o pipefail -c \"rm -rf ~\"\n# '", B, ()),
+    # ...and nested: a wrapper-shell inside another shell's script.
+    ("ml divergence: comment apostrophe hides nested sh -c timeout bash -c",
+     "echo ok # don't\nsh -c \"timeout 5 bash -c 'rm -rf ~'\"\n# '", B, ()),
+    ("ml divergence: comment apostrophe hides nested bash -c sudo sh -c",
+     "echo ok # don't\nbash -c \"sudo -u root sh -c 'git push --force origin main'\"\n# '", B, ()),
+    ("ml divergence: comment apostrophe hides triple-nested wrappers",
+     "echo ok # don't\ntimeout 9 sh -c \"nice -n 5 bash -c 'rm -rf ~'\"\n# '", B, ()),
+    # ...and launched by a quoted Windows path with a space, the normal way to start
+    # Git Bash from PowerShell.
+    ("ml divergence: comment apostrophe hides quoted Program Files bash.exe -c",
+     "echo ok # don't\n\"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: comment apostrophe hides quoted Program Files rm.exe",
+     "echo ok # don't\n\"C:\\Program Files\\Git\\usr\\bin\\rm.exe\" -rf ~\n# '", B, ()),
+    ("ml divergence: comment apostrophe hides bash -c -- script",
+     "echo ok # don't\ntimeout 5 bash -c -- \"rm -rf ~\"\n# '", B, ()),
+    ("ml divergence: hidden extraPattern still matches",
+     "echo ok # don't\nbash -c \"terraform des\"\"troy\"\n# '", B, ("terraform destroy",)),
+    ("ml inline sh -c spans lines", "bash -c \"echo ok\nrm -rf /\"", B, ()),
+    ("ml CR line breaks still split", "echo \"a\rb\"\rrm -rf /", B, ()),
+    ("ml unterminated quote still blocks", "git commit -m \"never closed\nmore", B, ()),
+    # Documented residual: an odd number of double quotes in a "$(cat <<'EOF' ...)"
+    # body still fails to tokenize.
+    ("ml residual: odd double quote in heredoc body",
+     "git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"", B, ()),
+    # @'...'@ is a PowerShell here-string, not a Bash one. In a Bash payload the
+    # apostrophe closes the quote, so the trailing '@ leaves it unbalanced.
+    ("ml bash payload gets no here-string handling",
+     "git commit -m @'\ndon't stop\n'@", B, ()),
+]
+
+# PowerShell payloads (tool_name "PowerShell"): evaluated with shell="powershell",
+# which only adds @'...'@ / @"..."@ here-string handling. Same tuple shape as CASES.
+PS_CASES = [
+    ("ps fp here-string commit with apostrophe",
+     "git commit -m @'\nFix the parser\n\nIt's quote-aware now.\n'@", A, ()),
+    ("ps fp expandable here-string commit",
+     "git commit -m @\"\nsubject\n\nbody with a \"quote\"\n\"@", A, ()),
+    ("ps real command after a here-string",
+     "git commit -m @'\nsubject\n'@\nrm -rf /", B, ()),
+    ("ps unterminated here-string still blocks",
+     "git commit -m @'\nsubject never closed", B, ()),
+    ("ps divergence: here-string opener in a comment hides bash -c",
+     "# @'\nbash -c \"rm -rf ~\"\n'@' # '", B, ()),
+    ("ps divergence: backtick-escaped quote hides bash -c",
+     "Write-Host \"a`\"b\"\nbash -c \"rm -rf ~\"\nWrite-Host \"`\"\"", B, ()),
+    ("ps divergence: backslash-ending string hides bash -c",
+     "Write-Host \"foo\\\"\nbash -c \"rm -rf ~\"\nWrite-Host \"\\\"", B, ()),
+    ("ps divergence: comment apostrophe hides timeout 5 bash -c",
+     "# don't\ntimeout 5 bash -c \"rm -rf ~\"\n# '", B, ()),
+    ("ps divergence: comment apostrophe hides & quoted bash.exe -c",
+     "# don't\n& \"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"rm -rf ~\"\n# '", B, ()),
+    ("ps here-string close then sh -c",
+     "Write-Output @'\nx\n'@\nsh -c 'git push --force origin main'", B, ()),
+    # Accepted cost of the quote-blind second pass: a here-string line that starts
+    # with a blocked command is inspected like a command.
+    ("ps conservative: here-string line starting with rm -rf /",
+     "Write-Output @'\nrm -rf /\n'@", B, ()),
+]
+
+# tool_name plumbing through main(): the same text is a PowerShell here-string only
+# when the payload says the PowerShell tool sent it.
+MAIN_CASES = [
+    ("main PowerShell tool_name enables here-strings", "PowerShell",
+     "git commit -m @'\nIt's done\n'@", A),
+    ("main Bash tool_name does not", "Bash", "git commit -m @'\nIt's done\n'@", B),
 ]
 
 
@@ -220,14 +337,33 @@ try:
 except ImportError:  # pytest is not a dependency of this suite
     pytest = None
 
+def _main_blocks(tool_name, cmd):
+    """Run the matcher as the hook does (payload on stdin) and report block/allow."""
+    import json
+    import subprocess
+    payload = json.dumps({"tool_name": tool_name, "tool_input": {"command": cmd}})
+    proc = subprocess.run([sys.executable, "-I", m.__file__], input=payload,
+                          capture_output=True, text=True, timeout=60)
+    return bool(proc.stdout.strip())
+
+
+def _all_cases():
+    """(label, cmd, should_block, extra, shell) across the bash and PowerShell lists."""
+    return ([c + ("bash",) for c in CASES] + [c + ("powershell",) for c in PS_CASES])
+
+
 if pytest is not None:
-    @pytest.mark.parametrize("label,cmd,should_block,extra", CASES)
-    def test_fixture(label, cmd, should_block, extra):
-        reasons = m.evaluate(cmd, extra)
+    @pytest.mark.parametrize("label,cmd,should_block,extra,shell", _all_cases())
+    def test_fixture(label, cmd, should_block, extra, shell):
+        reasons = m.evaluate(cmd, extra, shell=shell)
         assert bool(reasons) == should_block, f"{label}: {cmd!r} -> reasons={reasons}"
 
+    @pytest.mark.parametrize("label,tool_name,cmd,should_block", MAIN_CASES)
+    def test_main_tool_name(label, tool_name, cmd, should_block):
+        assert _main_blocks(tool_name, cmd) == should_block, label
+
     def test_fp_floor():
-        n_allow = sum(1 for _label, _cmd, sb, _extra in CASES if not sb)
+        n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in _all_cases() if not sb)
         assert n_allow >= FP_FLOOR, (
             f"allow-fixture count {n_allow} < floor {FP_FLOOR}: an allow fixture was "
             f"removed, eroding the no-false-positive guarantee.")
@@ -235,8 +371,9 @@ if pytest is not None:
 
 def run():
     passed = failed = 0
-    for label, cmd, should_block, extra in CASES:
-        reasons = m.evaluate(cmd, extra)
+    cases = _all_cases()
+    for label, cmd, should_block, extra, shell in cases:
+        reasons = m.evaluate(cmd, extra, shell=shell)
         got = bool(reasons)
         if got == should_block:
             passed += 1
@@ -245,10 +382,17 @@ def run():
             verb = "BLOCKED" if got else "ALLOWED"
             want = "block" if should_block else "allow"
             print(f"  FAIL [{label}] want={want} got={verb}: {cmd!r} reasons={reasons}")
-    n_allow = sum(1 for _label, _cmd, sb, _extra in CASES if not sb)
-    n_block = len(CASES) - n_allow
+    for label, tool_name, cmd, should_block in MAIN_CASES:
+        if _main_blocks(tool_name, cmd) == should_block:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [{label}] want={'block' if should_block else 'allow'}: {cmd!r}")
+    n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in cases if not sb)
+    n_block = len(cases) - n_allow
     print(f"\ncommand-guard fixtures: {passed} passed, {failed} failed, "
-          f"{len(CASES)} total ({n_allow} allow / {n_block} block)")
+          f"{len(cases) + len(MAIN_CASES)} total ({n_allow} allow / {n_block} block, "
+          f"+{len(MAIN_CASES)} via main())")
     # FP-budget floor: the allow corpus must never shrink below the last release floor.
     if n_allow < FP_FLOOR:
         failed += 1

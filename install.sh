@@ -8,11 +8,19 @@
 # baseline.config.json, and it backs up settings.json before merging.
 #
 # Usage:
-#   ./install.sh [--target <repo-dir>] [--with-openclaw-rules] [--dry-run]
+#   ./install.sh [--target <repo-dir>] [--with-openclaw-rules]
+#                [--enable-security-defaults] [--dry-run]
 #
 #   --target DIR            Repo to install into (default: current directory).
 #   --with-openclaw-rules   Also drop examples/security-defaults.openclaw.json
 #                           as .claude/security-defaults.json (does not enable it).
+#   --enable-security-defaults
+#                           Turn the securityDefaults post-write module on in a
+#                           NEWLY written baseline.config.json. Every post-write
+#                           module ships off; this is the one-step way to see one
+#                           fire. Refuses (nothing written) unless a rules file will
+#                           exist: pass --with-openclaw-rules or create the rules
+#                           file first. An existing config is never rewritten.
 #   --dry-run               Print actions without changing anything.
 #
 # Requires: bash, python3 (or python), git (recommended).
@@ -22,6 +30,7 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$PWD"
 WITH_OPENCLAW=0
+ENABLE_SD=0
 DRY=0
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --target) TARGET="$2"; shift 2 ;;
     --target=*) TARGET="${1#*=}"; shift ;;
     --with-openclaw-rules) WITH_OPENCLAW=1; shift ;;
+    --enable-security-defaults) ENABLE_SD=1; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -132,6 +142,23 @@ fi
 CLAUDE_DIR="$TARGET/.claude"
 HOOKS_DST="$CLAUDE_DIR/hooks/baseline"
 
+# --enable-security-defaults preflight, before anything is written. An enabled
+# securityDefaults module whose rules file is missing fails closed and blocks every
+# infra write, so refuse unless the rules file will exist once this run finishes.
+# Only a NEW config is ever enabled (step 5), so only that case is checked.
+if [[ $ENABLE_SD -eq 1 && ! -f "$CLAUDE_DIR/baseline.config.json" ]]; then
+  SD_RULES="$("$PY" -c 'import json,sys
+c=json.load(open(sys.argv[1],encoding="utf-8"))
+sys.stdout.write(str(((c.get("modules") or {}).get("securityDefaults") or {}).get("rulesFile") or ".claude/security-defaults.json"))' "$SRC/baseline.config.json")"
+  case "$SD_RULES" in /*|?:*) SD_RULES_ABS="$SD_RULES" ;; *) SD_RULES_ABS="$TARGET/$SD_RULES" ;; esac
+  if [[ ! -f "$SD_RULES_ABS" ]] && ! [[ $WITH_OPENCLAW -eq 1 && "$SD_RULES" == ".claude/security-defaults.json" ]]; then
+    echo "ERROR: --enable-security-defaults needs a rules file, and $SD_RULES does not exist." >&2
+    echo "       Pass --with-openclaw-rules to seed the example rules, or create the file" >&2
+    echo "       first. Nothing was written." >&2
+    exit 2
+  fi
+fi
+
 # 1. Hooks (namespaced under .claude/hooks/baseline — never collides with the
 #    repo's own hooks). Wipe the baseline subtree first so removed hooks don't
 #    linger across upgrades, then copy fresh.
@@ -149,9 +176,11 @@ say "copied lib/ guardrails/ modules/ dispatcher/ → .claude/hooks/baseline/"
 
 # 2. Config — never clobber an existing one (it carries local toggles).
 echo "› config"
+CFG_CREATED=0
 if [[ -f "$CLAUDE_DIR/baseline.config.json" ]]; then
   say "kept existing .claude/baseline.config.json (not overwritten)"
 else
+  CFG_CREATED=1
   run cp "$SRC/baseline.config.json" "$CLAUDE_DIR/baseline.config.json"
   say "wrote default .claude/baseline.config.json"
   # Stamp note (create path only — never rewrites an existing config). The value
@@ -223,7 +252,40 @@ if [[ $WITH_OPENCLAW -eq 1 ]]; then
     say "kept existing .claude/security-defaults.json"
   else
     run cp "$SRC/examples/security-defaults.openclaw.json" "$CLAUDE_DIR/security-defaults.json"
-    say "wrote .claude/security-defaults.json (enable via modules.securityDefaults.enabled)"
+    if [[ $ENABLE_SD -eq 1 ]]; then
+      say "wrote .claude/security-defaults.json"
+    else
+      say "wrote .claude/security-defaults.json (enable via modules.securityDefaults.enabled)"
+    fi
+  fi
+fi
+
+# 5. Optional: turn securityDefaults on (--enable-security-defaults). Runs last, so
+# the rules file is already in place, and only on a config this run created: an
+# existing config carries local toggles and is never rewritten.
+if [[ $ENABLE_SD -eq 1 ]]; then
+  echo "› securityDefaults module"
+  if [[ $CFG_CREATED -eq 0 ]]; then
+    SD_ON="$("$PY" -c 'import json,sys
+c=json.load(open(sys.argv[1],encoding="utf-8"))
+sys.stdout.write("1" if ((c.get("modules") or {}).get("securityDefaults") or {}).get("enabled") is True else "0")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || echo 0)"
+    if [[ "$SD_ON" == "1" ]]; then
+      say "securityDefaults is already enabled in the existing .claude/baseline.config.json."
+    else
+      say "kept existing .claude/baseline.config.json, so securityDefaults was NOT changed."
+      say "To turn it on, set modules.securityDefaults.enabled to true in that file."
+    fi
+  elif [[ $DRY -eq 1 ]]; then
+    say "would set modules.securityDefaults.enabled = true in .claude/baseline.config.json"
+  else
+    "$PY" -c 'import json,os,sys
+p=sys.argv[1]
+c=json.load(open(p,encoding="utf-8"))
+c.setdefault("modules",{}).setdefault("securityDefaults",{})["enabled"]=True
+with open(p+".tmp","w",encoding="utf-8",newline="\n") as fh:
+    json.dump(c,fh,indent=2,ensure_ascii=False); fh.write("\n")
+os.replace(p+".tmp",p)' "$CLAUDE_DIR/baseline.config.json"
+    say "enabled modules.securityDefaults (post-write checks of infra files)"
   fi
 fi
 
@@ -246,8 +308,11 @@ $HEADLINE
 Nothing here has been verified to fire. Which guardrails and modules actually run
 is decided by:
   $CLAUDE_DIR/baseline.config.json
-Several are off by default — auto-format among them, because it runs formatters
-resolved from the repo it is invoked in, which is code execution.
+By default only command-guard is on. Every post-write module is off, so writing a
+file triggers no visible check until you enable one; to see one fire, re-install
+into a fresh repo with --with-openclaw-rules --enable-security-defaults. Auto-format
+is off too, because it runs formatters resolved from the repo it is invoked in,
+which is code execution.
 
 These are defense-in-depth defaults, not a security boundary. Read the README
 section "What this does not protect against" before relying on them.
@@ -255,5 +320,6 @@ section "What this does not protect against" before relying on them.
 Recommended next steps:
   • Commit .claude/hooks/baseline/, .claude/baseline.config.json, and the schema.
   • Keep .claude/settings.local.json out of git (per-developer overrides).
-  • Verify a hook fires: edit a file and watch for the post-write dispatcher.
+  • Verify a hook fires: ask Claude to run \`git push --force\`; command-guard
+    should refuse it.
 EOF

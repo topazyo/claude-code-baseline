@@ -26,8 +26,8 @@ on any failure. Runs under Linux, WSL, macOS, and Git Bash on Windows.
 ## Adding a rule? Add a fixture.
 
 Any change to the matcher, the deny-list, or a guard hook **must** come with a
-fixture in `test_command_guard.py` (a `(label, command, B/A, extra)` row) and/or
-`test_hooks.sh`. The `policy-change-gate.sh` check (run in CI on PRs) enforces this.
+fixture in `test_command_guard.py` (a `(label, command, B/A, extra)` row — in
+`PS_CASES` if it is a PowerShell-tool payload) and/or `test_hooks.sh`. The `policy-change-gate.sh` check (run in CI on PRs) enforces this.
 
 When you add a new blocked pattern, also add the matching **evasions** you expect
 it to resist and at least one **near-miss that must stay allowed**, so the
