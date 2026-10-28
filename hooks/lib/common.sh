@@ -699,9 +699,12 @@ bcl_repo_relative() {
 # Runs <command> under coreutils `timeout` when it is available. Rationale: Claude
 # Code enforces its own per-hook timeout by KILLING the hook, and a killed hook
 # produces no exit 2 — so every fail-closed path in this library is skipped and the
-# tool call proceeds. Bounding each child ourselves converts "hook was killed"
-# (fail-open) into "child was killed, rc=124" (which callers route through
-# bcl_failclosed_exit). Where `timeout` is absent (stock macOS, minimal images) the
+# tool call proceeds. (Claude Code 2.1.295+ blocks a timed-out hook wired with
+# onFailure:block — the two PreToolUse guards — but that ignores enforcement and
+# failClosed; every other hook still fails open, as do older releases most likely
+# (unverified).) Bounding
+# each child ourselves converts "hook was killed" (fail-open) into "child was
+# killed, rc=124" (which callers route through bcl_failclosed_exit). Where `timeout` is absent (stock macOS, minimal images) the
 # command still runs, just unbounded — bcl_timeout_available says so honestly.
 bcl_timeout_available() { command -v timeout >/dev/null 2>&1; }
 bcl_timeout() {
@@ -791,8 +794,12 @@ bcl_read_payload() {
 # Why this exists: `bash /missing/hook.sh` exits 127, and Claude Code treats any
 # non-zero-but-not-2 exit as a generic hook error — the action proceeds. So a
 # DELETED or TRUNCATED hook script is a fail-open that no amount of fail-closed
-# logic *inside* the script can cover. Every launcher in the baseline therefore
-# checks its children itself and routes a failure through bcl_failclosed_exit.
+# logic *inside* the script can cover. (Since Claude Code 2.1.295 a hook wired with
+# onFailure:block — the two PreToolUse guards — blocks on that exit instead; every
+# other hook still lets the action proceed, as older releases most likely do
+# (unverified).) Every
+# launcher in the baseline therefore checks its children itself and routes a
+# failure through bcl_failclosed_exit.
 #
 # We test readability, not the execute bit: children are launched as `bash <path>`,
 # so `chmod -x` cannot disarm them — but truncation (`printf '' > hook.sh`) can,

@@ -16,7 +16,7 @@
 | R1 | **Fail-closed** when a control itself fails (missing/malformed rules; no-Python guard + banner) | P0 | ✅ done | M | OWASP: deny when classification/policy lookup/logging fails; closed the lab-caught fail-open |
 | R2 | Harden `command-guard` parsing (compound / wrapped / reordered / quoted commands) | P0 | ✅ done | M | blocklists are bypassable; "guardrails not walls" (Anthropic security; adversarial research) |
 | R3 | Versioned **adversarial CI** + release gate for the baseline itself | P0 | ✅ done | M | OWASP CI/CD release gates: gate any change to deny-list/blocker logic with red-team fixtures |
-| R4 | Pin **minimum Claude Code version** + per-release re-verification checklist | P1 | ✅ done | S | hook/permissions surface evolves (e.g. allow-bypasses-deny fixed v2.1.80+) |
+| R4 | Pin **minimum Claude Code version** + per-release re-verification checklist | P1 | ✅ done | S | hook/permissions surface evolves (e.g. allow-bypasses-deny fixed v2.1.77; see the RELEASING.md ledger) |
 | R5 | `ConfigChange` **tamper-detection** hook *(interim: config/hooks now deny-listed)* | P1 | ✅ done | M | Anthropic team-security guidance; CVE-2025-59536 (repo-controlled settings auto-exec) |
 | R6 | **Managed-settings** enterprise floor (non-overridable) | P2 | ✅ done | L | true enforcement beyond a copyable template (Anthropic permissions/hooks docs) |
 | R7 | Pair secrets deny-list with a scoped **read/path allowlist** | P2 | ✅ done | M | OWASP posture is allowlist-primary; denylist is defense-in-depth secondary |
@@ -175,6 +175,10 @@ which is about a **hook decision**, not a `permissions.allow` rule, and the v2.1
 changelog carries no such entry. 2.1.80 is retained as the pin because it is the version
 the baseline's behavior was actually walked through, and it sits above the documented
 fix; treat it as a verified floor, not as the release that changed something.
+*(2026-10-28: the pin moved to **2.1.295**, the documented minimum for `"onFailure":
+"block"` on the guards, and RELEASING.md now defines the pin as the documented minimum
+plus a ledger of what was re-verified where. Only the `onFailure` behavior was
+re-verified, on 2.1.312; the full checklist was not re-walked.)*
 `install.sh` step 0 now reads the pin, detects the live `claude --version`, compares
 numerically in Python (int-tuple semver, so `2.10` > `2.9`), and prints an
 **advisory** line — `>= required` when ok, a loud multi-line `WARNING` when older,
@@ -388,7 +392,10 @@ R-item. Each one changed shipped behavior, not just prose.
   not aliases, so alias resolution never reaches them. The residual the matcher can't
   fix is recorded in the template: where `bash` is absent from PATH the hook *command*
   cannot launch, which Claude Code treats as fail-open, so on that host the deny rules
-  are the only control that runs.
+  are the only control that runs. *(2026-10-28: superseded on v2.1.295+. The guards now
+  set `"onFailure": "block"`, so a guard that cannot start blocks; on Windows without
+  Git Bash every shell command and `Write`/`Edit` is refused, and Git Bash is a
+  requirement. Below v2.1.295 the old fail-open most likely still holds — unverified.)*
 - **`autoFormat` now ships disabled.** It was the one hook in the baseline that executes
   code the *target* repository supplies — `./node_modules/.bin/prettier` and `eslint` are
   repo-controlled binaries, `prettier.config.js` / `eslint.config.js` and their plugins

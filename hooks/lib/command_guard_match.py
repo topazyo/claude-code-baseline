@@ -12,7 +12,9 @@ normalizer was defeated by ordinary shell quoting):
   * Size cap FIRST: a command longer than _MAX_INSPECT_LEN is not parsed at all,
     it is blocked as uninspectable. Parsing is linear here, but a guard that can
     be made slow can be made to hit the hook timeout, and a timed-out PreToolUse
-    hook never emits exit 2 -- it fails OPEN. A cheap cap beats a clever parser.
+    hook never emits exit 2. Under onFailure:block (Claude Code 2.1.295+) the
+    timeout blocks the call; below 2.1.295 it fails OPEN, so the cap still
+    matters. A cheap cap beats a clever parser.
   * Split on UNQUOTED NEWLINES, before any whitespace handling, so a two-line
     "cd /tmp" + "rm -rf /" payload is two commands, not one. A newline inside a
     quoted string is part of the string, and a trailing backslash continues the
@@ -246,7 +248,8 @@ def _is_danger_target(tok: str) -> bool:
     # Bounded peel loop, re-testing after every step. Replaces the old
     # re.sub(r"(/\.)+$", "", t), whose nested quantifier backtracked
     # catastrophically on /././././...x (review S1: 40k pairs = 16.5 s against a
-    # 10 s hook timeout -- i.e. a computable fail-open).
+    # 10 s hook timeout -- i.e. a computable fail-open below Claude Code 2.1.295;
+    # onFailure:block turns the timeout into a block on 2.1.295+).
     for _ in range(len(t) + 1):
         if _is_root_like(t):
             return True
@@ -1138,7 +1141,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
         return []
     if len(raw) > _MAX_INSPECT_LEN:
         # Do NOT parse it. A guard that can be made slow can be made to hit the
-        # hook timeout, and a timed-out PreToolUse hook fails OPEN.
+        # hook timeout. A timed-out guard blocks under onFailure:block (2.1.295+)
+        # and fails OPEN below it, so the cap still matters.
         return ["command too large to inspect safely "
                 f"({len(raw)} chars > {_MAX_INSPECT_LEN})"]
     if not raw.strip():

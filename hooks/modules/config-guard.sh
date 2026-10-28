@@ -112,7 +112,7 @@ settings_file = sys.argv[1]
 # This is an EXACT-STRING membership check on the baseline-owned entries — it does
 # not normalize globs (a semantically-equal but textually-different rewrite reads as
 # "removed") and does not inspect permissions.allow (allow-shadowing is mitigated by
-# the v2.1.80 version pin, where allow no longer bypasses deny).
+# the version pin: since v2.1.77 a hook's allow no longer bypasses deny).
 EXPECTED_DENY = [
     "Edit(.env*)",
     "Read(.env*)",
@@ -216,6 +216,28 @@ def _invoked(script):
 missing_hooks = [h for h in REQUIRED_HOOK_CMDS if not _invoked(h)]
 if missing_hooks:
     findings.append("baseline hooks are no longer wired/invoked in settings.json: " + ", ".join(missing_hooks) + " - those hooks will not run.")
+
+# (2b) The PreToolUse guards must keep onFailure:"block" (Claude Code 2.1.295+), or a
+#      guard that cannot start or times out lets the call through. Setting it to
+#      "continue", or dropping it, is a one-key disarm of that fail-closed path.
+GUARD_SCRIPTS = ("guardrails/command-guard.sh", "modules/scope-guard.sh")
+hooks_obj = data.get("hooks")
+pre = hooks_obj.get("PreToolUse") if isinstance(hooks_obj, dict) else None
+soft, seen = set(), set()
+for grp in pre if isinstance(pre, list) else []:
+    entries = grp.get("hooks") if isinstance(grp, dict) else None
+    for h in entries if isinstance(entries, list) else []:
+        if not isinstance(h, dict) or not isinstance(h.get("command"), str):
+            continue
+        for s in GUARD_SCRIPTS:
+            if re.search(r"^\s*bash\s.*?/\.claude/hooks/baseline/" + re.escape(s), h["command"]):
+                seen.add(s)
+                if h.get("onFailure") != "block":
+                    soft.add(s)
+# A guard wired under some OTHER event satisfies check (2) but guards nothing.
+soft |= {s for s in GUARD_SCRIPTS if s not in seen and s not in missing_hooks}
+if soft:
+    findings.append("baseline guard hooks are not PreToolUse hooks with onFailure: block: " + ", ".join(sorted(soft)) + " - a guard that cannot start or times out would let the call through.")
 
 # (3) The baseline-managed deny-list (secrets + self-protection) must still be present.
 perms = data.get("permissions")

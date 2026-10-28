@@ -102,8 +102,8 @@ echo "claude-code-baseline → installing into: $TARGET"
 [[ $DRY -eq 1 ]] && echo "(dry run — no files will be changed)"
 
 # 0. Advisory version check. The hook/permissions surface evolves across releases
-#    (e.g. an 'allow' could bypass a 'deny' before v2.1.80, which the tamper-
-#    protection deny-list relies on). Warn — never block — if the live Claude Code
+#    (e.g. onFailure:block on the guards needs v2.1.295; below it a guard that
+#    cannot start most likely fails open). Warn — never block — if the live Claude Code
 #    predates the version this baseline was verified against. See RELEASING.md.
 echo "› version check"
 MIN_CC="$("$PY" -c 'import json,sys
@@ -133,11 +133,28 @@ sys.exit(0 if p(sys.argv[1]) >= p(sys.argv[2]) else 1)' "$CC_VER" "$MIN_CC" 2>/d
     say "Claude Code v$CC_VER detected (>= required v$MIN_CC)."
   else
     echo "  WARNING: Claude Code v$CC_VER is older than the baseline's required v$MIN_CC." >&2
-    echo "           Some controls may behave differently below the pin (e.g. an 'allow' rule could bypass" >&2
-    echo "           'deny' before v2.1.80, weakening the tamper-protection deny-list)." >&2
+    echo "           Some controls behave differently below the pin: the guards' onFailure:block" >&2
+    echo "           is unsupported before v2.1.295, so a guard that cannot start or times out" >&2
+    echo "           may let the call through instead of blocking it." >&2
     echo "           Upgrade Claude Code, or review RELEASING.md first." >&2
   fi
 fi
+
+# 0b. Advisory platform note. The guard hooks run `bash "..."` and set onFailure:
+#     block, so a Claude Code that cannot find Git Bash on Windows refuses every
+#     shell command and every edit (fail-closed). Never blocks the install.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    say "Windows: Claude Code must find Git Bash (Git for Windows, or CLAUDE_CODE_GIT_BASH_PATH);"
+    say "without it the guard hooks cannot start and every shell command and edit is refused." ;;
+  *)
+    if [[ -n "${WSL_DISTRO_NAME:-}" || -e /proc/sys/fs/binfmt_misc/WSLInterop ]] \
+        || grep -qi microsoft /proc/version 2>/dev/null; then
+      say "WSL: Claude Code running inside WSL uses WSL's bash and is fine. Claude Code running"
+      say "natively on Windows for this repo needs Git for Windows; without it every guarded"
+      say "call is refused."
+    fi ;;
+esac
 
 CLAUDE_DIR="$TARGET/.claude"
 HOOKS_DST="$CLAUDE_DIR/hooks/baseline"

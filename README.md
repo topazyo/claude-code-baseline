@@ -83,11 +83,22 @@ and the merged deny-list carries a PowerShell floor: `Remove-Item`/`rm`/`del`/
 
 Two limits, stated plainly:
 
-1. **The hook command is `bash "…/command-guard.sh"`.** On a Windows host with
-   no `bash` on `PATH` the hook cannot launch, and Claude Code treats a hook
-   that never launches as fail-**open**. On such a host the `permissions.deny`
-   rules — which the CLI enforces itself, with no shell involved — are the only
-   control that actually runs.
+1. **The hook command is `bash "…/command-guard.sh"`, so Git Bash is a
+   requirement on Windows.** When Claude Code cannot find Git Bash, a hook with
+   no `shell` runs in PowerShell, where `bash "…"` fails. The guards then fail
+   **closed**: every shell command and every `Write`/`Edit` is refused (the
+   guards carry `"onFailure": "block"`, and since 2.1.299 this happens even
+   without it). Install Git for Windows, or point `CLAUDE_CODE_GIT_BASH_PATH` at
+   its `bash.exe`; WSL's `bash` does not count for a Claude Code running
+   natively on Windows. Below v2.1.295 `onFailure` is unsupported, and how
+   those releases treat the key is unverified: most likely they ignore it and a
+   guard that cannot start fails open, as before, leaving the `permissions.deny`
+   rules (enforced by the CLI itself, no shell involved) as the only control.
+   The worst case, also unverified, is a release that rejects the unknown key
+   and does not load that `settings.json` at all, deny-list included. That is
+   why `install.sh` warns below the pin. Note too that scope-guard is wired even
+   while its module is off, so with `onFailure: "block"` a scope-guard that
+   cannot start, or runs past its 10 s timeout, blocks every Write/Edit.
 2. **command-guard's blocklist is POSIX command names.** It will inspect a
    PowerShell payload, but it does not know cmdlet verbs (`Remove-Item`,
    `Invoke-WebRequest`). Those are covered by the deny rules only, which is a
@@ -149,10 +160,15 @@ limit — not a bug. Read it before you rely on any of the above.
   binaries — any other runtime (`python -c "urllib.request.urlopen(…)"`,
   `nc`, a language SDK) reaches the network freely. **Egress control belongs to
   the OS sandbox, not to this baseline.**
-- **A hook that cannot launch fails open.** That is Claude Code's behaviour, not
-  a setting. `failClosed` covers the cases the hook *can* observe from inside
-  itself; a host with no `bash`, or a hook killed at the Claude Code timeout,
-  produces no exit code at all and the call proceeds.
+- **Below Claude Code v2.1.295, a hook that cannot start most likely fails
+  open.** From 2.1.295 the two guards' `"onFailure": "block"` refuses the call
+  when the hook can't start, times out, or exits with anything but 0 or 2. Older
+  releases do not support the key, and how they treat it is unverified: a guard
+  that cannot start, or is killed at the Claude Code timeout, most likely lets
+  the call proceed, as before. `failClosed` covers only the cases a hook *can*
+  observe from inside itself. The `ConfigChange` config-guard deliberately has
+  no `onFailure`: blocking on a broken config-guard would also block the
+  settings edit that repairs it mid-session.
 - **Config tampering by a human or an external process is largely uncovered.**
   `configGuard` is off by default, and even enabled it sees only in-session
   `.claude/settings.json` changes, after they land.
@@ -216,11 +232,19 @@ the hooks strips `\r` defensively.
 
 It also runs an **advisory version check**: it compares your live `claude --version`
 against `minClaudeCodeVersion` in `baseline.config.json` and prints a warning if
-older. This never blocks the install. The floor exists for one behaviour this
-baseline depends on — a `deny` rule being enforced unconditionally, including
-against a `PreToolUse` hook that returns `"allow"` (fixed in Claude Code 2.1.77).
-See [`RELEASING.md`](RELEASING.md) for the per-release re-verification checklist
-behind the pin.
+older. This never blocks the install. The floor is the documented minimum for
+the behaviours this baseline depends on: `"onFailure": "block"` on the guards
+(Claude Code 2.1.295), which also covers a `deny` rule being enforced
+unconditionally, including against a `PreToolUse` hook that returns `"allow"`
+(fixed in 2.1.77). See [`RELEASING.md`](RELEASING.md) for the per-release
+re-verification checklist behind the pin. On Git Bash/MSYS/Cygwin and WSL hosts
+it also prints an advisory note about the Git Bash requirement above.
+
+An existing install keeps its old `.claude/baseline.config.json` (the installer
+never rewrites it), so `tools/baseline-status.sh` prints `ok=no` beside its
+`minClaudeCodeVersion` (informational; `--strict` does not fail on it); set it
+to `"2.1.295"` in that file to clear it. Re-running `install.sh`
+does refresh `settings.json` and adds `onFailure` to the guards.
 
 ---
 
@@ -250,6 +274,14 @@ thinking about before you flip them.
   }
 }
 ```
+
+**`enforcement` and `failClosed` do not reach a guard that fails to run.** The
+guards' `"onFailure": "block"` is static in `settings.json`: a guard that cannot
+start, times out, or exits with anything but 0 or 2 blocks even under
+`enforcement: "warn"` or `failClosed: false`. To let a failed guard through, set
+its `onFailure` to `"continue"` in `.claude/settings.json`. `failClosed` still
+governs the failures a hook observes from inside itself — no Python, an
+unparseable payload, a deleted or truncated matcher, a child past its time budget.
 
 **Before enabling `autoFormat`:** it runs `./node_modules/.bin/prettier` and
 `./node_modules/.bin/eslint` from the repo you are working in, honouring that

@@ -124,6 +124,18 @@ if allowlist is not None:
     if "sandbox" in allowlist and allowlist["sandbox"].get("enabled") is not True:
         fails.append("allowlist: sandbox present but sandbox.enabled is not true")
 
+# D2: a PreToolUse guard that cannot start or times out must BLOCK the call, not let
+# it through -- onFailure:"block" (Claude Code 2.1.295+) on every guard hook.
+for name, doc in (("template", tmpl), ("managed", bal), ("strict", strict)):
+    guards = [h for g in (doc.get("hooks") or {}).get("PreToolUse", [])
+              for h in g.get("hooks", [])
+              if re.search(r"(command|scope)-guard\.sh", h.get("command", ""))]
+    if not guards:
+        fails.append(f"{name}: no PreToolUse guard hook found")
+    for h in guards:
+        if h.get("onFailure") != "block":
+            fails.append(f"{name}: guard hook {h.get('command')!r} lacks onFailure: \"block\"")
+
 for f in fails:
     print("  FAIL " + f)
 print("test_managed: %d checks failed" % len(fails))

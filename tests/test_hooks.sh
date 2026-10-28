@@ -136,13 +136,14 @@ d = sys.argv[1]
 DENY = ["Edit(.env*)","Read(.env*)","Edit(**/secrets/**)","Read(**/secrets/**)",
         "Edit(.claude/baseline.config.json)","Edit(.claude/settings.json)","Edit(.claude/hooks/baseline/**)"]
 def c(p): return {"type":"command","command":"bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/" + p}
+def g(p, of="block"): return dict(c(p), onFailure=of)   # a PreToolUse guard (D2)
 # Properly-wired: real {type:command} hooks INVOKING all five baseline scripts.
-wired = {"PreToolUse":[{"hooks":[c("guardrails/command-guard.sh"), c("modules/scope-guard.sh")]}],
+wired = {"PreToolUse":[{"hooks":[g("guardrails/command-guard.sh"), g("modules/scope-guard.sh")]}],
          "PostToolUse":[{"hooks":[c("dispatcher/post-write.sh")]}],
          "Stop":[{"hooks":[c("modules/tracker-reminder.sh")]}],
          "ConfigChange":[{"hooks":[c("modules/config-guard.sh")]}]}
 # config-guard's own wiring stripped (self-protection: disabling the tamper detector is tamper).
-wired_no_cg = {"PreToolUse":[{"hooks":[c("guardrails/command-guard.sh"), c("modules/scope-guard.sh")]}],
+wired_no_cg = {"PreToolUse":[{"hooks":[g("guardrails/command-guard.sh"), g("modules/scope-guard.sh")]}],
                "PostToolUse":[{"hooks":[c("dispatcher/post-write.sh")]}],
                "Stop":[{"hooks":[c("modules/tracker-reminder.sh")]}]}
 # Neutered: a command-hook that MENTIONS the namespace but never `bash`-invokes a script
@@ -157,6 +158,29 @@ w("_t_denygone.json", {"hooks": wired, "permissions": {"deny": [x for x in DENY 
 w("_t_all.json",      {"disableAllHooks": True, "hooks": {}, "permissions": {"deny": []}})   # all 3 findings
 w("_t_dah1.json",     {"disableAllHooks": 1, "hooks": wired, "permissions": {"deny": DENY}})  # truthy non-True
 w("_t_list.json",     [1, 2, 3])   # valid JSON but NOT an object -> maximum tamper
+# The REAL installed settings with one change: command-guard's onFailure -> "continue".
+# Against "clean settings -> 0" (the same file unchanged), this isolates the D2 check.
+def variant(name, change):
+    real = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))
+    change(real)
+    w(name, real)
+def set_of(guard, value):
+    def change(s):
+        for grp in s["hooks"]["PreToolUse"]:
+            for h in grp["hooks"]:
+                if guard in h["command"]:
+                    if value is None: h.pop("onFailure", None)
+                    else: h["onFailure"] = value
+    return change
+def move_cg(s):   # command-guard moved out of PreToolUse: still "wired", guards nothing
+    pre = s["hooks"]["PreToolUse"]
+    cg = [g for g in pre if any("command-guard" in h["command"] for h in g["hooks"])]
+    s["hooks"]["PreToolUse"] = [g for g in pre if g not in cg]
+    s["hooks"].setdefault("PostToolUse", []).extend(cg)
+variant("_t_soft.json", set_of("command-guard", "continue"))
+variant("_t_soft_sg.json", set_of("scope-guard", "continue"))
+variant("_t_of_gone.json", set_of("command-guard", None))
+variant("_t_cg_moved.json", move_cg)
 PY
 setcfg "c['modules']['configGuard']['enabled']=True"
 run "clean settings -> 0"        modules/config-guard.sh "$(ccp project_settings "$GOOD")" 0
@@ -165,6 +189,10 @@ run "disableAllHooks=1 -> 2"     modules/config-guard.sh "$(ccp project_settings
 run "neutered hooks -> 2"        modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_unwired.json")" 2
 run "config-guard unwired -> 2"  modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_nocg.json")" 2
 run "deny removed -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_denygone.json")" 2
+run "guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_soft.json")" 2
+run "scope-guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_soft_sg.json")" 2
+run "guard onFailure removed -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_of_gone.json")" 2
+run "guard moved out of PreToolUse -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_cg_moved.json")" 2
 run "non-object json -> 2"       modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_list.json")" 2
 run "missing settings -> 2"      modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_nope.json")" 2
 run "non-watched source -> 0"    modules/config-guard.sh "$(ccp user_settings "$GOOD")" 0
@@ -263,6 +291,22 @@ cp "$FRESH/.claude/baseline.config.json" "$FRESH/.claude/_presd.json"
 sdout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$FRESH" --enable-security-defaults 2>&1 </dev/null)"; rc=$?
 if [ "$rc" = 0 ] && cmp -s "$FRESH/.claude/baseline.config.json" "$FRESH/.claude/_presd.json" && printf '%s' "$sdout" | grep -qF "was NOT changed"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [--enable-security-defaults on an existing config must succeed, say so, and not rewrite it (rc=$rc)]"; fi
 
+echo "== guard failure mode: onFailure + Git Bash note (D1/D2) =="
+# The merge must carry onFailure:"block" onto both PreToolUse guards in the installed
+# settings.json, so a guard that cannot start or times out blocks the call.
+guards_ok="$("$PY" -c "import json,re,sys
+s=json.load(open(r'$WT/.claude/settings.json'))
+g=[h for grp in s['hooks']['PreToolUse'] for h in grp['hooks'] if re.search(r'(command|scope)-guard', h['command'])]
+sys.stdout.write('yes' if len(g)==2 and all(h.get('onFailure')=='block' for h in g) else 'no')" 2>/dev/null)"
+if [ "$guards_ok" = "yes" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [installed PreToolUse guards must carry onFailure: block]"; fi
+# The Git Bash requirement is announced on Windows-like hosts, and only there.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) want_note=1 ;;
+  *) want_note=0; { [ -n "${WSL_DISTRO_NAME:-}" ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || grep -qi microsoft /proc/version 2>/dev/null; } && want_note=1 ;;
+esac
+if printf '%s' "$fout" | grep -qE "Claude Code must find Git Bash|needs Git for Windows"; then got_note=1; else got_note=0; fi
+if [ "$got_note" = "$want_note" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [Git Bash note shown=$got_note, expected=$want_note on $(uname -s)]"; fi
+
 echo "== install.sh version check (R4) =="
 # Stub a fake 'claude' on PATH (prepended, so it wins over any real CLI) and assert
 # install.sh's advisory version check. --dry-run runs the check but changes nothing.
@@ -282,8 +326,8 @@ vcheck() {
   if printf '%s' "$out" | grep -qF "$want"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] missing: $want"; fi
 }
 vcheck "old version warns"        "2.0.0" "is older than the baseline's required"
-vcheck "patch below pin warns"    "2.1.79" "is older than the baseline's required"
-vcheck "equal version ok"         "2.1.80" ">= required v"
+vcheck "patch below pin warns"    "2.1.294" "is older than the baseline's required"
+vcheck "equal version ok"         "2.1.295" ">= required v"
 vcheck "newer minor ok"           "2.9.0"  ">= required v"
 # The warn/ok cases above would FAIL if the stub couldn't execute on this platform
 # (they assert a version-specific path), so they prove the stub is invocable — which
@@ -291,11 +335,11 @@ vcheck "newer minor ok"           "2.9.0"  ">= required v"
 vcheck "unparseable version skips" "none"  "could not detect a 'claude' CLI"
 # Marker anchoring (R4 review): a misleading leading semver on an earlier line must
 # not win over the version tied to the '(Claude Code)' marker. Without anchoring the
-# first-semver grep would pick 0.0.1 and warn; with anchoring it picks 2.1.80 and OKs.
-printf '#!/usr/bin/env bash\necho "node v0.0.1 runtime"\necho "2.1.80 (Claude Code)"\n' > "$VBIN/claude"; chmod +x "$VBIN/claude"
+# first-semver grep would pick 0.0.1 and warn; with anchoring it picks 2.1.295 and OKs.
+printf '#!/usr/bin/env bash\necho "node v0.0.1 runtime"\necho "2.1.295 (Claude Code)"\n' > "$VBIN/claude"; chmod +x "$VBIN/claude"
 rm -rf "$VTARGET"; mkdir -p "$VTARGET"; ( cd "$VTARGET" && git init -q )
 out="$(PATH="$VBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1 </dev/null)"
-if printf '%s' "$out" | grep -qF "Claude Code v2.1.80 detected"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [marker anchoring picks Claude Code semver]"; fi
+if printf '%s' "$out" | grep -qF "Claude Code v2.1.295 detected"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [marker anchoring picks Claude Code semver]"; fi
 
 echo ""
 echo "test_hooks: $pass passed, $fail failed"
