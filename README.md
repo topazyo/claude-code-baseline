@@ -46,13 +46,19 @@ rather than waving it through as clean.
 
 - **command-guard** — `PreToolUse(Bash|PowerShell)`, **enabled by default**.
   Blocks a curated set of destructive / unapproved shell commands: `rm -rf /`
-  and friends, `git push --force` (including `+refspec` forms), `git reset
+  and friends (including drive roots such as `C:/`, `/c` and `/mnt/c`, and
+  `../..`), `git push --force` (including `+refspec` forms), `git reset
   --hard`, dangerous SQL (`drop/truncate table`, `delete from`), remote fetch
   via `curl`/`wget` (including scheme-less hosts, since both default to HTTP),
-  and package installs (`npm/pnpm/yarn/pip install`). The matcher is
-  token-aware: it resolves quoting, `${IFS}`, wrapper paths (`/bin/rm`,
-  `sh -c`, `xargs`), `.exe` suffixes, newline-separated and compound commands,
-  and blocks anything it cannot parse. A newline inside a quoted string (a
+  and package installs (`npm/pnpm/yarn/pip install`, bare `yarn`,
+  `python -m pip install`). The matcher is token-aware: it resolves quoting,
+  `${IFS}`, wrapper paths (`/bin/rm`, `sh -c`, `xargs`), wrappers with options
+  (`sudo -u root`, `nice -n 10`, `timeout 5`), `eval`, `env -S`, redirections,
+  `.exe` suffixes, newline-separated and compound commands, and blocks a shell
+  reading its commands from a pipe (`... | sh`) and anything it cannot parse --
+  including `eval "$(...)"`, so a setup line such as `eval "$(ssh-agent -s)"` is
+  refused.
+  A newline inside a quoted string (a
   multi-line commit message or PR body, a PowerShell here-string) or after a
   trailing `\` does not split the command; a line of such a string that starts
   with a blocked command, or names one in backticks, is still blocked. Extend per repo via

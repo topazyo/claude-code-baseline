@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 55
+FP_FLOOR = 96
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -97,7 +97,11 @@ CASES = [
     ("ok git commit", 'git commit -m "fix"', A, ()),
 
     # --- known limits (NOT blocked by design — defense-in-depth boundary) ---
-    ("limit base64 pipe", "echo cm0gLXJmIC8= | base64 -d | sh", A, ()),
+    # Decoding into a file and running it still passes: the script never appears.
+    # (Decoding straight into a shell, `... | base64 -d | sh`, is now blocked by the
+    # pipe-to-shell rule -- see the A4 fixtures.)
+    ("limit base64 to a file, then run it",
+     "echo cm0gLXJmIC8= | base64 -d > x.sh && bash x.sh", A, ()),
     ("limit var indirection", "rm -rf $TARGET", A, ()),
 
     # --- R2 review: bypasses now closed (must block) ---
@@ -207,6 +211,169 @@ CASES = [
     ("s2 fp sh -c benign", "sh -c 'ls -la'", A, ()),
     ("s2 fp sh -c expands var", "sh -c 'echo $HOME'", A, ()),
     ("s2 fp busybox ls", "busybox ls -la", A, ()),
+
+    # --- A2: a redirection is part of its command, not the end of it ---
+    ("a2 redirect before rm", ">/dev/null rm -rf /", B, ()),
+    ("a2 redirect inside force-push", "git push >/dev/null --force origin main", B, ()),
+    ("a2 fd dup before reset", "2>&1 git reset --hard", B, ()),
+    ("a2 glued redirect then command", "ls>out;rm -rf /", B, ()),
+    ("a2 stderr redirect then command", "ls 2>/dev/null; rm -rf ~", B, ()),
+    ("a2 fp stdout to file", "ls -la > listing.txt", A, ()),
+    ("a2 fp stderr to null", "git status 2>/dev/null", A, ()),
+    ("a2 fp tee after fd dup", "npm test 2>&1 | tee test.log", A, ()),
+    ("a2 fp input redirect", "sort < names.txt", A, ()),
+    ("a2 process substitution body still judged", "cat <(rm -rf /)", B, ()),
+
+    # --- A3: wrappers with option values; timeout, watch, eval, env -S ---
+    ("a3 sudo -u root", "sudo -u root rm -rf /", B, ()),
+    ("a3 nice -n 10", "nice -n 10 rm -rf /", B, ()),
+    ("a3 timeout duration", "timeout 5 rm -rf /", B, ()),
+    ("a3 timeout -k and duration", "timeout -k 3 5 git reset --hard", B, ()),
+    ("a3 xargs -n 1", "find / | xargs -n 1 rm -rf", B, ()),
+    ("a3 xargs -P 4 then -p", "find / | xargs -P 4 -p rm -rf", B, ()),
+    ("a3 watch -n 1", "watch -n 1 rm -rf /", B, ()),
+    ("a3 exec -a", "exec -a x rm -rf /", B, ()),
+    ("a3 env -u", "env -u FOO git push --force", B, ()),
+    ("a3 env -S script", "env -S \"rm -rf /\"", B, ()),
+    ("a3 eval", "eval \"rm -rf /\"", B, ()),
+    ("a3 eval of a substitution is uninspectable", "eval \"$(ssh-agent -s)\"", B, ()),
+    ("a3 fp timeout npm test", "timeout 300 npm test", A, ()),
+    ("a3 fp sudo -u ls", "sudo -u www-data ls /var/www", A, ()),
+    ("a3 fp nice make", "nice -n 10 make -j4", A, ()),
+    ("a3 fp xargs echo", "printf 'a\\nb' | xargs -n 1 echo", A, ()),
+    ("a3 fp eval benign", "eval \"echo hello\"", A, ()),
+
+    # Plan review: forms blocked before this change that the new option parsing
+    # must not unblock, plus the remaining wrapper / redirect / stdin shapes.
+    ("a3 regress: sudo -H", "sudo -H rm -rf /", B, ()),
+    ("a3 regress: sudo -uroot glued value", "sudo -uroot rm -rf /", B, ()),
+    ("a3 regress: xargs -d glued value", "find / | xargs -d'\\n' rm -rf", B, ()),
+    ("a3 regress: xargs -p takes no value", "find / | xargs -p rm -rf", B, ()),
+    ("a3 regress: xargs -i takes no separate value", "find / | xargs -i rm -rf", B, ()),
+    ("a3 regress: xargs --replace takes no separate value", "find / | xargs --replace rm -rf", B, ()),
+    ("a2 operator run ;>", "true;>/dev/null rm -rf /", B, ()),
+    ("a2 operator run (>", "(>/dev/null rm -rf /)", B, ()),
+    ("a2 named fd", "{x}>/dev/null rm -rf /", B, ()),
+    ("a2 stdin from process substitution", "cat < <(rm -rf /)", B, ()),
+    ("a3 watch quoted command", "watch \"rm -rf /\"", B, ()),
+    ("a3 winpty", "winpty rm -rf /", B, ()),
+    ("a3 su -c", "su -c \"rm -rf /\" root", B, ()),
+    ("a3 runuser -u --", "runuser -u nobody -- rm -rf /", B, ()),
+    ("a3 script -c", "script -c \"rm -rf /\" /dev/null", B, ()),
+    ("a3 flock lockfile", "flock /tmp/l rm -rf /", B, ()),
+    ("a3 flock -c", "flock /tmp/l -c \"rm -rf /\"", B, ()),
+    ("a3 chroot newroot", "chroot / rm -rf /", B, ()),
+    ("a3 env -S glued", "env -S'rm -rf /'", B, ()),
+    ("a3 fp watch git status", "watch -n 5 git status", A, ()),
+    ("a3 fp flock make", "flock /tmp/build.lock make", A, ()),
+    ("a3 fp su -c benign", "su -c \"ls /root\" root", A, ()),
+    ("a3 fp winpty python", "winpty python manage.py runserver", A, ()),
+
+    # --- A4: inline shell scripts and shells reading stdin ---
+    ("a4 here-string before the shell", "<<< \"rm -rf /\" bash", B, ()),
+    ("a4 piped into a ( ) group", "echo \"rm -rf /\" | (bash)", B, ()),
+    ("a4 stdin from process substitution", "bash < <(printf 'rm -rf /')", B, ()),
+    ("a4 script from process substitution", "bash <(cat x.sh)", B, ()),
+    ("a4 piped into bash /dev/stdin", "echo \"rm -rf /\" | bash /dev/stdin", B, ()),
+    ("a4 piped into bash -", "echo \"rm -rf /\" | bash -", B, ()),
+    ("a4 piped into source /dev/stdin", "echo \"rm -rf /\" | source /dev/stdin", B, ()),
+    ("a4 tee into an output process substitution", "echo \"rm -rf /\" | tee >(sh)", B, ()),
+    ("a4 fish --command=", "fish --command='rm -rf /'", B, ()),
+    ("a4 fish --command", "fish --command \"rm -rf /\"", B, ()),
+    ("a4 here-string into bash -", "bash - <<< \"rm -rf /\"", B, ()),
+    ("a4 here-string into bash /dev/stdin", "bash /dev/stdin <<< \"rm -rf /\"", B, ()),
+    ("a3 script -qc bundle", "script -qc \"rm -rf /\" /dev/null", B, ()),
+    ("a3 su -lc bundle", "su -lc \"rm -rf /\" root", B, ()),
+    # A quoted separator stays inside its word, as in bash: the -c script is whole.
+    ("a4 bash -c script with ;", "bash -c \"echo ok; rm -rf /\"", B, ()),
+    ("a4 sh -c script with &&", "sh -c 'cd /tmp && rm -rf /'", B, ()),
+    ("a4 bash -c script with |", "bash -c \"ls | xargs rm -rf\"", B, ()),
+    ("a4 quoted & is an argument, not an operator", "rm -rf '&' ~", B, ()),
+    ("a4 quoted substitution as the command word", "\"$(rm -rf /)\"", B, ()),
+    ("a4 fp quoted separators in an argument", "echo \"a; b && c | d\"", A, ()),
+    ("a4 fp quoted separators in a commit message", "git commit -m \"fix: a; b && c\"", A, ()),
+    # Command substitutions bash runs inside a word, and ANSI-C $'...' quoting.
+    ("a4 substitution in a double-quoted argument", "echo \"$(git reset --hard)\"", B, ()),
+    ("a4 substitution in a commit message", "git commit -m \"$(git push --force)\"", B, ()),
+    ("a4 backtick in a double-quoted argument", "echo \"`git reset --hard`\"", B, ()),
+    ("a4 substitution in an assignment", "x=\"$(git reset --hard)\"", B, ()),
+    ("a4 fresh quoting inside $( )",
+     "echo \"$(echo \")\"; git reset --hard; echo \"(\")\"", B, ()),
+    ("a4 ansi-c quote hides a separator", "echo $'\\'';$x;#'", B, ()),
+    ("a4 ansi-c quote hides rm", "echo $'\\'' ; rm -rf / #'", B, ()),
+    ("a4 $$ does not open an ansi-c string", "echo $$'\\' ; git reset --hard #'", B, ()),
+    ("a4 ansi-c hex escape", "rm -rf $'\\x2f'", B, ()),
+    ("a4 ansi-c octal escape", "rm -rf $'\\57'", B, ()),
+    ("a4 ansi-c escape in a flag", "git reset $'--\\x68ard'", B, ()),
+    ("a4 ansi-c string ends at NUL (hex)", "git reset $'--hard\\x00x'", B, ()),
+    ("a4 ansi-c string ends at NUL (octal)", "git push origin main $'--force\\0'", B, ()),
+    ("a4 ansi-c string ends at NUL (unicode)", "rm -rf $'/\\u0000x'", B, ()),
+    ("a4 fp pid", "echo \"pid $$\" && echo $$", A, ()),
+    ("a4 fp single-quoted substitution is literal", "echo '$(rm -rf /)'", A, ()),
+    ("a4 fp benign substitution", "echo \"today is $(date +%F)\"", A, ()),
+    ("a4 fp ansi-c string", "printf $'a\\tb\\n'", A, ()),
+    ("a4 pipe reaches a shell inside bash -c", "echo \"rm -rf /\" | bash -c \"sh\"", B, ()),
+    ("a4 pipe reaches a later shell inside bash -c", "echo x | bash -c \"true; sh\"", B, ()),
+    ("a4 pipe reaches a shell after && inside bash -c", "echo x | bash -c \"cd /tmp && bash\"", B, ()),
+    ("a4 fp piped bash -c running sh -c with a script",
+     "echo x | bash -c \"sh -c 'echo hi'\"", A, ()),
+    ("a4 fp piped into sh -c", "git diff | sh -c \"wc -l\"", A, ()),
+    ("a4 fp piped into bash -c cat", "echo x | bash -c \"cat\"", A, ()),
+    ("a4 fp xargs sh -c with a script", "find . -name '*.md' | xargs -I{} sh -c \"echo {}\"", A, ()),
+    ("a4 fp here-string into bash -c-like", "bash <<< \"echo hi\"", A, ()),
+    ("a4 fp || is not a pipe", "git status || bash scripts/fix.sh", A, ()),
+    ("a4 fp diff of process substitutions", "diff <(ls a) <(ls b)", A, ()),
+    ("a4 fp stdin from a script file", "bash < scripts/setup.sh", A, ()),
+    ("a4 fp tee into cat", "echo hi | tee >(cat)", A, ()),
+    ("a4 bash -c --", "bash -c -- \"rm -rf /\"", B, ()),
+    ("a4 bash -c -x", "bash -c -x 'rm -rf /'", B, ()),
+    ("a4 bash -o pipefail -c", "bash -o pipefail -c \"rm -rf ~\"", B, ()),
+    ("a4 here-string into bash", "bash <<< \"rm -rf /\"", B, ()),
+    ("a4 echo piped into sh", "echo \"rm -rf /\" | sh", B, ()),
+    ("a4 printf piped into bash", "printf 'git push --force' | bash", B, ()),
+    ("a4 base64 piped into sh", "echo cm0gLXJmIC8= | base64 -d | sh", B, ()),
+    ("a4 piped into bash -s", "cat cmds.txt | bash -s -- arg", B, ()),
+    ("a4 fp script file", "bash scripts/build.sh", A, ()),
+    ("a4 fp piped into a script file", "cat data.csv | bash scripts/import.sh", A, ()),
+    ("a4 fp here-string into cat", "cat <<< \"hello\"", A, ()),
+    ("a4 fp pipefail benign", "bash -o pipefail -c \"npm test | tee log\"", A, ()),
+
+    # Short-flag bundles keep their case now (wrapper options are case-sensitive),
+    # so rules that relied on lowercasing must still fire, and -O (no value) must
+    # no longer swallow curl's target the way -o (takes a value) does.
+    ("case: rm -Rf / still blocks", "rm -Rf /", B, ()),
+    ("case: git push -F still blocks", "git push -F origin main", B, ()),
+    ("case: curl -O keeps its target", "curl -O example.com/x.sh", B, ()),
+
+    # --- A5: drive roots and parent traversal ---
+    ("a5 git bash drive root", "rm -rf /c/", B, ()),
+    ("a5 drive root C:/", "rm -rf C:/", B, ()),
+    ("a5 drive root C:", "rm -rf C:", B, ()),
+    ("a5 wsl drive root", "rm -rf /mnt/c", B, ()),
+    ("a5 parent traversal", "rm -rf ../..", B, ()),
+    ("a5 parent traversal glob", "rm -rf ../../*", B, ()),
+    ("a5 find delete on a drive root", "find /c -delete", B, ()),
+    ("a5 parent traversal with ./", "rm -rf .././..", B, ()),
+    ("a5 fp targeted path on a drive", "rm -rf /c/Users/me/proj/build", A, ()),
+    ("a5 fp targeted windows path", "rm -rf C:/tmp/build", A, ()),
+
+    # --- A6: package installs past option values; more install spellings ---
+    ("a6 yarn install", "yarn install", B, ()),
+    ("a6 bare yarn", "yarn", B, ()),
+    ("a6 yarn global add", "yarn global add left-pad", B, ()),
+    ("a6 npm --prefix install", "npm --prefix . install left-pad", B, ()),
+    ("a6 npm install alias", "npm isntall left-pad", B, ()),
+    ("a6 pnpm --dir add", "pnpm --dir app add left-pad", B, ()),
+    ("a6 pip --proxy install", "pip --proxy p:1 install requests", B, ()),
+    ("a6 pip3.13 install", "pip3.13 install requests", B, ()),
+    ("a6 py -m pip install", "py -m pip install requests", B, ()),
+    ("a6 python3.13 -m pip install", "python3.13 -m pip install requests", B, ()),
+    ("a6 fp yarn test", "yarn test", A, ()),
+    ("a6 fp yarn --version", "yarn --version", A, ()),
+    ("a6 fp npm --prefix test", "npm --prefix . test", A, ()),
+    ("a6 fp pip --version", "pip --version", A, ()),
+    ("a6 fp py -m pytest", "py -m pytest -q", A, ()),
+    ("a6 fp python3.13 venv", "python3.13 -m venv .venv", A, ()),
 
     # --- multi-line commands: newlines inside quotes, continuations (must allow) ---
     # Claude Code's own commit/PR forms. Splitting on every newline before
@@ -339,6 +506,16 @@ PS_CASES = [
      "# don't\ntimeout 5 bash -c \"rm -rf ~\"\n# '", B, ()),
     ("ps divergence: comment apostrophe hides & quoted bash.exe -c",
      "# don't\n& \"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"rm -rf ~\"\n# '", B, ()),
+    ("ps a5 rm -r -Force on a drive root", "rm -r -Force C:\\", B, ()),
+    ("ps regress: ansi-c quote under the POSIX reading", "echo $'\\'';$x;#'", B, ()),
+    ("ps substitution in an argument", "Write-Output \"$(git reset --hard)\"", B, ()),
+    ("ps a5 rm -r -Force on ..\\..", "rm -r -Force ..\\..", B, ()),
+    # A script PowerShell hands to bash reads `\` the POSIX way: a continuation.
+    ("ps regress: continuation inside bash -c from PowerShell",
+     "bash -c \"git push origin main \\\n--force\"", B, ()),
+    ("ps regress: continuation inside wsl bash -c",
+     "wsl bash -c \"git reset \\\n--hard\"", B, ()),
+    ("ps fp rm -r -Force on a subfolder", "rm -r -Force .\\build", A, ()),
     ("ps here-string close then sh -c",
      "Write-Output @'\nx\n'@\nsh -c 'git push --force origin main'", B, ()),
     # Accepted cost of the quote-blind second pass: a here-string line that starts

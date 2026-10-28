@@ -43,6 +43,13 @@ normalizer was defeated by ordinary shell quoting):
     (if/while/for/then/do/else), and sh/bash -c). So `echo "git reset --hard"`
     and `grep "delete from"` are NOT blocked, while `git reset --hard` and
     `psql -c 'drop table'` are.
+  * Wrappers are skipped WITH their option values (`sudo -u root`, `nice -n 10`,
+    `timeout 5`, `xargs -n 1`), read both with and without consuming a value so
+    a table gap cannot hide the command. `eval`, `watch "..."`, `env -S`,
+    `su/script/flock -c` and `bash <<< '...'` are inline scripts like `sh -c`.
+    A redirection does not end a command (`>/dev/null rm -rf /` is rm), and a
+    shell reading its script from a pipe, a here-string or a process substitution
+    (`... | sh`, `bash - <<< ...`) is uninspectable -> BLOCK, as is `eval "$(...)"`.
   * The command word is normalized like a path: split on BOTH / and \\ (Git Bash
     / Windows) with a trailing .exe/.cmd/.bat/.com stripped, so a "git.exe" or
     "C:/tools/rm.exe" invocation is matched like its bare equivalent.
@@ -58,9 +65,10 @@ see through encoding (base64), arbitrary variable indirection (only the literal
 $HOME/${HOME} home tokens are caught), or runtime aliases. Two residual limits of
 the tokenizer itself, stated here rather than claimed away elsewhere: POSIX escape
 resolution consumes backslashes, so an *unquoted* Windows path is only recovered
-for drive-letter/UNC forms (see _slashify_windows_paths); and a shell separator
-inside a quoted string still ends a segment -- conservative, so it can over-block
-a quoted sentence but never under-block a real command. Multi-line limits: the
+for drive-letter/UNC forms (see _slashify_windows_paths); and a command
+substitution inside a double-quoted ARGUMENT (`echo "$(...)"`) is not inspected --
+a quoted separator stays inside its word, as in bash (see _shell_words), so a
+`sh -c` script is judged whole but a quoted sentence is not mistaken for commands. Multi-line limits: the
 second, quote-blind pass over a multi-line string blocks a line of it that STARTS
 with a blocked command (a commit body line "git push --force ..."), or that names
 one in backticks ("Run `npm install` first" -- right for a plain -m "...", where
@@ -89,8 +97,48 @@ _DANGER_ROOTS = {"/", ".", "..", "*", "~", "$home", "${home}", "/*"}
 # were the uncovered side, which let an `if <destructive>; then :; fi` form through.
 _WRAPPERS = {"env", "sudo", "doas", "time", "nice", "ionice", "nohup", "setsid",
              "stdbuf", "xargs", "command", "builtin", "exec", "busybox", "toybox",
+             "timeout", "watch", "winpty", "runuser", "chroot", "flock",
              "if", "elif", "then", "while", "until", "for", "do", "else", "fi",
              "done", "esac"}
+# Wrapper options that CONSUME THE NEXT WORD, per wrapper, so that `sudo -u root rm`
+# or `nice -n 10 rm` does not take the option's value for the command word. In a
+# short bundle the FIRST listed letter takes the value: the rest of the bundle if
+# any (-n10, -uroot), else the next word. Case-exact: xargs -P takes a value, -p
+# does not. Options whose value must be glued (--replace=R) are not listed. These
+# tables can be wrong or incomplete, so wrapper options are read BOTH ways -- value
+# consumed and not -- and a rule that fires on either reading blocks.
+_WRAPPER_VALUE_SHORTS = {"sudo": "ughprtCDRTU", "doas": "uC", "nice": "n",
+                         "ionice": "cnpP", "timeout": "ks", "env": "uCS",
+                         "stdbuf": "ioe", "xargs": "nLPsdEIa", "time": "fo",
+                         "exec": "a", "watch": "n", "runuser": "ug", "flock": "wE"}
+_WRAPPER_VALUE_LONGS = {
+    "sudo": {"--user", "--group", "--host", "--prompt", "--role", "--type", "--chdir",
+             "--chroot", "--close-from", "--command-timeout", "--other-user"},
+    "nice": {"--adjustment"},
+    "ionice": {"--class", "--classdata", "--pid", "--pgid", "--uid"},
+    "timeout": {"--kill-after", "--signal"},
+    "env": {"--unset", "--chdir", "--split-string"},
+    "stdbuf": {"--input", "--output", "--error"},
+    "xargs": {"--max-args", "--max-lines", "--max-procs", "--max-chars", "--delimiter",
+              "--arg-file"},
+    "time": {"--format", "--output"},
+    "watch": {"--interval"},
+    "runuser": {"--user", "--group"},
+    "flock": {"--timeout", "--conflict-exit-code"},
+}
+# Wrappers whose leading positionals are arguments, not the command: timeout
+# DURATION, chroot NEWROOT, flock LOCKFILE.
+_WRAPPER_LEADING_POSITIONALS = {"timeout": 1, "chroot": 1, "flock": 1}
+# Commands whose -c / --command value is a shell script: `su -c "..."`,
+# `script -c "..."`, `flock -c "..."`, `runuser -c "..."`.
+_DASH_C_RUNNERS = {"su", "runuser", "script", "flock"}
+# Script paths that mean "read the script from stdin".
+_STDIN_PATHS = {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+# Shell operators, so a run such as `;>` or `(>` splits into `;` + `>`.
+_OP_RE = re.compile(r"&>>?|[<>]&|>>|>\||<<<|<<|<>|\|\||&&|\|&|;;|[;|&()`<>]")
+# Shell options that consume the next word: `bash -o pipefail -c ...`.
+_SHELL_VALUE_OPTS = ("o", "O")
+_SHELL_VALUE_LONGS = {"--rcfile", "--init-file"}
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish"}
 _SQL_RUNNERS = {"psql", "mysql", "mariadb", "mysqlsh", "sqlite3", "sqlite", "sqlcmd",
                 "mongo", "mongosh", "cqlsh", "clickhouse-client", "cockroach", "duckdb"}
@@ -123,6 +171,28 @@ _BARE_HOST_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}(?::[0-9]+)?(?:/.*)
 # command substitution's BODY is judged as its own segment.
 _SEP_SPLIT_RE = re.compile(r"([;|&()`<>]+)")
 _SEP_ONLY_RE = re.compile(r"^[;|&()`<>]+$")
+# A separator piece that is really a REDIRECTION: it does not end the command, and
+# the word after it is its target, not a command word. <( and >( (process
+# substitution) are not in here, so their bodies still become segments.
+_SHORT_FLAG_RE = re.compile(r"^-[A-Za-z0-9]+$")
+_NAMED_FD_RE = re.compile(r"^[a-z_][a-z0-9_]*\}$")     # {x}> after the { is stripped
+_REDIR_RE = re.compile(r"^(?:&>>?|[<>]&|>>|>\||<<<|<<|<>|<|>)$")
+# Catastrophic delete targets beyond _DANGER_ROOTS: a drive root (C:, Git Bash /c,
+# WSL /mnt/c, Cygwin /cygdrive/c) and a path made only of `..` steps.
+_DRIVE_ROOT_RE = re.compile(r"^(?:[a-z]:|/[a-z]|/mnt/[a-z]|/cygdrive/[a-z])$")
+_PARENT_ONLY_RE = re.compile(r"^\.\.(?:/\.\.)*$")
+# Package-manager options that consume the next word, skipped to find the subcommand.
+_NPM_VALUE_OPTS = {"--prefix", "--registry", "--cache", "--userconfig", "--globalconfig",
+                   "--workspace", "--loglevel", "--dir", "--filter", "--reporter",
+                   "--cwd", "--modules-folder", "--cache-folder", "-w", "-C", "-F"}
+_PIP_VALUE_OPTS = {"--proxy", "--cert", "--client-cert", "--cache-dir", "--log",
+                   "--log-file", "--timeout", "--retries", "--exists-action",
+                   "--trusted-host", "--python", "--keyring-provider", "--use-feature",
+                   "--use-deprecated", "--index-url", "--extra-index-url", "-i"}
+_NPM_INSTALL = {"install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta",
+                "isntal", "isntall", "add", "it", "install-test"}
+_PIP_RE = re.compile(r"^pip[0-9.]*$")
+_PYTHON_RE = re.compile(r"^(?:python[0-9.]*|py|pypy[0-9.]*)$")
 # Group-opening / negation punctuation, stripped from the LEFT of a token only:
 # an rstrip would eat the closing brace of ${HOME} and destroy the home target.
 _LEAD_GROUP_CHARS = "{!"
@@ -172,12 +242,13 @@ def _is_danger_target(tok: str) -> bool:
     if not tok:
         return False
     t = re.sub(r"/{2,}", "/", tok)                # // /// -> /
+    t = re.sub(r"/(?:\./)+", "/", t)              # interior /./ -> / (.././.. -> ../..)
     # Bounded peel loop, re-testing after every step. Replaces the old
     # re.sub(r"(/\.)+$", "", t), whose nested quantifier backtracked
     # catastrophically on /././././...x (review S1: 40k pairs = 16.5 s against a
     # 10 s hook timeout -- i.e. a computable fail-open).
     for _ in range(len(t) + 1):
-        if t in _DANGER_ROOTS:
+        if _is_root_like(t):
             return True
         if t.startswith("./") and len(t) > 2:     # ./* -> *, ./foo -> foo
             t = t[2:]
@@ -195,10 +266,41 @@ def _is_danger_target(tok: str) -> bool:
             t = t[:-1] or "/"
             continue
         break
-    return t in _DANGER_ROOTS
+    return _is_root_like(t)
 
 
-def _effective_cmd_index(toks):
+def _is_root_like(t: str) -> bool:
+    return t in _DANGER_ROOTS or bool(_DRIVE_ROOT_RE.match(t) or _PARENT_ONLY_RE.match(t))
+
+
+def _skip_wrapper_args(base: str, toks, i: int, consume: bool = True) -> int:
+    """Index after a wrapper's options (and their values) and leading positionals.
+
+    consume=False skips flags without consuming any value: the other reading, so a
+    wrong value-option table entry costs a false positive, never a bypass.
+    """
+    shorts = _WRAPPER_VALUE_SHORTS.get(base, "") if consume else ""
+    longs = _WRAPPER_VALUE_LONGS.get(base, ()) if consume else ()
+    n = len(toks)
+    while i < n and toks[i].startswith("-") and toks[i] != "-":
+        t = toks[i]
+        i += 1
+        if t == "--":
+            break
+        if t.startswith("--"):
+            if "=" not in t and t in longs:
+                i += 1
+            continue
+        letters = t[1:]
+        for k, ch in enumerate(letters):
+            if ch in shorts:                         # case-exact: -P takes a value, -p not
+                if k == len(letters) - 1:
+                    i += 1                           # the value is the next word
+                break
+    return min(n, i + _WRAPPER_LEADING_POSITIONALS.get(base, 0))
+
+
+def _effective_cmd_index(toks, consume: bool = True):
     """(index of the effective command word, saw_xargs), skipping wrappers/VAR=val.
 
     saw_xargs matters because xargs feeds arguments from STDIN: the dangerous
@@ -214,7 +316,7 @@ def _effective_cmd_index(toks):
             i += 1; continue
         if base in _WRAPPERS:
             saw_xargs = saw_xargs or base == "xargs"
-            i += 1; continue
+            i = _skip_wrapper_args(base, toks, i + 1, consume); continue
         if base in _SHELLS:                          # sh/bash -c '<inline cmd>'
             i += 1
             if i < n and toks[i].startswith("-"):
@@ -238,6 +340,95 @@ def _git_subcommand(args):
     return None, []
 
 
+def _subcommand(args, value_opts):
+    """(first positional, the args after it), skipping options and their values."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in value_opts:
+            i += 2
+            continue
+        if a.startswith("-") and a != "-":           # a bare - is a positional (stdin)
+            i += 1
+            continue
+        return a, args[i + 1:]
+    return None, []
+
+
+def _shell_index(toks, consume: bool = True):
+    """Index of the command word after wrappers and VAR=val, NOT skipping shells."""
+    i, n = 0, len(toks)
+    while i < n:
+        t = toks[i]
+        base = _cmd_word(t)
+        if re.match(r"^[a-z_][a-z0-9_]*=", t):
+            i += 1
+        elif base in _WRAPPERS:
+            i = _skip_wrapper_args(base, toks, i + 1, consume)
+        elif t.startswith("-") and t != "-":
+            i += 1                                   # stray leading flag
+        else:
+            return i
+    return None
+
+
+def _shell_script_index(toks, i):
+    """For a shell word at toks[i]: index of its inline -c script, else None.
+
+    Walks the shell's options -- flags, `--`, and the values of -o/+o/-O/+O and
+    --rcfile/--init-file -- so `bash -o pipefail -c ...`, `bash -c -- ...` and
+    `bash -c -x ...` all find the script. A word before any c-bundle is a script
+    FILE (`sh build.sh`): not inline.
+    """
+    saw_c, n, j = False, len(toks), i + 1
+    while j < n:
+        t = toks[j]
+        if t == "--":
+            j += 1
+            continue
+        if t == "--command":                         # fish --command <script>
+            saw_c = True
+            j += 1
+            continue
+        if t.startswith("--"):
+            j += 2 if ("=" not in t and t in _SHELL_VALUE_LONGS) else 1
+            continue
+        if len(t) > 1 and t[0] in "-+":
+            saw_c = saw_c or (t[0] == "-" and "c" in t[1:])
+            j += 2 if t[-1] in _SHELL_VALUE_OPTS else 1
+            continue
+        return j if saw_c else None
+    return None
+
+
+def _shell_reads_stdin(toks) -> bool:
+    """True if the segment's command takes its script from stdin.
+
+    A shell with no -c script and no script file (`... | sh`), with -s, or whose
+    script file is stdin itself (`bash /dev/stdin`, `bash -`, `source /dev/stdin`).
+    Both readings of wrapper options are tried.
+    """
+    for consume in (True, False):
+        i = _shell_index(toks, consume)
+        if i is None:
+            continue
+        base, rest = _cmd_word(toks[i]), toks[i + 1:]
+        if base in ("source", "."):
+            if rest and rest[0] in _STDIN_PATHS:
+                return True
+            continue
+        if base not in _SHELLS:
+            continue
+        if any(len(t) > 1 and t[0] == "-" and t[1] != "-" and "s" in t[1:] for t in rest):
+            return True                              # -s: read commands from stdin
+        if _shell_script_index(toks, i) is not None:
+            continue                                 # -c script: inspected inline
+        script = _subcommand(rest, _SHELL_VALUE_LONGS | {"-o", "+o", "-O", "+O"})[0]
+        if script is None or script in _STDIN_PATHS:
+            return True
+    return False
+
+
 def _first_positional(args):
     for a in args:
         if not a.startswith("-"):
@@ -258,7 +449,7 @@ def _has_force_flag(args) -> bool:
         if a.startswith("--"):
             if _matches_long(a, _PUSH_FORCE_LONGS):
                 return True  # bare, abbreviated (--force-w) or =value (--force-with-lease=main)
-        elif a.startswith("-") and len(a) > 1 and "f" in a[1:]:
+        elif a.startswith("-") and len(a) > 1 and "f" in a[1:].lower():
             return True  # short-flag bundle containing f, in any position (-f, -fv, -vf)
     return False
 
@@ -293,17 +484,37 @@ def _fetch_targets(cmd: str, args):
 
 def _reasons_for(toks):
     out = []
+    # `echo "rm -rf /" | sh`: the shell's script arrives on stdin, so it is not in
+    # the payload to inspect. Fail closed (the curl | sh shape, without the curl).
+    if getattr(toks, "piped", False) and _shell_reads_stdin(toks):
+        out.append("shell reading its commands from a pipe (uninspectable)")
+    # Judge the command word under both readings of wrapper options (see
+    # _WRAPPER_VALUE_SHORTS): a rule that fires on either one blocks.
+    seen = set()
+    for consume in (True, False):
+        idx, saw_xargs = _effective_cmd_index(toks, consume)
+        if idx is None or idx in seen:
+            continue
+        seen.add(idx)
+        for r in _rules_at(toks, idx, saw_xargs):
+            if r not in out:
+                out.append(r)
+    return out
+
+
+def _rules_at(toks, idx, saw_xargs):
+    """The block reasons for the segment, taking toks[idx] as its command word."""
+    out = []
     seg = " ".join(toks)
-    idx, saw_xargs = _effective_cmd_index(toks)
-    if idx is None:
-        return out
     cmd = _cmd_word(toks[idx])
     args = toks[idx + 1:]
 
     # A command word that is itself a shell expansion cannot be inspected: the
     # binary that will actually run is not in the payload. Fail closed. (Expansion
     # in ARGUMENT position stays allowed -- see the "known limits" fixtures.)
-    if "$" in cmd:
+    # A quoted substitution ("$(rm -rf /)") is one word now, and its basename can
+    # hide the $, so also test the whole token for a leading substitution.
+    if "$" in cmd or toks[idx].startswith(("$(", "`")):
         out.append("uninspectable command word (shell expansion in command position)")
         return out
 
@@ -315,8 +526,8 @@ def _reasons_for(toks):
                 recursive = recursive or _matches_long(a, ("--recursive",))
                 force = force or _matches_long(a, ("--force",))
             elif a.startswith("-") and len(a) > 1:
-                recursive = recursive or "r" in a[1:]
-                force = force or "f" in a[1:]
+                recursive = recursive or "r" in a[1:].lower()   # -r, -R
+                force = force or "f" in a[1:].lower()
             else:
                 positional += 1
                 if _is_danger_target(a):
@@ -366,15 +577,23 @@ def _reasons_for(toks):
             out.append("direct remote fetch with curl/wget is forbidden")
 
     elif cmd in ("npm", "pnpm"):
-        if _first_positional(args) in ("install", "i", "add"):
+        sub, _rest = _subcommand(args, _NPM_VALUE_OPTS)
+        if sub in (_NPM_INSTALL if cmd == "npm" else ("install", "i", "add")):
             out.append("package installation requires explicit approval")
     elif cmd == "yarn":
-        if _first_positional(args) == "add":
+        # Bare `yarn` installs the lockfile's dependencies, like `yarn install`.
+        sub, rest = _subcommand(args, _NPM_VALUE_OPTS)
+        if (sub in ("add", "install") or not args
+                or (sub == "global" and _subcommand(rest, _NPM_VALUE_OPTS)[0] == "add")):
             out.append("package installation requires explicit approval")
-    elif cmd in ("pip", "pip3"):
-        if _first_positional(args) == "install":
+    elif cmd == "uv":                                # uv pip install ...
+        sub, rest = _subcommand(args, _PIP_VALUE_OPTS)
+        if sub == "pip" and _subcommand(rest, _PIP_VALUE_OPTS)[0] == "install":
             out.append("package installation requires explicit approval")
-    elif cmd in ("python", "python3"):
+    elif _PIP_RE.match(cmd):
+        if _subcommand(args, _PIP_VALUE_OPTS)[0] == "install":
+            out.append("package installation requires explicit approval")
+    elif _PYTHON_RE.match(cmd):
         m_pip = ("-m" in args and "pip" in args) or any(a == "-mpip" for a in args)
         if m_pip and "install" in args:
             out.append("package installation requires explicit approval")
@@ -399,19 +618,50 @@ def _split_inline_script(toks):
     REMOVED from the outer segment so it is not judged twice -- and so a `$` inside
     it is not mistaken for an expansion in command-word position.
     """
-    shell_at = None
+    def keep(new):
+        # The outer segment keeps its redirect targets but not its pipe flag: its
+        # stdin goes to the inline script, whose segments _segments marks piped.
+        return _new_seg(new, False, getattr(toks, "redirs", ()))
+
+    # `eval <words>` at the command position: bash joins the words and runs them.
+    for consume in (True, False):
+        k = _shell_index(toks, consume)
+        if k is not None and _cmd_word(toks[k]) == "eval":
+            return keep(toks[:k + 1]), " ".join(toks[k + 1:])
     for i, t in enumerate(toks):
-        if _cmd_word(t) in _SHELLS:
-            shell_at = i
-            break
-    if shell_at is None:
-        return toks, None
-    for j in range(shell_at + 1, len(toks)):
-        t = toks[j]
-        if not t.startswith("-"):
-            break                                  # `sh script.sh`: not an inline -c
-        if "c" in t[1:] and j + 1 < len(toks):      # -c, -lc, -xc ...
-            return toks[:j + 1] + toks[j + 2:], toks[j + 1]
+        base = _cmd_word(t)
+        if base == "watch":                        # watch hands its joined words to sh -c
+            j = _skip_wrapper_args("watch", toks, i + 1)
+            if j < len(toks):
+                return keep(toks[:j]), " ".join(toks[j:])
+        if base in _DASH_C_RUNNERS:                # su / script / flock / runuser -c
+            for j in range(i + 1, len(toks)):
+                a = toks[j]
+                # -c, or a bundle ending in it (`script -qc`, `su -lc`)
+                if ((a == "--command" or (_is_c_bundle(a) and a.endswith("c")))
+                        and j + 1 < len(toks)):
+                    return keep(toks[:j + 1] + toks[j + 2:]), toks[j + 1]
+                if a.startswith("--command="):
+                    return keep(toks[:j] + toks[j + 1:]), a.split("=", 1)[1]
+        if base == "env":                          # env -S "<script>" splits and runs it
+            for j in range(i + 1, len(toks)):
+                a = toks[j]
+                if a in ("-S", "--split-string") and j + 1 < len(toks):
+                    return keep(toks[:j + 1] + toks[j + 2:]), toks[j + 1]
+                if a.startswith("--split-string="):
+                    return keep(toks[:j] + toks[j + 1:]), a.split("=", 1)[1]
+                if a[:2] in ("-S", "-s") and len(a) > 2:   # glued; lowercased if it has spaces
+                    return keep(toks[:j] + toks[j + 1:]), a[2:]
+                if not a.startswith("-"):
+                    break
+        if base in _SHELLS:
+            for j in range(i + 1, len(toks)):      # fish --command=<script>
+                if toks[j].startswith("--command="):
+                    return keep(toks[:j] + toks[j + 1:]), toks[j].split("=", 1)[1]
+            j = _shell_script_index(toks, i)
+            if j is None:
+                return toks, None                  # `sh script.sh`: not an inline -c
+            return keep(toks[:j] + toks[j + 1:]), toks[j]
     return toks, None
 
 
@@ -429,9 +679,19 @@ def _scan_line(line: str, state: str, ps_herestrings: bool = False):
     i, n = 0, len(line)
     while i < n:
         c = line[i]
-        if state == "'":
+        if state == "$'":                            # ANSI-C string, as in _shell_words
+            if c == "\\":
+                i += 1
+            elif c == "'":
+                state = ""
+        elif state == "'":
             if c == "'":
                 state = ""
+        elif state == "" and c == "$" and line[i + 1:i + 2] == "$":
+            i += 1                                   # $$: the 2nd $ opens nothing
+        elif state == "" and c == "$" and line[i + 1:i + 2] == "'":
+            state = "$'"
+            i += 1
         elif c == "\\":
             if i + 1 >= n:
                 return state, True, None
@@ -494,24 +754,226 @@ def _logical_lines(text: str, shell: str = "bash"):
     return out
 
 
-def _words_to_segments(words):
-    """Operator pieces end a segment; group/negation punctuation is stripped."""
-    segments, cur = [], []
+class _Words(list):
+    """_shell_words' result. subst: the line holds a command substitution ($( or a
+    backtick) outside single quotes -- something bash runs that may sit inside a
+    word, so the line also gets the piecewise pass (see _segments)."""
+    subst = False
+
+
+class _Op(str):
+    """An UNQUOTED shell operator run (`;`, `&&`, `|`, `>`...), as opposed to a word.
+
+    glued: the run touches the word before it (the 2 of `2>` is an fd number).
+    """
+    glued = False
+
+
+_OP_CHARS = set("();<>|&`")
+_ANSI_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b",
+                "E": "\x1b", "f": "\f", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_HEX = set("0123456789abcdefABCDEF")
+
+
+def _ansi_escape(s: str, i: int):
+    """Decode the escape at s[i] (a backslash) inside $'...'; return (text, next index).
+
+    Decoded as bash does, so `rm -rf $'\\x2f'` is seen as `rm -rf /`.
+    """
+    c = s[i + 1]
+    if c in _ANSI_SIMPLE:
+        return _ANSI_SIMPLE[c], i + 2
+    if c in "xuU":
+        width = {"x": 2, "u": 4, "U": 8}[c]
+        j = i + 2
+        while j < len(s) and j < i + 2 + width and s[j] in _HEX:
+            j += 1
+        if j > i + 2:
+            code = int(s[i + 2:j], 16)
+            if code <= 0x10FFFF:
+                return chr(code), j
+    elif c in "01234567":
+        j = i + 1
+        while j < len(s) and j < i + 4 and s[j] in "01234567":
+            j += 1
+        return chr(int(s[i + 1:j], 8) & 0xFF), j
+    elif c == "c" and i + 2 < len(s):
+        return chr(ord(s[i + 2]) & 0x1F), i + 3
+    return "\\" + c, i + 2                           # unknown escape: bash keeps the \
+
+
+def _shell_words(s: str):
+    """Words of a logical line, exactly as shlex.split(s, posix=True) reads them --
+    quotes removed, backslash escapes resolved, the same errors for an unclosed quote
+    or a trailing backslash -- except that an UNQUOTED run of ( ) ; < > | & ` comes
+    out as its own _Op token. A quoted one stays inside its word, as in bash, so
+    `bash -c "cd /tmp && rm -rf /"` keeps its script whole and `rm -rf '&' ~` keeps
+    `&` as an argument.
+    """
+    words, buf, has_word, state, ansi_cut = _Words(), [], False, "", False
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if state == "$'":                            # bash ANSI-C string: \ escapes, ' ends
+            if c == "\\" and i + 1 < n:
+                text, i = _ansi_escape(s, i)         # \x2f, \57, \u2f, \n ... decoded
+            elif c == "'":
+                state = ""
+                i += 1
+                continue
+            else:
+                text, i = c, i + 1
+            # bash ends the string at its first NUL: `$'--hard\x00x'` is `--hard`.
+            if not ansi_cut:
+                if "\x00" in text:
+                    text, ansi_cut = text.split("\x00", 1)[0], True
+                buf.append(text)
+            continue
+        elif state == "'":
+            if c == "'":
+                state = ""
+            else:
+                buf.append(c)
+        elif state == '"':
+            if c == '"':
+                state = ""
+            elif c == "\\" and i + 1 >= n:
+                raise ValueError("No escaped character")
+            elif c == "\\" and s[i + 1] in '"\\':
+                buf.append(s[i + 1])
+                i += 1
+            else:
+                if c == "`" or (c == "$" and s[i + 1:i + 2] == "("):
+                    words.subst = True               # a substitution bash runs in "..."
+                buf.append(c)
+        elif c == "\\":
+            if i + 1 >= n:
+                raise ValueError("No escaped character")
+            buf.append(s[i + 1])
+            i += 1
+        elif c == "$" and s[i + 1:i + 2] == "$":
+            buf.append("$$")                         # $$ (the PID): the 2nd $ opens nothing
+            i += 2
+            continue
+        elif c == "$" and s[i + 1:i + 2] == "'":
+            state, has_word, ansi_cut = "$'", True, False
+            i += 2
+            continue
+        elif c in "'\"":
+            state, has_word = c, True
+        elif c in " \t\r\n":                         # shlex's default whitespace
+            if buf or has_word:
+                words.append("".join(buf))
+            buf, has_word = [], False
+        elif c in _OP_CHARS:
+            if c == "`" or (c == "(" and buf and buf[-1] == "$"):
+                words.subst = True
+            glued = bool(buf or has_word)
+            if glued:
+                words.append("".join(buf))
+            buf, has_word = [], False
+            j = i
+            while j < n and s[j] in _OP_CHARS:
+                j += 1
+            op = _Op(s[i:j])
+            op.glued = glued
+            words.append(op)
+            i = j
+            continue
+        else:
+            buf.append(c)
+        i += 1
+    if state:
+        raise ValueError("No closing quotation")
+    if buf or has_word:
+        words.append("".join(buf))
+    return words
+
+
+class _Seg(list):
+    """A segment's tokens.
+
+    piped: something other than a terminal or a named file feeds its stdin (a | or
+    |&, or a process substitution). redirs: the redirect targets dropped from the
+    tokens, kept so extraPatterns can still match them.
+    """
+    piped = False
+    redirs = ()
+
+
+def _new_seg(toks, piped, redirs=()):
+    seg = _Seg(toks)
+    seg.piped = piped
+    seg.redirs = list(redirs)
+    return seg
+
+
+def _words_to_segments(words, split_words: bool = True):
+    """Operator pieces end a segment; group/negation punctuation is stripped.
+
+    A run of operators (`;>`, `(>`) is split into single operators. A redirection
+    is part of its command, not the end of it: the operator, its target and an fd
+    glued to it (the 2 of 2>, the {x} of {x}>) are dropped and the segment
+    continues, so `>/dev/null rm -rf /` is judged as rm. A here-string's target is
+    appended as `-c <target>`, so `bash <<< 'script'` -- in either order -- reads
+    like `bash -c`. A pipe marks the next segment piped, through a `( ... )` group
+    but not `||`; `<( ... )` marks the command it feeds, `>( ... )` its own body.
+    Tokens are lowercased, except short-flag bundles (-P, -Rf): wrapper options are
+    case-sensitive (xargs -P takes a value, -p does not).
+    """
+    segments, cur, redirs, herestr = [], [], [], []
+    piped, pending = False, None           # pending: redirect awaiting its target
+
+    def close(next_piped, fed=False):
+        nonlocal cur, redirs, herestr, piped, pending
+        toks = cur + [w for target in herestr for w in ("-c", target)]
+        if toks:
+            # A here-string feeds stdin too: `bash - <<< '...'` reads it as its script.
+            segments.append(_new_seg(toks, piped or fed or bool(herestr), redirs))
+            piped = next_piped
+        else:
+            piped = piped or next_piped        # `| (bash)`: the group keeps the pipe
+        cur, redirs, herestr, pending = [], [], [], None
+
     for word in words:
-        for piece in _SEP_SPLIT_RE.split(word.lower()):
+        is_op = isinstance(word, _Op)
+        if is_op:                          # from _shell_words: an unquoted operator run
+            pieces, glued = [word], word.glued
+        elif split_words:                  # quote-blind words: split them on operators
+            pieces, glued = _SEP_SPLIT_RE.split(word), False
+        else:                              # a word from _shell_words: whole, as bash has it
+            pieces, glued = [word], False
+        prev_op = None                     # glued: the op touches cur[-1]'s word
+        for piece in pieces:
             if not piece:
                 continue
-            if _SEP_ONLY_RE.match(piece):
-                if cur:
-                    segments.append(cur)
-                cur = []
+            if is_op or (split_words and _SEP_ONLY_RE.match(piece)):
+                for op in _OP_RE.findall(piece):
+                    if _REDIR_RE.match(op):
+                        if glued and cur and (cur[-1].isdigit() or _NAMED_FD_RE.match(cur[-1])):
+                            cur.pop()
+                        pending = op
+                    elif op == "(" and prev_op == "<":
+                        close(False, fed=True)     # <(...): its output feeds this command
+                    elif op == "(" and prev_op == ">":
+                        close(True)                # >(...): this command feeds its body
+                    else:
+                        close(op in ("|", "|&"))
+                    glued, prev_op = False, op
                 continue
+            prev_op = None
             piece = piece.lstrip(_LEAD_GROUP_CHARS)
             if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
                 continue
+            if not _SHORT_FLAG_RE.match(piece):
+                piece = piece.lower()
+            if pending:
+                (herestr if pending == "<<<" else redirs).append(piece)
+                pending = None
+                continue
             cur.append(piece)
-    if cur:
-        segments.append(cur)
+            glued = True
+    close(False)
     return segments
 
 
@@ -528,7 +990,8 @@ def _lenient_words(line: str):
     return resolved.replace("'", "").replace('"', "").split()
 
 
-def _segments(raw: str, _depth: int = 0, shell: str = "bash"):
+def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
+              piped: bool = False, lenient_on_error: bool = False):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -538,12 +1001,26 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash"):
     """
     segments, lenient = [], []
     text = _expand_ifs(_slashify_windows_paths(raw))
+    if shell == "powershell" and ps_slashes:
+        # PowerShell's escape is the backtick; a backslash is a path separator, so
+        # `rm -r -Force ..\..` must not tokenize to `....`.
+        text = text.replace("\\", "/")
     for logical, physical in _logical_lines(text, shell):
         if not logical.strip():
             continue
         # ValueError (unbalanced quoting) -> caller blocks
-        segments.extend(_words_to_segments(shlex.split(logical, posix=True)))
-        if len(physical) > 1:
+        try:
+            words = _shell_words(logical)
+        except ValueError:
+            if not lenient_on_error:
+                raise                    # unbalanced quoting -> caller blocks
+            words = None                 # judged piecewise only, below
+        if words is not None:
+            segments.extend(_words_to_segments(words, split_words=False))
+        # The piecewise pass: for a multi-line logical line, and for any line with a
+        # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
+        # a word and gets a fresh quoting context in bash.
+        if words is None or len(physical) > 1 or words.subst:
             # Physical lines, plus every continuation chain regardless of quote
             # state: a desync that leaves the scanner inside a quote also stops it
             # joining `git push \` + newline + `--force`, which bash still joins.
@@ -559,9 +1036,13 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash"):
                 # nothing; the passes above still cover it.
                 try:
                     segments.extend(_words_to_segments(
-                        shlex.split(line.replace("\\", "/"), posix=True)))
+                        _shell_words(line.replace("\\", "/")), split_words=False))
                 except ValueError:
                     pass
+    if piped:                      # this is the inline script of a piped segment
+        for seg in segments + lenient:
+            if isinstance(seg, _Seg):
+                seg.piped = True
     # Re-tokenize inline `sh -c` scripts. Depth-bounded so a nested
     # `sh -c 'sh -c "..."'` chain cannot recurse without limit.
     if _depth < 3:
@@ -571,7 +1052,10 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash"):
             if outer:
                 expanded.append(outer)
             if inline and inline.strip():
-                expanded.extend(_segments(inline, _depth + 1))
+                # `echo ... | bash -c "true; sh"`: the pipe reaches every command of
+                # the script, so the script's segments start out piped.
+                expanded.extend(_segments(inline, _depth + 1,
+                                          piped=getattr(toks, "piped", False)))
         segments = expanded
     # Lenient segments skip the inline split: with the quotes deleted, the script
     # of `bash -c "rm -rf ~"` is already bare tokens. Splitting would take only its
@@ -662,6 +1146,14 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
 
     try:
         segments = _segments(raw, shell=shell)
+        if shell == "powershell":
+            # PowerShell reads `\` as a path separator, but a script it hands to bash
+            # (`bash -c "git push \` + newline + `--force"`) reads it as an escape or
+            # a line continuation. Judge the POSIX reading too and add its segments;
+            # a line of it that does not tokenize is judged piecewise (quote-blind)
+            # instead of being dropped.
+            segments = segments + _segments(raw, shell="powershell", ps_slashes=False,
+                                            lenient_on_error=True)
     except _Uninspectable as exc:
         return [f"uninspectable command ({exc})"]
     except ValueError as exc:
@@ -680,7 +1172,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     # against both the tokenized form (quotes removed, so an ${IFS}-spliced pattern
     # is visible) and the collapsed raw form (so a pattern that spans a shell
     # operator still hits).
-    tok_norm = " ; ".join(" ".join(t) for t in segments)
+    tok_norm = " ; ".join(" ".join(list(t) + list(getattr(t, "redirs", ())))
+                          for t in segments)
     raw_norm = re.sub(r"\s+", " ", _expand_ifs(raw).lower()).strip()
     for p in extra_patterns or ():
         if not isinstance(p, str) or not p.strip():
