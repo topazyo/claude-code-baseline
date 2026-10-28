@@ -22,8 +22,9 @@ for p in "$ROOT/hooks/lib/command_guard_match.py" "$ROOT/lib/merge_settings.py";
   "$PY" -m py_compile "$p" && echo "   ok $(basename "$p")" || { echo "  FAIL: py_compile $p"; fail=1; }
 done
 
-echo "== 3. command-guard matcher fixtures =="
+echo "== 3. command-guard matcher + settings merge fixtures =="
 "$PY" "$ROOT/tests/test_command_guard.py" || fail=1
+"$PY" "$ROOT/tests/test_merge_settings.py" || fail=1
 
 echo "== 4. hook integration suite =="
 if command -v git >/dev/null 2>&1; then
