@@ -5,10 +5,12 @@
 Usage: merge_settings.py <existing.json|-> <template.json> <output.json>
 
 Rules:
-  * hooks: for every event present in the template, drop any existing hook group
-    that references a baseline command (".../.claude/hooks/baseline/"), then append
-    the template's groups. Non-baseline groups are preserved. This makes re-running
-    the installer idempotent — baseline entries are replaced, not duplicated.
+  * hooks: for every event present in the template, remove each existing hook
+    entry whose command references a baseline path (".../.claude/hooks/baseline/"),
+    then append the template's groups. Removal is per hook: a repo's own hook in the
+    same matcher group stays, and a group is dropped only when removing our entries
+    left it empty. This makes re-running the installer idempotent — baseline entries
+    are replaced, not duplicated.
   * permissions.deny: union with the existing list (order-preserving, de-duplicated).
   * Everything else in the existing file (model, permissions.allow, env, ...) is
     left exactly as it was.
@@ -195,19 +197,37 @@ def _dedupe_key(item: Any) -> str:
     return "\0json\0" + json.dumps(item, sort_keys=True, default=str)
 
 
-def group_is_baseline(group: Any) -> bool:
-    """True only for a hook group we ourselves installed. Anything with an
-    unexpected shape is somebody else's entry and is reported as not-ours, so it
-    is kept rather than replaced."""
-    if not isinstance(group, dict):
-        return False
-    hooks = group.get("hooks")
-    if not isinstance(hooks, list):
-        return False
-    for hook in hooks:
-        if isinstance(hook, dict) and BASELINE_MARKER in str(hook.get("command", "")):
-            return True
-    return False
+def hook_is_baseline(hook: Any) -> bool:
+    """True for a hook entry whose command names the baseline hook path. That is
+    every entry we installed, and also one hand-wired to our scripts; both are
+    treated as ours. Anything with an unexpected shape is somebody else's entry and
+    is reported as not-ours, so it is kept rather than replaced."""
+    return isinstance(hook, dict) and BASELINE_MARKER in str(hook.get("command", ""))
+
+
+def without_baseline_hooks(groups: list) -> list:
+    """Return an event's existing hook groups with our own hook entries removed.
+
+    Ownership is per hook, not per group: a repo's own hook that shares a matcher
+    group with a baseline hook is the consumer's, and dropping the whole group
+    deleted it silently. So such a group is kept without our entries, its other
+    keys untouched. A group is dropped only when removing our entries left it
+    empty — one the consumer already had empty is theirs and is kept. A group with
+    no baseline hook, or with a shape we don't recognise (null included), is kept
+    as is.
+    """
+    out = []
+    for group in groups:
+        hooks = group.get("hooks") if isinstance(group, dict) else None
+        if not isinstance(hooks, list):
+            out.append(group)
+            continue
+        kept = [hook for hook in hooks if not hook_is_baseline(hook)]
+        if len(kept) == len(hooks):
+            out.append(group)
+        elif kept:
+            out.append({**group, "hooks": kept})
+    return out
 
 
 def merge_hooks(existing_hooks: dict, template_hooks: dict) -> dict:
@@ -230,8 +250,7 @@ def merge_hooks(existing_hooks: dict, template_hooks: dict) -> dict:
                 "Refusing to merge: continuing would discard the repo's own hooks for "
                 "that event. Correct the key and re-run.",
             )
-        kept = [g for g in current if not group_is_baseline(g)]
-        out[event] = kept + list(groups)
+        out[event] = without_baseline_hooks(current) + list(groups)
     return out
 
 

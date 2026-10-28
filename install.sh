@@ -23,7 +23,7 @@
 #                           file first. An existing config is never rewritten.
 #   --dry-run               Print actions without changing anything.
 #
-# Requires: bash, python3 (or python), git (recommended).
+# Requires: bash, Python 3.7+ as python3 (or python), git (recommended).
 
 set -euo pipefail
 
@@ -45,11 +45,65 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-PY=""
-command -v python3 >/dev/null 2>&1 && PY=python3
-[[ -z "$PY" ]] && command -v python >/dev/null 2>&1 && PY=python
-if [[ -z "$PY" ]]; then
-  echo "ERROR: python3 (or python) is required for the settings merge." >&2
+# Use the interpreter the hooks will use, and make sure it runs. The hooks pick theirs
+# with bcl_python (hooks/lib/common.sh) on every call: python3, then python, skipping
+# the Windows Store "app execution alias" under %LOCALAPPDATA%\Microsoft\WindowsApps
+# unless it is all there is. Asking bcl_python here — in a subshell, so the library's
+# globals stay out of this script — keeps the installer and the hooks on one
+# interpreter: an installer that went looking for a better one could report success
+# while every guarded call was refused. A name on PATH is not proof of a Python,
+# though: when Python is not installed from the Store, the alias is a stub that prints
+# an install hint and exits 9009 (49 to bash), which used to surface only at the merge,
+# as "merge exited 49 ... Fix the JSON error". So launch it once and refuse, before
+# anything is written, unless it is Python 3.7+ (lib/merge_settings.py and the
+# command-guard matcher need `from __future__ import annotations`).
+if ! PY="$(. "$SRC/hooks/lib/common.sh"; bcl_python)"; then
+  echo "ERROR: could not load $SRC/hooks/lib/common.sh to find the hooks' interpreter." >&2
+  echo "       Nothing was written." >&2
+  exit 1
+fi
+# The version comes back behind a marker, alone on stdout. A Python that prints
+# anything else at startup (a sitecustomize, say) is refused too: command-guard treats
+# any output from its matcher as a block reason, so the hooks would refuse every shell
+# command.
+PY_RC=1; PY_OUT=""; PY_VER=""
+if [[ -n "$PY" ]]; then
+  PY_RC=0
+  PY_OUT="$("$PY" -c 'import sys; print("PYVER=%d.%d" % sys.version_info[:2])' 2>/dev/null </dev/null)" || PY_RC=$?
+  PY_OUT="${PY_OUT//$'\r'/}"
+fi
+if [[ $PY_RC -eq 0 && "$PY_OUT" =~ ^PYVER=([0-9]+)\.([0-9]+)$ ]]; then
+  PY_VER="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+fi
+PY_OK=0
+if [[ -n "$PY_VER" ]] && (( ${PY_VER%%.*} > 3 || (${PY_VER%%.*} == 3 && ${PY_VER#*.} >= 7) )); then
+  PY_OK=1
+fi
+if [[ $PY_OK -ne 1 ]]; then
+  echo "ERROR: no working Python 3.7+ found. The hooks and the settings merge need one." >&2
+  if [[ -z "$PY" ]]; then
+    echo "       Neither python3 nor python is on PATH." >&2
+  else
+    PY_PATH="$(command -v "$PY" 2>/dev/null || true)"
+    if [[ -n "$PY_VER" ]]; then
+      echo "       '$PY' ($PY_PATH) is Python $PY_VER." >&2
+    elif [[ $PY_RC -eq 0 ]]; then
+      echo "       '$PY' ($PY_PATH) ran but printed unexpected output on stdout. The" >&2
+      echo "       hooks read its output, so it must not print anything at startup." >&2
+    else
+      echo "       '$PY' ($PY_PATH) did not run." >&2
+    fi
+    case "$(printf '%s' "$PY_PATH" | tr '[:upper:]' '[:lower:]')" in
+      *windowsapps*)
+        echo "       It is the Windows Store app execution alias. Install Python, or turn" >&2
+        echo "       the alias off under Settings > Apps > Advanced app settings >" >&2
+        echo "       App execution aliases, or put your Python ahead of WindowsApps on PATH." >&2 ;;
+      *)
+        echo "       The hooks run this interpreter on every tool call (python3 first, then" >&2
+        echo "       python), so fix PATH until that is a working Python 3.7+." >&2 ;;
+    esac
+  fi
+  echo "       Nothing was written." >&2
   exit 1
 fi
 

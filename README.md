@@ -220,15 +220,26 @@ What it does (idempotent — safe to re-run):
 3. **Merges** the baseline hook wiring + a security deny-list into
    **`.claude/settings.json`**, backing up the previous file to
    `settings.json.bak.<timestamp>` first. The merge replaces only baseline-managed
-   entries (matched by their `/.claude/hooks/baseline/` command path) and unions
-   the deny-list; your `permissions.allow`, `model`, and everything else are left
-   untouched. If the existing file cannot be parsed, the merge **aborts** — it
-   never treats an unreadable settings file as an empty one.
+   hook entries, one by one, so a hook of yours that shares a matcher group with
+   one stays. Under the events the template wires (`PreToolUse`, `PostToolUse`,
+   `Stop`, `ConfigChange`), any hook whose command contains
+   `/.claude/hooks/baseline/` counts as baseline-managed: it is removed and the
+   template's entries are added back, so a baseline script you wired there by hand,
+   under any matcher, is gone after the next install. It unions the deny-list; your
+   `permissions.allow`, `model`, and everything else are left untouched. If the
+   existing file cannot be parsed, the merge **aborts** — it never treats an
+   unreadable settings file as an empty one.
 
-Requires `bash` and `python3` (or `python`). Designed to run under WSL, Git Bash,
-and macOS/Linux shells. `.gitattributes` pins shipped shell scripts to LF so a
-contributor's `autocrlf` cannot publish a CRLF hook, and value extraction inside
-the hooks strips `\r` defensively.
+Requires `bash` and Python 3.7 or later as `python3` (or `python`). The installer
+uses the interpreter the hooks will use (`python3` first, then `python`, skipping
+the Windows Store app execution alias unless it is all there is), launches it once,
+and stops before writing anything unless it runs, prints nothing else on stdout,
+and is 3.7+. The check sees the
+installer's `PATH`; if Claude Code runs with a different one, whatever the hooks
+resolve there must pass too. Designed to run under WSL, Git Bash, and macOS/Linux shells.
+`.gitattributes` pins shipped shell scripts to LF so a contributor's `autocrlf`
+cannot publish a CRLF hook, and value extraction inside the hooks strips `\r`
+defensively.
 
 It also runs an **advisory version check**: it compares your live `claude --version`
 against `minClaudeCodeVersion` in `baseline.config.json` and prints a warning if
@@ -418,7 +429,7 @@ the tool does not currently verify the `settings.json` wiring. See
 ## Testing
 
 ```bash
-bash tests/run.sh   # bash -n + py_compile + matcher fixtures + hook integration tests
+bash tests/run.sh   # bash -n + py_compile + matcher + merge fixtures + hook integration tests
 ```
 
 Any change to the matcher, the deny-list, or a guard hook must ship with a
@@ -458,6 +469,7 @@ claude-code-baseline/
 ├── tests/                             # adversarial suite + release gate
 │   ├── run.sh                         # aggregate runner (local + CI)
 │   ├── test_command_guard.py          # matcher fixtures (originals + evasions + FPs)
+│   ├── test_merge_settings.py         # settings-merge fixtures (per-hook ownership)
 │   ├── test_hooks.sh                  # end-to-end hook integration tests
 │   ├── test_managed.sh                # validates the managed/ enterprise profiles
 │   ├── test_status.sh                 # exercises tools/baseline-status.sh

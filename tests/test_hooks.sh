@@ -307,6 +307,112 @@ esac
 if printf '%s' "$fout" | grep -qE "Claude Code must find Git Bash|needs Git for Windows"; then got_note=1; else got_note=0; fi
 if [ "$got_note" = "$want_note" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [Git Bash note shown=$got_note, expected=$want_note on $(uname -s)]"; fi
 
+echo "== settings merge keeps a repo's own hooks (B1) =="
+# Ownership is per hook: a repo's own hook sharing a matcher group with a baseline
+# hook must survive the merge, and only a group the merge itself emptied may be
+# dropped. The seeded command-guard spells the path $CLAUDE_PROJECT_DIR without the
+# template's braces: any command naming the baseline path is ours and is replaced,
+# not duplicated. A second run is byte-identical. Shapes: test_merge_settings.py.
+MG="$TMP/mergekeep"; mkdir -p "$MG/.claude"; ( cd "$MG" && git init -q )
+cat > "$MG/.claude/settings.json" <<'EOF'
+{
+  "model": "keep-me",
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash|PowerShell", "hooks": [
+        {"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/baseline/guardrails/command-guard.sh\""},
+        {"type": "command", "command": "bash ./scripts/user-audit.sh", "timeout": 7}
+      ]}
+    ],
+    "Stop": [
+      null,
+      {"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/baseline/old/retired.sh\""}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Write", "hooks": []}
+    ]
+  }
+}
+EOF
+timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$MG")" >/dev/null 2>&1 </dev/null; rc=$?
+if [ "$rc" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [merge-keep install rc=$rc]"; fi
+mk="$("$PY" -c "import json,sys
+s=json.load(open(sys.argv[1],encoding='utf-8'))
+h=s['hooks']; bad=[]
+ua=[(g,x) for g in h['PreToolUse'] for x in g['hooks'] if 'user-audit' in x.get('command','')]
+if len(ua)!=1: bad.append('user-audit appears %d times' % len(ua))
+elif ua[0][0].get('matcher')!='Bash|PowerShell' or ua[0][1].get('timeout')!=7: bad.append('user-audit group or fields changed')
+if h['Stop'][:1]!=[None]: bad.append('null Stop entry not kept in place')
+grps=[(ev,g) for ev,gs in h.items() for g in gs if g is not None]
+allh=[x for ev,g in grps for x in g['hooks']]
+if sum('command-guard.sh' in x.get('command','') for x in allh)!=1: bad.append('command-guard not exactly once')
+if any('retired.sh' in x.get('command','') for x in allh): bad.append('retired baseline hook kept')
+empty=[(ev,g.get('matcher')) for ev,g in grps if not g['hooks']]
+if empty!=[('PostToolUse','Write')]: bad.append('empty groups %r' % (empty,))
+if s.get('model')!='keep-me': bad.append('model changed')
+sys.stdout.write('; '.join(bad) or 'ok')" "$(winpath "$MG/.claude/settings.json")" 2>&1)"
+if [ "$mk" = "ok" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [merge-keep: $mk]"; fi
+cp "$MG/.claude/settings.json" "$TMP/mergekeep.first.json"
+timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$MG")" >/dev/null 2>&1 </dev/null
+if cmp -s "$MG/.claude/settings.json" "$TMP/mergekeep.first.json"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [merge-keep re-run changed settings.json]"; fi
+
+echo "== install.sh picks a Python that runs (B2) =="
+# On Windows `python3` is usually the Store app execution alias, which is a stub when
+# Python was not installed from the Store: it exits 9009 (49 to bash). The installer
+# takes the interpreter the hooks will use (bcl_python: skips the alias unless it is
+# all there is), launches it once, and refuses before writing anything unless it is
+# Python 3.7+ — not fail later at the merge, nor succeed while the hooks cannot run.
+REALPY="$(winpath "$("$PY" -c 'import sys; sys.stdout.write(sys.executable)')")"
+[ -n "$REALPY" ] || { fail=$((fail + 1)); echo "  FAIL [cannot resolve a real interpreter for the B2 shims]"; }
+PYSTUBLOG="$TMP/pystub.log"
+PYT="$TMP/pytarget"
+mkpy() {  # mkpy <dir> <name> stub|real|broken|old|noisy
+  mkdir -p "$1"
+  case "$3" in
+    stub)   printf '#!/usr/bin/env bash\necho "%s" >> "%s"\necho "Python was not found; run without arguments to install from the Microsoft Store." >&2\nexit 49\n' "$2" "$PYSTUBLOG" > "$1/$2" ;;
+    real)   printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$REALPY" > "$1/$2" ;;
+    broken) printf '#!/usr/bin/env bash\nexit 1\n' > "$1/$2" ;;
+    old)    printf '#!/usr/bin/env bash\necho PYVER=3.6\n' > "$1/$2" ;;  # answers the version probe as 3.6
+    noisy)  printf '#!/usr/bin/env bash\necho "startup banner"\nexec "%s" "$@"\n' "$REALPY" > "$1/$2" ;;
+  esac
+  chmod +x "$1/$2"
+}
+pyinstall() {  # pyinstall <PATH-prefix> — sets $pyout and $pyrc
+  rm -rf "$PYT" "$PYSTUBLOG"; mkdir -p "$PYT"; ( cd "$PYT" && git init -q )
+  pyout="$(PATH="$1:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$PYT")" 2>&1 </dev/null)"; pyrc=$?
+}
+# (a) Store stub first on PATH, a real `python` after it: installs, stub never launched.
+mkpy "$TMP/py-a/WindowsApps" python3 stub; mkpy "$TMP/py-a/bin" python real
+pyinstall "$TMP/py-a/WindowsApps:$TMP/py-a/bin"
+if [ "$pyrc" = 0 ] && [ -f "$PYT/.claude/settings.json" ] && [ ! -e "$PYSTUBLOG" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [store stub skipped for a real python: rc=$pyrc stub-launched=$([ -e "$PYSTUBLOG" ] && echo yes || echo no)]"; fi
+# (b) Only Store stubs: refuses with a clear message and writes nothing.
+mkpy "$TMP/py-b/WindowsApps" python3 stub; mkpy "$TMP/py-b/WindowsApps" python stub
+pyinstall "$TMP/py-b/WindowsApps"
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "no working Python 3" && printf '%s' "$pyout" | grep -qF "App execution aliases" \
+   && ! printf '%s' "$pyout" | grep -qF "Fix the JSON error" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [only store stubs must refuse before writing: rc=$pyrc]"; fi
+# (c) The alias is the only interpreter but it runs (a Store-installed Python, or the
+#     Python install manager's alias): used. Old code passes this too — it guards the
+#     last-resort pass, so the alias skip can never lock out a working install.
+mkpy "$TMP/py-c/WindowsApps" python3 real; mkpy "$TMP/py-c/WindowsApps" python stub
+pyinstall "$TMP/py-c/WindowsApps"
+if [ "$pyrc" = 0 ] && [ -f "$PYT/.claude/settings.json" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a working store alias is a valid last resort: rc=$pyrc]"; fi
+# (d) A python3 outside WindowsApps that does not run, a working python after it: the
+#     hooks would run python3 and fail on every call, so the install refuses rather
+#     than reporting success with the merge done by a different interpreter.
+mkpy "$TMP/py-d/bin" python3 broken; mkpy "$TMP/py-d/bin" python real
+pyinstall "$TMP/py-d/bin"
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "'python3' (" && printf '%s' "$pyout" | grep -qF "did not run" \
+   && ! printf '%s' "$pyout" | grep -qF "Fix the JSON error" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a python3 the hooks cannot run must refuse before writing: rc=$pyrc]"; fi
+# (e) The hooks' interpreter is older than 3.7 (the merge and the matcher need 3.7+): refused.
+mkpy "$TMP/py-e/bin" python3 old; mkpy "$TMP/py-e/bin" python real
+pyinstall "$TMP/py-e/bin"
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is Python 3.6" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [python older than 3.7 must refuse before writing: rc=$pyrc]"; fi
+# (f) A Python that prints at startup: command-guard would read that output as a block
+#     reason on every shell call, so refused — and reported as such, not "did not run".
+mkpy "$TMP/py-f/bin" python3 noisy; mkpy "$TMP/py-f/bin" python real
+pyinstall "$TMP/py-f/bin"
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "printed unexpected output" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a python that prints at startup must refuse, named as such: rc=$pyrc]"; fi
+
 echo "== install.sh version check (R4) =="
 # Stub a fake 'claude' on PATH (prepended, so it wins over any real CLI) and assert
 # install.sh's advisory version check. --dry-run runs the check but changes nothing.
