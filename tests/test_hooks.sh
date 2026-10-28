@@ -170,6 +170,158 @@ leaked="$(env -i PATH="$PATH" _BCL_SOURCED=1 _BCL_LOOKUP=warn BCL_READ_ERROR=x _
   | awk '/^_?BCL_/ { n++ } /^__env_done__$/ { ok = 1 } END { print ok ? n + 0 : "noenv" }')"
 if [ "$leaked" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [common.sh passed inherited _BCL_/BCL_ variables on to a child: $leaked]"; fi
 
+echo "== baseline Python is isolated from the project (-I -S -X utf8) =="
+# The hooks, the installer and the status tool start Python with -c, - or a script.
+# Without isolation, a json.py or shlex.py in the project (the hooks' working
+# directory), anything on PYTHONPATH, or a .pth file in the interpreter's site-packages
+# is imported by those helpers and decides what they report. A dedicated project gets
+# marker-writing json.py and shlex.py in its root and is used as both the working
+# directory and CLAUDE_PROJECT_DIR: every entry point must still do its job, and the
+# marker must never appear. (The harness's own `$PY -c` calls run in $WT, not there.)
+PROJ="$TMP/plant-proj"; mkdir -p "$PROJ"; ( cd "$PROJ" && git init -q )
+WPROJ="$(winpath "$PROJ")"; HP="$PROJ/.claude/hooks/baseline"
+PMARK="$(winpath "$TMP")/plant.marker"; rm -f "$PMARK"
+for m in json shlex; do
+  printf 'open(r"%s", "a").write("%s.py from the project was imported\\n")\n' "$PMARK" "$m" > "$PROJ/$m.py"
+done
+plant_check() {  # plant_check <desc> — counts a failure if a planted module ran
+  if [ ! -e "$PMARK" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1: $(tr '\n' ' ' < "$PMARK")]"; rm -f "$PMARK"; fi
+}
+# plant_run <desc> <expected-rc> <expected-output|""> <cwd> <cmd...> — stdin comes from $PL
+plant_run() {
+  local desc="$1" want="$2" needle="$3" dir="$4" got out; shift 4
+  out="$(cd "$dir" && printf '%s' "$PL" | "$@" 2>&1)"; got=$?
+  if [ "$got" = "$want" ] && { [ -z "$needle" ] || printf '%s' "$out" | grep -qF -- "$needle"; }; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] want=$want got=$got"; fi
+  plant_check "$desc"
+}
+# Positive control: an UNisolated Python in the project must import the planted json.py,
+# or every "marker absent" check below would pass for the wrong reason.
+( cd "$PROJ" && "$PY" -c 'import json' ) >/dev/null 2>&1
+if [ -e "$PMARK" ]; then pass=$((pass + 1)); rm -f "$PMARK"; else fail=$((fail + 1)); echo "  FAIL [plant control: a plain python in the project did not import the planted json.py]"; fi
+PL=""
+plant_run "install.sh run from inside the project" 0 "Baseline written" "$PROJ" \
+  timeout -k 5 120 bash "$SRC/install.sh" --target "$WPROJ" --with-openclaw-rules --enable-security-defaults
+# lib/merge_settings.py runs as a script, which only PYTHONPATH can reach.
+plant_run "install.sh re-run with PYTHONPATH planted" 0 "Baseline written" "$WT" \
+  env PYTHONPATH="$WPROJ" timeout -k 5 120 bash "$SRC/install.sh" --target "$WPROJ"
+"$PY" -c "import json;p=r'$WPROJ/.claude/baseline.config.json';c=json.load(open(p));c['modules']['configGuard']['enabled']=True;json.dump(c,open(p,'w'))"
+PL="$(bash_payload 'git push --force origin main')"
+plant_run "command-guard in the project" 2 "Blocked by Claude Code baseline command-guard" "$PROJ" \
+  env CLAUDE_PROJECT_DIR="$WPROJ" bash "$HP/guardrails/command-guard.sh"
+plant_run "command-guard with PYTHONPATH planted" 2 "Blocked by Claude Code baseline command-guard" "$WT" \
+  env CLAUDE_PROJECT_DIR="$WPROJ" PYTHONPATH="$WPROJ" bash "$HP/guardrails/command-guard.sh"
+printf 'services:\n  app:\n    image: nginx:1.27\n    user: root\n' > "$PROJ/docker-compose.yml"
+PL="$(write_payload "$WPROJ/docker-compose.yml")"
+plant_run "post-write in the project" 2 "REGRESSION BLOCKER" "$PROJ" \
+  env CLAUDE_PROJECT_DIR="$WPROJ" bash "$HP/dispatcher/post-write.sh"
+PL="$(printf '{"source":"project_settings","file_path":"%s"}' "$WPROJ/.claude/settings.json")"
+plant_run "config-guard in the project" 0 "project settings change validated" "$PROJ" \
+  env CLAUDE_PROJECT_DIR="$WPROJ" bash "$HP/modules/config-guard.sh"
+PL=""; rm -f "$TMP/status.json"
+plant_run "baseline-status --json in the project" 0 "installed=yes" "$PROJ" \
+  bash "$SRC/tools/baseline-status.sh" --json "$(winpath "$TMP")/status.json" "$WPROJ"
+if grep -q '"installed": true' "$TMP/status.json" 2>/dev/null; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [baseline-status --json wrote no report]"; fi
+# A .pth file in the interpreter's own site-packages runs at startup unless -S, and an
+# activated in-project .venv puts that directory inside the project. Exercised only
+# when bcl_python really resolves into the venv (it prefers python3, then python).
+VENV="$TMP/plant-venv"
+if "$PY" -m venv --without-pip "$(winpath "$VENV")" >/dev/null 2>&1; then
+  VBIN="$VENV/bin"; [ -d "$VENV/Scripts" ] && VBIN="$VENV/Scripts"
+  VSITE="$("$VBIN/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null | tr -d '\r')"
+  [ -n "$VSITE" ] && VSITE="$(cygpath -u "$VSITE" 2>/dev/null || printf '%s' "$VSITE")"
+  if [ -n "$VSITE" ] && [ -d "$VSITE" ]; then
+    printf 'import os; open(r"%s", "a").write("a .pth file in site-packages ran\\n")\n' "$PMARK" > "$VSITE/zz_plant.pth"
+  fi
+  # Control: without -S the venv's own python must run the .pth, or the check proves nothing.
+  "$VBIN/python" -c pass >/dev/null 2>&1
+  pth_runs=0; [ -e "$PMARK" ] && pth_runs=1; rm -f "$PMARK"
+  vres="$(PATH="$VBIN:$PATH" bash -c '. "$1"; command -v "$(bcl_python)"' _ "$H/lib/common.sh" 2>/dev/null)"
+  if [ "$pth_runs" != 1 ]; then
+    echo "  SKIP [venv .pth: the planted .pth file does not run in this venv]"
+  else
+    case "$vres" in
+      "$VBIN"/*)
+        PL="$(bash_payload 'git push --force origin main')"
+        plant_run "command-guard with a venv first on PATH" 2 "Blocked by Claude Code baseline command-guard" "$WT" \
+          env PATH="$VBIN:$PATH" bash "$H/guardrails/command-guard.sh" ;;
+      *) echo "  SKIP [venv .pth: bcl_python resolves to ${vres:-nothing}, not the venv]" ;;
+    esac
+  fi
+  [ -n "$VSITE" ] && rm -f "$VSITE/zz_plant.pth"
+else
+  echo "  SKIP [venv .pth: python -m venv is unavailable here]"
+fi
+rm -f "$PMARK"; PL=""
+# An interpreter that is found but cannot run the helpers — a stub, a broken shim, one
+# that rejects -I/-S such as Python 2 or a legacy virtualenv — must fail closed like a
+# missing one. It used to make bcl_cfg read "" for every key, so command-guard took
+# itself for disabled and allowed the call. (py-rejects-S runs on main, which passes no
+# -S; it pins that the isolation flags cannot open that hole again.)
+REALPY_ISO="$(winpath "$("$PY" -c 'import sys; sys.stdout.write(sys.executable)')")"
+BROKEN="$TMP/py-broken"; NOSITE="$TMP/py-rejects-S"; NOSTDLIB="$TMP/py-no-stdlib"
+mkdir -p "$BROKEN" "$NOSITE" "$NOSTDLIB"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BROKEN/python3"
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = -S ] && { echo "Unknown option: -S" >&2; exit 2; }; done\nexec "%s" "$@"\n' "$REALPY_ISO" > "$NOSITE/python3"
+# starts (an empty program runs) but can import nothing, like a legacy virtualenv under -S
+printf '#!/usr/bin/env bash\nprev=""; for a in "$@"; do [ "$prev" = -c ] && [ -z "$a" ] && exit 0; prev="$a"; done\necho "ModuleNotFoundError: No module named json" >&2; exit 1\n' > "$NOSTDLIB/python3"
+for d in "$BROKEN" "$NOSITE" "$NOSTDLIB"; do
+  cp "$d/python3" "$d/python"; chmod +x "$d/python3" "$d/python"
+  run_env "command-guard, interpreter that does not run ($(basename "$d"))" "PATH=$d:$PATH" \
+    guardrails/command-guard.sh "$(bash_payload 'rm -rf /')" 2 "CONTROL COULD NOT RUN"
+  run_env "post-write, interpreter that does not run ($(basename "$d"))" "PATH=$d:$PATH" \
+    dispatcher/post-write.sh "$(write_payload "$WT/docker-compose.yml")" 2 "Python unavailable"
+done
+# ...but a WORKING interpreter whose prime script fails (here on a lone-surrogate escape
+# it cannot re-encode) is a prime failure, not a missing interpreter: the per-call checks
+# take over and report the real reason, and posture/failClosed still apply.
+LONE="$(printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~ # \\%s"}}' ud800)"
+out="$(printf '%s' "$LONE" | bash "$H/guardrails/command-guard.sh" 2>&1)"; rc=$?
+if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "Blocked by Claude Code baseline command-guard"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [lone surrogate: want the real block reason, got rc=$rc: $(printf '%s' "$out" | head -c 120)]"; fi
+# UTF-8 mode: a non-ASCII extraPatterns entry must match a non-ASCII command on every
+# platform, with or without PYTHONUTF8 (-I ignores it; Windows otherwise decodes the
+# payload in its ANSI code page and the pattern never matches).
+setcfg "c['guardrails']['commandGuard']['extraPatterns']=['שלום']"
+run "non-ASCII extraPattern blocks" guardrails/command-guard.sh "$(bash_payload 'echo שלום')" 2
+run_env "non-ASCII extraPattern, PYTHONUTF8=1" PYTHONUTF8=1 guardrails/command-guard.sh "$(bash_payload 'echo שלום')" 2 "Blocked by Claude Code baseline command-guard"
+resetcfg
+# ...and a rule message outside the ANSI code page must reach the report intact. A
+# control on Linux; on Windows dropping -X utf8 makes the print fail, and under
+# failClosed:false the violation would then pass as exit 0.
+rm -f "$TMP/rules.saved" "$TMP/compose.saved"
+[ -f "$RULES" ] && cp "$RULES" "$TMP/rules.saved"
+[ -f "$WT/docker-compose.yml" ] && cp "$WT/docker-compose.yml" "$TMP/compose.saved"
+"$PY" -c "import json;json.dump({'infraPattern':'docker-compose','rules':[{'id':'no-root','appliesWhen':r'^\s*user:\s','mustMatch':'1000:1000','message':'משתמש root אסור'}]},open(r'$RULES','w'))"
+printf 'services:\n  app:\n    user: "0:0"\n' > "$WT/docker-compose.yml"
+setcfg "c['modules']['securityDefaults']['enabled']=True; c['failClosed']=False"
+out="$(printf '%s' "$(write_payload "$WT/docker-compose.yml")" | bash "$H/modules/security-defaults.sh" 2>&1)"; rc=$?
+if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "REGRESSION BLOCKER" && printf '%s' "$out" | grep -qF "משתמש root אסור"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [non-ASCII rule message: rc=$rc]"; fi
+resetcfg
+if [ -f "$TMP/rules.saved" ]; then cp "$TMP/rules.saved" "$RULES"; else rm -f "$RULES"; fi
+if [ -f "$TMP/compose.saved" ]; then cp "$TMP/compose.saved" "$WT/docker-compose.yml"; else rm -f "$WT/docker-compose.yml"; fi
+# Every Python launch in shipped scripts passes `-I -S -X utf8` right after the
+# interpreter, so a new launch site cannot regress silently. Each launch on a line is
+# checked on its own: the interpreter variables in any spelling ($PY, ${PY}, "$PY",
+# "$PYBIN"), "$(bcl_python)" used directly, and python/python3/python3.12 or a path to
+# one, followed by an argument, a here-string, or a line continuation (which must keep
+# the flags on the launch line). The count guards the pattern itself: if it stopped
+# matching launches, an empty list would pass for the wrong reason. Allowed without the
+# flags, on purpose: auto-format's `python -m black`, and run-tests' pytest probe and
+# run — they execute the repo's own formatter and tests by design (both opt-in).
+PYINTERP='(\$\{?(PY|py|_BCL_PY|PYBIN)\}?"?|"?\$\(bcl_python\)"?|(^|[^[:alnum:]_.$/-])(/[^[:space:]"]*/)?python[0-9.]*)'
+PYLAUNCH="$PYINTERP"'(<<<|[[:space:]]+(-I -S -X utf8|[-"$\'"'"'][^[:space:]]*))'
+PYALLOW='/hooks/guardrails/auto-format\.sh:[0-9]+:.*python3? -m black |/hooks/modules/run-tests\.sh:[0-9]+:.*"\$PYBIN" -(c '"'"'import pytest'"'"'|m pytest )'
+launches="$( { grep -rnE --include='*.sh' "$PYLAUNCH" "$SRC/hooks" "$SRC/tools"; grep -nE "$PYLAUNCH" "$SRC/install.sh" | sed "s|^|$SRC/install.sh:|"; } \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -vE "$PYALLOW")"
+nlaunch=0; missing=""
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  while IFS= read -r m; do
+    nlaunch=$((nlaunch + 1))
+    case "$m" in *"-I -S -X utf8") ;; *) missing="$missing$line"$'\n' ;; esac
+  done < <(printf '%s\n' "${line#*:*:}" | grep -oE "$PYLAUNCH")
+done <<< "$launches"
+if [ -z "$missing" ] && [ "$nlaunch" -ge 15 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [Python launches without -I -S -X utf8 ($nlaunch found):"; printf '%s' "$missing" | sed 's/^/         /'; echo "  ]"; fi
+
 echo "== config-guard (ConfigChange) tamper detection (R5) =="
 ccp() { printf '{"source":"%s","file_path":"%s"}' "$1" "$2"; }   # ConfigChange payload
 GOOD="$WT/.claude/settings.json"   # the real installed settings (baseline footprint intact)

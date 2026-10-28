@@ -101,7 +101,7 @@ else
 fi
 case "$SETTINGS_FILE" in /*|?:*) : ;; *) SETTINGS_FILE="$(bcl_repo_root)/$SETTINGS_FILE" ;; esac
 
-OUT="$("$PY" - "$SETTINGS_FILE" <<'PY'
+OUT="$("$PY" -I -S -X utf8 - "$SETTINGS_FILE" <<'PY'
 import json, re, sys
 
 settings_file = sys.argv[1]
@@ -183,10 +183,10 @@ if not isinstance(data, dict):
 
 findings = []
 
-# Finding text is ASCII-only ON PURPOSE: on Windows, Python's stdout encoding is
-# the legacy code page (an em-dash becomes a lone cp1252 byte, not UTF-8), so it
-# would render mojibake. The bash-emitted decoration below (❌, header) is fine —
-# bash emits the file's UTF-8 bytes verbatim.
+# Finding text is ASCII-only ON PURPOSE. This script now runs in UTF-8 mode (-X utf8),
+# but run without it, Windows Python's stdout is the legacy code page (an em-dash
+# becomes a lone cp1252 byte, not UTF-8) and would render mojibake. The bash-emitted
+# decoration below (❌, header) is fine — bash emits the file's UTF-8 bytes verbatim.
 # (1) disableAllHooks turns off EVERY hook, including this baseline - highest signal.
 #     Flag ANY present value that is not explicitly false/absent (truthy ints/strings
 #     like 1 or "true" are a tamper signal even if Claude Code only honors real true).

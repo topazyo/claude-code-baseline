@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 96
+FP_FLOOR = 98
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -474,6 +474,29 @@ CASES = [
      "echo ok # don't\nbash -c \"terraform des\"\"troy\"\n# '", B, ("terraform destroy",)),
     ("ml inline sh -c spans lines", "bash -c \"echo ok\nrm -rf /\"", B, ()),
     ("ml CR line breaks still split", "echo \"a\rb\"\rrm -rf /", B, ()),
+    # bash reads these as part of a word, str.splitlines() as line breaks: a command
+    # split around one must still be caught (both readings are inspected).
+    ("word-break CR hides rm target", "rm -rf \r ~", B, ()),
+    ("word-break VT hides rm target", "rm -rf \x0b ~", B, ()),
+    ("word-break FF hides rm target", "rm -rf \x0c ~", B, ()),
+    ("word-break FS hides rm target", "rm -rf \x1c ~", B, ()),
+    ("word-break GS hides rm target", "rm -rf \x1d ~", B, ()),
+    ("word-break RS hides rm target", "rm -rf \x1e ~", B, ()),
+    ("word-break NEL hides rm target", "rm -rf \x85 ~", B, ()),
+    ("word-break LS hides rm target", "rm -rf \u2028 ~", B, ()),
+    ("word-break PS hides rm target", "rm -rf \u2029 ~", B, ()),
+    ("word-break VT hides --force", "git push -o \x0b --force origin main", B, ()),
+    ("word-break CRLF multi-line commit still allowed",
+     "git commit -m \"Fix login\r\n\r\nCloses #12\"", A, ()),
+    ("word-break CRLF continuation still allowed", "git status \\\r\n  --short", A, ()),
+    # ...including inside an inline script, where $'...' decodes the escape into the
+    # character before the script is split.
+    ("word-break $'\\v' inside bash -c", "bash -c $'rm -rf \\v ~'", B, ()),
+    ("word-break $'\\v' inside eval", "eval $'rm -rf \\v ~'", B, ()),
+    ("word-break $'\\r' inside sh -c", "sh -c $'rm -rf \\r ~'", B, ()),
+    ("word-break $'\\x85' inside bash -c", "bash -c $'rm -rf \\x85 ~'", B, ()),
+    ("word-break $'\\u2028' inside bash -c", "bash -c $'rm -rf \\u2028 ~'", B, ()),
+    ("word-break $'\\f' inside sh -c hides --force", "sh -c $'git push origin main \\f --force'", B, ()),
     ("ml unterminated quote still blocks", "git commit -m \"never closed\nmore", B, ()),
     # Documented residual: an odd number of double quotes in a "$(cat <<'EOF' ...)"
     # body still fails to tokenize.

@@ -57,6 +57,9 @@ done
 # as "merge exited 49 ... Fix the JSON error". So launch it once and refuse, before
 # anything is written, unless it is Python 3.7+ (lib/merge_settings.py and the
 # command-guard matcher need `from __future__ import annotations`).
+# Every launch below passes `-I -S -X utf8`, as the hooks do (see bcl_python): the
+# installer often runs from inside the repo it installs into, and nothing there may be
+# imported by it.
 if ! PY="$(. "$SRC/hooks/lib/common.sh"; bcl_python)"; then
   echo "ERROR: could not load $SRC/hooks/lib/common.sh to find the hooks' interpreter." >&2
   echo "       Nothing was written." >&2
@@ -69,7 +72,7 @@ fi
 PY_RC=1; PY_OUT=""; PY_VER=""
 if [[ -n "$PY" ]]; then
   PY_RC=0
-  PY_OUT="$("$PY" -c 'import sys; print("PYVER=%d.%d" % sys.version_info[:2])' 2>/dev/null </dev/null)" || PY_RC=$?
+  PY_OUT="$("$PY" -I -S -X utf8 -c 'import sys; print("PYVER=%d.%d" % sys.version_info[:2])' 2>/dev/null </dev/null)" || PY_RC=$?
   PY_OUT="${PY_OUT//$'\r'/}"
 fi
 if [[ $PY_RC -eq 0 && "$PY_OUT" =~ ^PYVER=([0-9]+)\.([0-9]+)$ ]]; then
@@ -160,7 +163,7 @@ echo "claude-code-baseline → installing into: $TARGET"
 #    cannot start most likely fails open). Warn — never block — if the live Claude Code
 #    predates the version this baseline was verified against. See RELEASING.md.
 echo "› version check"
-MIN_CC="$("$PY" -c 'import json,sys
+MIN_CC="$("$PY" -I -S -X utf8 -c 'import json,sys
 try:
     sys.stdout.write(str(json.load(open(sys.argv[1],encoding="utf-8")).get("minClaudeCodeVersion","") or ""))
 except Exception:
@@ -181,7 +184,7 @@ else
   fi
   if [[ -z "$CC_VER" ]]; then
     say "could not detect a 'claude' CLI version on PATH — skipping check (baseline verified against Claude Code >= $MIN_CC)."
-  elif "$PY" -c 'import sys
+  elif "$PY" -I -S -X utf8 -c 'import sys
 def p(v): return tuple(int(x) for x in v.split("."))
 sys.exit(0 if p(sys.argv[1]) >= p(sys.argv[2]) else 1)' "$CC_VER" "$MIN_CC" 2>/dev/null; then
     say "Claude Code v$CC_VER detected (>= required v$MIN_CC)."
@@ -218,7 +221,7 @@ HOOKS_DST="$CLAUDE_DIR/hooks/baseline"
 # infra write, so refuse unless the rules file will exist once this run finishes.
 # Only a NEW config is ever enabled (step 5), so only that case is checked.
 if [[ $ENABLE_SD -eq 1 && ! -f "$CLAUDE_DIR/baseline.config.json" ]]; then
-  SD_RULES="$("$PY" -c 'import json,sys
+  SD_RULES="$("$PY" -I -S -X utf8 -c 'import json,sys
 c=json.load(open(sys.argv[1],encoding="utf-8"))
 sys.stdout.write(str(((c.get("modules") or {}).get("securityDefaults") or {}).get("rulesFile") or ".claude/security-defaults.json"))' "$SRC/baseline.config.json")"
   case "$SD_RULES" in /*|?:*) SD_RULES_ABS="$SD_RULES" ;; *) SD_RULES_ABS="$TARGET/$SD_RULES" ;; esac
@@ -257,7 +260,7 @@ else
   # Stamp note (create path only — never rewrites an existing config). The value
   # itself rides along in the copied config; hooks/VERSION (recopied below) is the
   # drift marker tools/baseline-status.sh reads. See RELEASING.md.
-  BLV="$("$PY" -c 'import json,sys
+  BLV="$("$PY" -I -S -X utf8 -c 'import json,sys
 try: sys.stdout.write(str(json.load(open(sys.argv[1],encoding="utf-8")).get("baselineVersion","") or ""))
 except Exception: pass' "$SRC/baseline.config.json" 2>/dev/null || true)"
   [[ -n "$BLV" ]] && say "stamped baselineVersion: $BLV"
@@ -301,7 +304,7 @@ if [[ -f "$SETTINGS" ]]; then
   say "backed up existing settings.json → $(basename "$BACKUP")"
   if [[ $DRY -eq 0 ]]; then
     MERGE_RC=0
-    "$PY" "$SRC/lib/merge_settings.py" "$SETTINGS" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
+    "$PY" -I -S -X utf8 "$SRC/lib/merge_settings.py" "$SETTINGS" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
     [[ $MERGE_RC -eq 0 ]] || merge_failed "$MERGE_RC"
     mv "$TMP" "$SETTINGS"
   fi
@@ -309,7 +312,7 @@ if [[ -f "$SETTINGS" ]]; then
 else
   if [[ $DRY -eq 0 ]]; then
     MERGE_RC=0
-    "$PY" "$SRC/lib/merge_settings.py" "-" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
+    "$PY" -I -S -X utf8 "$SRC/lib/merge_settings.py" "-" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
     [[ $MERGE_RC -eq 0 ]] || merge_failed "$MERGE_RC"
     mv "$TMP" "$SETTINGS"
   fi
@@ -337,7 +340,7 @@ fi
 if [[ $ENABLE_SD -eq 1 ]]; then
   echo "› securityDefaults module"
   if [[ $CFG_CREATED -eq 0 ]]; then
-    SD_ON="$("$PY" -c 'import json,sys
+    SD_ON="$("$PY" -I -S -X utf8 -c 'import json,sys
 c=json.load(open(sys.argv[1],encoding="utf-8"))
 sys.stdout.write("1" if ((c.get("modules") or {}).get("securityDefaults") or {}).get("enabled") is True else "0")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || echo 0)"
     if [[ "$SD_ON" == "1" ]]; then
@@ -349,7 +352,7 @@ sys.stdout.write("1" if ((c.get("modules") or {}).get("securityDefaults") or {})
   elif [[ $DRY -eq 1 ]]; then
     say "would set modules.securityDefaults.enabled = true in .claude/baseline.config.json"
   else
-    "$PY" -c 'import json,os,sys
+    "$PY" -I -S -X utf8 -c 'import json,os,sys
 p=sys.argv[1]
 c=json.load(open(p,encoding="utf-8"))
 c.setdefault("modules",{}).setdefault("securityDefaults",{})["enabled"]=True
