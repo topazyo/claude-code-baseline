@@ -1,7 +1,7 @@
 {
   "_comment": "Baseline-managed fragment merged into a target repo's .claude/settings.json by install.sh. Hook commands all point under .claude/hooks/baseline/ so they never collide with a repo's own hooks, and the merge is idempotent (it replaces any existing entry whose command references /.claude/hooks/baseline/). permissions.deny is unioned with whatever the repo already denies; the repo's allow list is left untouched. Every _comment* key in this file is stripped by lib/merge_settings.py and never reaches the consumer's settings.json. If you change the deny entries here, update EXPECTED_DENY in modules/config-guard.sh too (tests/policy-change-gate.sh enforces a fixture update).",
 
-  "_comment_matchers": "The shell matchers are \"Bash|PowerShell\" because the PowerShell tool is default-on on Windows and, on a Windows host without Git Bash, Claude Code does not register the Bash tool at all - a hook matching only \"Bash\" would never fire there. Matchers are regex, so the alternation is the documented form (hooks reference: 'Match Bash|PowerShell in hooks that inspect shell commands'). NOTE the residual gap this does not close: the hook command itself is `bash \"...command-guard.sh\"`, so on a Windows box with no bash on PATH the hook is invoked and fails to launch, and Claude Code treats a hook that never launches as fail-open. On such a host the permissions.deny entries below - which the CLI enforces itself, with no shell involved - are the only control that actually runs.",
+  "_comment_matchers": "The shell matchers are \"Bash|PowerShell\" because the PowerShell tool is default-on on Windows and, on a Windows host without Git Bash, Claude Code does not register the Bash tool at all - a hook matching only \"Bash\" would never fire there. Matchers are regex, so the alternation is the documented form (hooks reference: 'Match Bash|PowerShell in hooks that inspect shell commands'). NOTE the hook command itself is `bash \"...command-guard.sh\"`. The PreToolUse guards set \"onFailure\": \"block\" (Claude Code 2.1.295+): a guard that cannot start, times out, or exits with an unexpected code BLOCKS the call instead of letting it through. So on a Windows host where Claude Code cannot find Git Bash, every shell command and every Write/Edit is refused - Git for Windows is a requirement there, not an option. (On 2.1.299+ that host blocks even without onFailure. Below 2.1.295 onFailure is unsupported - how those releases treat the key is unverified - and a guard that cannot start most likely fails open, leaving the permissions.deny entries below as the only control.) onFailure is static here: it ignores baseline.config.json's enforcement and failClosed, so a guard that crashes blocks even under \"warn\". ConfigChange (config-guard) gets no onFailure on purpose: it also fires for external settings edits, so blocking on a broken config-guard would block the very edit that repairs it.",
 
   "hooks": {
     "PreToolUse": [
@@ -11,7 +11,8 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/guardrails/command-guard.sh\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       },
@@ -21,7 +22,8 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/scope-guard.sh\"",
-            "timeout": 5
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       }

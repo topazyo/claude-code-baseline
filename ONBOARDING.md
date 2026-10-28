@@ -137,11 +137,16 @@ tracker-reminder is on `Stop`.
 > Claude Code doesn't register the Bash tool at all — it enables the PowerShell tool
 > instead. A hook matching only `Bash` never fires there, silently, while the repo
 > still looks protected. Matching both is the fix. Note the second half of that
-> problem, which a matcher cannot solve: our hook commands are `bash "…/…sh"`, so on
-> a box with no `bash` on PATH the command can't launch at all, and Claude Code
-> treats a hook that fails to launch as *no objection*. On such a host the
-> `permissions.deny` rules — which need nothing installed — are the only control
-> that actually runs.
+> problem, which a matcher cannot solve: our hook commands are `bash "…/…sh"`. When
+> Claude Code cannot find Git Bash, a hook with no `shell` runs in PowerShell, where
+> `bash "…"` fails — so the guards fail, and every shell command and every
+> `Write`/`Edit` is **refused** (fail-closed: the guards carry `"onFailure":
+> "block"`, and since 2.1.299 this happens even without it). **Git for Windows (or
+> `CLAUDE_CODE_GIT_BASH_PATH` pointing at its `bash.exe`) is therefore a requirement
+> on Windows**; WSL's `bash` does not count for a Claude Code running natively on
+> Windows. Below v2.1.295 `onFailure` is unsupported and a guard that cannot start
+> most likely fails open, as before (unverified), leaving the `permissions.deny`
+> rules — which need nothing installed — as the only control that actually runs.
 
 > 💡 **The coverage boundary, stated once so you can hold it.** The baseline hooks
 > only ever see two families of tool call: shell commands (`Bash|PowerShell`) and
@@ -182,7 +187,7 @@ The hook's **exit code** is how it talks back — and the meaning of exit `2`
 |-----------|---------|
 | `0` | No objection. **But for `PreToolUse`, `0` does NOT auto-approve** — the normal permission flow still runs. Silence never approves. |
 | `2` | "Stop — don't do this." stderr is fed back to Claude as actionable feedback. **What it actually does is event-dependent** (below). |
-| any other non-zero | The action proceeds anyway; Claude sees only a generic "hook error" notice plus the *first line* of stderr. |
+| any other non-zero | The action proceeds anyway; Claude sees only a generic "hook error" notice plus the *first line* of stderr. **Unless** the hook sets `"onFailure": "block"` (Claude Code v2.1.295+), as our two `PreToolUse` guards do: then any exit other than `0` or `2` — or a hook that can't start or times out — blocks. |
 
 What exit `2` does, per event:
 
@@ -191,17 +196,29 @@ What exit `2` does, per event:
 - **`PostToolUse` → cannot block** (the tool already ran); it only shows stderr to Claude so it can react and fix.
 
 (The "any other non-zero" exit is event-dependent too: on `PreToolUse` the action
-proceeds; on `PostToolUse` the tool already ran, so the only difference from exit
-`2` is *how much* of your stderr Claude sees — the first line vs. the full report.)
+proceeds unless the hook sets `onFailure: "block"`; on `PostToolUse` the tool
+already ran, so the only difference from exit `2` is *how much* of your stderr
+Claude sees — the first line vs. the full report.)
 
-> ⚠️ **The corollary nobody enjoys: a hook that never launches fails *open*.**
-> Our wiring is `bash "…/command-guard.sh"`. If that file is missing, unreadable,
-> or `bash` isn't on PATH, the command exits non-zero *without ever running our
-> code* — and by the table above, a non-`2` exit lets the action proceed. Our
-> `failClosed` setting (Part 3) covers a hook that **runs and cannot finish its
-> check**; it cannot cover a hook that never started. Deleting a hook script is not
-> an `Edit` tool call, so the deny-list doesn't see it either. This is the strongest
-> single reason the managed tier (Part 7) exists.
+> ⚠️ **The corollary: a hook that never launches fails *open* — unless it sets
+> `onFailure`.** Our wiring is `bash "…/command-guard.sh"`. If that file is
+> missing, unreadable, or `bash` isn't on PATH, the command exits non-zero
+> *without ever running our code* — and by the table above, a non-`2` exit lets
+> the action proceed. That is why both guards (command-guard and scope-guard) set
+> `"onFailure": "block"`: on Claude Code v2.1.295+ a guard that can't start, times
+> out, or exits with anything but `0`/`2` blocks instead. Verified on 2.1.312 with
+> real `claude -p` runs: with `command-guard.sh` deleted a Bash `ls` was blocked
+> ("blocking because onFailure is "block""), with `onFailure: "continue"` the same
+> `ls` ran, and with `scope-guard.sh` deleted a Write was blocked and no file was
+> created. Below v2.1.295 the key is unsupported and how it is treated is
+> unverified; a guard that never started most likely fails open there, as before.
+> Our `failClosed` setting (Part 3) covers a hook that **runs and cannot finish its
+> check**; `onFailure` is static in `settings.json` and ignores both `failClosed`
+> and `enforcement`. The config-guard `ConfigChange` hook deliberately gets no
+> `onFailure`, since blocking on a broken config-guard would also block the
+> settings edit that repairs it. Deleting a hook script is not an `Edit` tool
+> call, so the deny-list doesn't see it either — the managed tier (Part 7) is
+> still the only non-overridable floor.
 
 > ⚠️ **The single most important mechanic:** real *prevention* happens at
 > `PreToolUse`. Our `PostToolUse` security checks can't un-write a file — they
@@ -222,7 +239,9 @@ proceeds; on `PostToolUse` the tool already ran, so the only difference from exi
 > per-repo tier the hook script and `baseline.config.json` are ordinary files in
 > your repo: the developer can edit them, and so can the agent through any shell
 > command the deny rules don't happen to match. `guardrails.commandGuard.enabled:
-> false` is a one-key disarm, and a deleted script is the fail-open above. Only
+> false` is a one-key disarm, and so is flipping a guard's `onFailure` to
+> `"continue"` before deleting its script (below v2.1.295, deleting it alone is
+> the fail-open above). Only
 > **managed settings** are non-overridable (Part 7). Everything in Parts 0–6 is a
 > raised floor, not a boundary.
 
@@ -743,14 +762,18 @@ Found a bypass? .......... do NOT open a public issue → SECURITY.md (private r
   and Windows-style paths; `CLAUDE_PROJECT_DIR` is set by Claude Code.
 - **Windows *without* Git Bash — the one configuration where the hooks don't run.**
   There, Claude Code doesn't register the Bash tool; it uses the PowerShell tool.
-  The matcher is `Bash|PowerShell` so it does fire — but the hook *command* is
-  `bash "…/command-guard.sh"`, and with no `bash` on PATH that command can't launch.
-  Claude Code treats a hook that fails to launch as no objection, so command-guard is
-  absent, silently, while `tools/baseline-status.sh` still reports the baseline
-  installed. What still works on such a host is the `permissions.deny` list
-  (including the `PowerShell(Remove-Item *)` / `Invoke-WebRequest` / `Invoke-Expression`
-  floor), because permission rules need nothing installed. Install Git Bash or run
-  Claude Code inside WSL2 if you want the hook layer.
+  The matcher is `Bash|PowerShell` so it does fire — but a hook with no `shell` runs
+  in PowerShell, where `bash "…/command-guard.sh"` fails. The guards fail **closed**:
+  every shell command and every `Write`/`Edit` is refused (`onFailure: "block"`, and
+  since 2.1.299 even without it). So Git for Windows (or `CLAUDE_CODE_GIT_BASH_PATH`
+  pointing at its `bash.exe`) is a **requirement** on Windows; `install.sh` prints an
+  advisory note on Git Bash/MSYS/Cygwin and WSL hosts. WSL's `bash` does not count for
+  a Claude Code running natively on Windows; running Claude Code inside WSL2 is fine.
+  Below v2.1.295 a guard that cannot start most likely fails open instead (unverified),
+  silently, while `tools/baseline-status.sh` still reports the baseline installed;
+  there only the `permissions.deny` list (including the `PowerShell(Remove-Item *)` /
+  `Invoke-WebRequest` / `Invoke-Expression` floor) still works, because permission
+  rules need nothing installed.
 - **A hook is too aggressive.** Switch that repo to `warn`, or narrow the rule /
   pattern via a reviewed config PR — don't edit the hook script in place.
 - **A `securityDefaults` rule isn't blocking, or every infra edit suddenly fails.**

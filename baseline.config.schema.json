@@ -25,7 +25,7 @@
     "failClosed": {
       "type": "boolean",
       "default": true,
-      "description": "When a security control cannot RUN - missing or malformed rules file, malformed baseline.config.json, or Python unavailable - fail closed: under 'block' posture the hook exits 2 with a loud message instead of silently passing. Defaults to true, and the default is what a hook gets when this file is unreadable, so the degraded path is fail-closed by construction. Set false to downgrade such degradations to warnings. It does not cover a hook that never launches (deleted or non-executable script): Claude Code's exit-code semantics make that a fail-open no hook can intercept."
+      "description": "When a security control cannot RUN - missing or malformed rules file, malformed baseline.config.json, or Python unavailable - fail closed: under 'block' posture the hook exits 2 with a loud message instead of silently passing. Defaults to true, and the default is what a hook gets when this file is unreadable, so the degraded path is fail-closed by construction. Set false to downgrade such degradations to warnings. It does not cover a hook that never launches (deleted or non-executable script), times out, or exits other than 0 or 2: no hook can intercept that. For the two PreToolUse guards, settings.json's onFailure: block (Claude Code v2.1.295+) blocks such a failure regardless of this key or enforcement; set a guard's onFailure to continue in .claude/settings.json to let it through. Below v2.1.295 onFailure is unsupported and such a failure most likely fails open (unverified)."
     },
     "guardrails": {
       "type": "object",

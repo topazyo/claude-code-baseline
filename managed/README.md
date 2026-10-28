@@ -135,11 +135,17 @@ Pick one, **rename it to `managed-settings.json`**, and deploy:
   outright rather than in a `-Recurse -Force` form, because PowerShell parameter
   abbreviation and free flag order make a targeted text pattern a rule that only *appears*
   to work.
-  > **The gap this does not close.** The managed `hooks` commands are `bash "<PREFIX>/…"`.
-  > On a host with no `bash` on PATH the command cannot launch, and Claude Code treats a
-  > hook that fails to launch as no objection. There, the deny rules are the entire floor —
-  > which is a real argument for deploying the config-only subset below to Windows fleets
-  > rather than assuming the hooks cover them.
+  > **What a missing Git Bash does.** The managed `hooks` commands are `bash "<PREFIX>/…"`.
+  > When Claude Code cannot find Git Bash, a hook with no `shell` runs in PowerShell, where
+  > `bash "…"` fails. Both profiles set `"onFailure": "block"` on command-guard, so on
+  > v2.1.295+ that fails **closed**: every shell command is refused (since 2.1.299 even
+  > without `onFailure`). Git for Windows (or `CLAUDE_CODE_GIT_BASH_PATH` pointing at its
+  > `bash.exe`) is therefore a requirement on Windows fleets; WSL's `bash` does not count
+  > for a Claude Code running natively on Windows. Below v2.1.295 `onFailure` is
+  > unsupported and a hook that cannot start most likely fails open, as before
+  > (unverified). There, the deny rules are the entire floor — which is a real argument
+  > for deploying the config-only subset below to such fleets rather than assuming the
+  > hooks cover them.
 - **Over-blocking is non-overridable here.** `Read(.env*)` matches non-secret files like
   `.env.example` / `.env.sample`, and `**/secrets/**` matches any `secrets/` dir
   (including non-sensitive fixtures). At the per-repo tier a team can override this; at the
@@ -329,7 +335,8 @@ the R6 guardrail hooks alongside.
 
 | Feature | Minimum Claude Code |
 |---------|---------------------|
-| Managed `deny` / managed hooks / `managed-settings.json` | the baseline pin, **2.1.80** (see [`../RELEASING.md`](../RELEASING.md)) |
+| Managed `deny` / managed hooks / `managed-settings.json` | the baseline pin, **2.1.295** (see [`../RELEASING.md`](../RELEASING.md)) |
+| `"onFailure": "block"` on command-guard | **2.1.295** (documented minimum; below it the key is unsupported and its handling is unverified) |
 | `strictPluginOnlyCustomization` | exact introduction **not documented** — no changelog section introduces the key; verified present in the settings docs and the official JSON schema as of 2026-08-12. Re-confirm before relying on the strict profile. |
 | `allowManagedHooksOnly` / `allowManagedPermissionRulesOnly` | operational by **2.1.140**; exact introduction not documented — re-confirm before relying on the strict profile |
 | `permissions.defaultMode: "dontAsk"` (R7 allowlist) | confirm against the permission-modes docs for your release |
@@ -347,8 +354,9 @@ Run these on a machine after deploying, to prove the floor is non-overridable:
 0. **No leftover placeholder.** Confirm the deployed file has **no** `<BASELINE_PREFIX>`
    token remaining (e.g. `grep -L '<BASELINE_PREFIX>' managed-settings.json` should list
    the file as clean). An unsubstituted placeholder makes the guardrail hook commands fail
-   to launch — the deny-list still works, so the floor *looks* deployed while silently
-   losing its hooks.
+   to launch. On v2.1.295+ command-guard's `onFailure: "block"` then refuses every shell
+   command; below it the deny-list still works, so the floor *looks* deployed while
+   silently losing its hooks.
 1. **Managed deny survives skip-permissions.** In any repo, ask Claude Code (with
    `--dangerously-skip-permissions`) to read a `.env` file. It must be **blocked** by
    the managed deny — bypass mode does not override a managed deny rule.
@@ -370,10 +378,12 @@ Run these on a machine after deploying, to prove the floor is non-overridable:
    say so.
 5. **Windows fleets:** on a Windows host, confirm which tool the session actually uses.
    If Claude Code registered the PowerShell tool (no Git Bash present), the
-   `Bash|PowerShell` matcher fires but the `bash "<PREFIX>/…"` hook command cannot launch,
-   and a hook that fails to launch is treated as no objection. Confirm a PowerShell
-   `Remove-Item -Recurse -Force` is refused — that refusal comes from the deny list, and
-   on such a host it is the whole floor.
+   `Bash|PowerShell` matcher fires but the `bash "<PREFIX>/…"` hook command fails in
+   PowerShell. On v2.1.295+ command-guard's `onFailure: "block"` then refuses **every**
+   shell command — install Git for Windows; it is a requirement. Below v2.1.295 the hook
+   most likely fails open (unverified): confirm a PowerShell `Remove-Item -Recurse -Force`
+   is refused — that refusal comes from the deny list, and on such a host it is the whole
+   floor.
 6. **Strict profile only:** confirm a hook defined in a user/project settings file
    does **not** run, while the managed hooks still do; and confirm a project `.mcp.json`
    server does **not** load (the `mcp` surface — see the `mcpServers` correction above).
