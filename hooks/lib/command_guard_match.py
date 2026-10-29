@@ -77,6 +77,19 @@ one in backticks ("Run `npm install` first" -- right for a plain -m "...", where
 bash runs it, a false positive inside a <<'EOF' heredoc body); an odd number of
 double quotes inside a "$(cat <<'EOF' ...)" body, or an unbalanced quote in a
 top-level heredoc body, still fails to tokenize and is blocked.
+
+PowerShell payloads are also judged as the text PowerShell produces from its backtick
+escapes and typographic quotes, with PowerShell 7's and Windows PowerShell 5.1's
+escapes (see _ps_unescape and evaluate()). Limits: a $( ) subexpression holding a
+nested "..." string is scanned as if the inner quote closed the outer string (the
+context-free reading still decodes every escape in it); --% (stop-parsing) is not
+modelled, so the text after it is judged decoded as well as raw, and the raw readings
+give what the program receives there; and PowerShell cmdlets (Remove-Item ...) are
+matched by the deny-list only. The context-free reading decodes escapes inside '...'
+too, so a single-quoted commit message holding `n followed by a blocked command at
+the start of the next line is blocked, the cost the multi-line pass already accepts
+for a real newline; a "..." message whose decoded line starts with one is blocked
+the same way.
 """
 from __future__ import annotations
 
@@ -1155,19 +1168,21 @@ def _is_c_bundle(tok: str) -> bool:
 
 
 
-# PowerShell's escape character is the backtick. Inside a "..." string or an @"..."@
-# here-string body, `t `v `n `r `f `a `b `e `0 and `u{hex} become characters, and
-# anywhere outside a '...' string a backtick makes the next character literal.
-# PowerShell does this BEFORE it starts a native program, so `bash -c "rm -rf `t ~"`
-# hands bash a real TAB and bash deletes ~. The matcher's other readings take the
-# backtick for bash command substitution and misparse the line, so a PowerShell
-# payload that contains a backtick or a typographic quote is also judged as the POSIX
-# text _ps_unescape() rewrites it to: every word carries the value PowerShell gives it.
-# PowerShell also accepts typographic quotes as quote marks. `0 is NUL in PowerShell;
-# a native program's argument ends at a NUL, so it is decoded as nothing, which joins
-# its neighbours and errs toward blocking. `e and `u{} exist from PowerShell 6 on;
-# decoding them for 5.1 too only adds a stricter reading.
-_PS_ESCAPES = {"0": "", "a": "\a", "b": "\b", "e": "\x1b", "f": "\f", "n": "\n",
+# PowerShell's escape character is the backtick. Inside a "..." string, an @"..."@
+# here-string body or a bareword, `t `v `n `r `f `a `b `e `0 and `u{hex} become
+# characters and a backtick before any other character makes it literal; in '...',
+# @'...'@ and comments a backtick is an ordinary character. PowerShell also accepts
+# typographic quotes as quote marks. It does all this BEFORE it starts a native
+# program, so `bash -c "rm -rf `t ~"` hands bash a real TAB and bash deletes ~. The
+# matcher's other readings take the backtick for bash command substitution and
+# misparse the line, so a PowerShell payload that contains a backtick or a
+# typographic quote is also judged as the text PowerShell produces (see evaluate()).
+# `0 is NUL. A native program's argument ends at a NUL, so the program receives only
+# the text before it; `0 is decoded as a line break, which judges that text on its
+# own (the text after it is judged too, which only adds). `e and `u{} exist from
+# PowerShell 6 on: Windows PowerShell 5.1 reads them as the letters e and u, so the
+# 5.1 values are judged in a reading of their own (see _ps_escape's legacy).
+_PS_ESCAPES = {"0": "\n", "a": "\a", "b": "\b", "e": "\x1b", "f": "\f", "n": "\n",
                "r": "\r", "t": "\t", "v": "\v"}
 _PS_UNICODE_RE = re.compile(r"u\{([0-9A-Fa-f]{1,6})\}")
 _PS_DQ = {'"', chr(0x201C), chr(0x201D), chr(0x201E)}
@@ -1176,10 +1191,13 @@ _PS_TYPOGRAPHIC_QUOTES = (_PS_DQ | _PS_SQ) - {'"', "'"}
 _POSIX_BARE_SPECIAL = set(" \t\n\\'\"$`;&|<>()*?[]{}#~=!")
 
 
-def _ps_escape(text: str, i: int):
-    """Value of the PowerShell escape whose letter is text[i] (just after a backtick),
-    inside an expandable string. Returns (value, index after the escape)."""
+def _ps_escape(text: str, i: int, legacy: bool = False):
+    """Value of the PowerShell escape whose letter is text[i] (just after a backtick).
+    Returns (value, index after the escape). legacy: Windows PowerShell 5.1, which
+    has no `e or `u{} escape and reads both as the plain letter."""
     c = text[i]
+    if legacy and c in "eu":
+        return c, i + 1
     if c in _PS_ESCAPES:
         return _PS_ESCAPES[c], i + 1
     if c == "u":
@@ -1189,19 +1207,107 @@ def _ps_escape(text: str, i: int):
     return c, i + 1
 
 
-def _ps_unescape(text: str) -> str:
+def _ps_decode(text: str, legacy: bool = False) -> str:
+    """text with every backtick escape decoded, as in a "..." string."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == "`" and i + 1 < n:
+            v, i = _ps_escape(text, i + 1, legacy)
+            out.append(v)
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _ps_quoted(text: str, i: int, legacy: bool):
+    """The PowerShell "..." or '...' string opening at text[i]: (its value, index after
+    it), or None if it is unterminated. Escapes are decoded in "..." only; inside
+    either, a doubled quote character is one literal character (the second one)."""
+    quotes = _PS_DQ if text[i] in _PS_DQ else _PS_SQ
+    expandable = quotes is _PS_DQ
+    j, val, n = i + 1, [], len(text)
+    while j < n:
+        d = text[j]
+        if expandable and d == "`" and j + 1 < n:
+            v, j = _ps_escape(text, j + 1, legacy)
+            val.append(v)
+        elif d in quotes:
+            if j + 1 < n and text[j + 1] in quotes:
+                val.append(text[j + 1])
+                j += 2
+            else:
+                return "".join(val), j + 1
+        else:
+            val.append(d)
+            j += 1
+    return None
+
+
+def _ps_here_string_end(text: str, j: int, close: str) -> int:
+    """Index of the first line, from index j on, that starts with close ('@ or "@);
+    -1 if there is none."""
+    while not text.startswith(close, j):
+        j = text.find("\n", j) + 1
+        if j == 0:
+            return -1
+    return j
+
+
+def _posix_literal(value: str) -> str:
+    """value as POSIX single-quoted text. A backslash is quoted on its own and an
+    apostrophe is written '"'"', so neither _shell_words nor _slashify_windows_paths
+    (which runs before tokenizing and would read a backslash pair as a UNC path) can
+    change the value."""
+    out, run = [], []
+    for ch in value:
+        if ch in "\\'":
+            if run:
+                out.append("'" + "".join(run) + "'")
+                run = []
+            out.append("'\\'" if ch == "\\" else "\"'\"")
+        else:
+            run.append(ch)
+    if run or not out:
+        out.append("'" + "".join(run) + "'")
+    return "".join(out)
+
+
+def _posix_dq(value: str) -> str:
+    """value as a POSIX "..." word in which $ and the backtick stay live, so $var and
+    $( ) still read as expansion. A double quote or a backslash is emitted outside
+    the quotes (see _posix_literal): _shell_words honours only those two escapes
+    inside "...", and _slashify_windows_paths would rewrite a backslash in a path."""
+    out = ['"']
+    for ch in value:
+        out.append('"' + _posix_literal(ch) + '"' if ch in '"\\' else ch)
+    out.append('"')
+    return "".join(out)
+
+
+def _append_posix(out: list, s: str) -> None:
+    """Append the quoted POSIX text s to out. After a bare $, a leading ' would open a
+    POSIX $'...' (ANSI-C) string (\\\\srv\\c$\\dir), so an empty "" separates them."""
+    if s.startswith("'") and out and out[-1].endswith("$"):
+        out.append('""')
+    out.append(s)
+
+
+def _ps_unescape(text: str, legacy: bool = False) -> str:
     """Rewrite a PowerShell command as POSIX text whose words carry PowerShell's values.
 
-    "..." becomes a POSIX "..." holding the decoded string (\\ " ` and an escaped $ are
-    backslash-escaped; an unescaped $ stays, so $var and $( ) still read as expansion);
-    '...' becomes a POSIX '...' ('' -> '\\''); a bareword keeps its characters, with a
-    backtick making the next one literal and backtick-newline a line continuation, and a
-    literal backslash doubled. An @"..."@ here-string keeps its delimiters with the body
-    decoded; @'...'@ and comments are copied as they are. Unterminated text is copied.
+    "..." becomes a POSIX "..." holding the decoded string (see _posix_dq); '...'
+    becomes the POSIX literal of its value; ${...} stays one braced variable word; a
+    bareword keeps its characters, with each backtick escape decoded (quoted when it
+    would split or quote a POSIX word), backtick-newline a line continuation and a
+    literal backslash quoted. An @"..."@ here-string keeps its delimiters with the
+    body decoded; @'...'@ and comments are copied as they are. Unterminated text is
+    copied. legacy: decode as Windows PowerShell 5.1 does (see _ps_escape).
     """
     out, i, n = [], 0, len(text)
     at_word_start = True
     unclosed = set()          # here-string kinds with no closer left: skip re-scanning
+    braced_closes = True      # False once a ${ found no closing brace: skip re-scanning
     while i < n:
         c = text[i]
         # here-string opener: @" or @' starting a word, with nothing but blanks after
@@ -1211,30 +1317,13 @@ def _ps_unescape(text: str) -> str:
             eol = text.find("\n", i)
             if eol != -1 and not text[i + 2:eol].strip():
                 close = text[i + 1] + "@"
-                j = eol + 1
-                end = -1
-                while j <= n:
-                    if text.startswith(close, j):
-                        end = j
-                        break
-                    nl = text.find("\n", j)
-                    if nl == -1:
-                        break
-                    j = nl + 1
+                end = _ps_here_string_end(text, eol + 1, close)
                 if end == -1:
                     unclosed.add(text[i + 1])
-                if end != -1:
+                else:
                     body = text[eol + 1:end]
                     if text[i + 1] == '"':
-                        dec, k = [], 0
-                        while k < len(body):
-                            if body[k] == "`" and k + 1 < len(body):
-                                v, k = _ps_escape(body, k + 1)
-                                dec.append(v)
-                            else:
-                                dec.append(body[k])
-                                k += 1
-                        body = "".join(dec)
+                        body = _ps_decode(body, legacy)
                     out.append(text[i:eol + 1] + body + close)
                     i = end + 2
                     at_word_start = False
@@ -1251,89 +1340,52 @@ def _ps_unescape(text: str) -> str:
             out.append(text[i:end])
             i = end
             continue
-        if c in _PS_DQ:
-            j, val = i + 1, []
-            closed = False
-            while j < n:
-                d = text[j]
-                if d == "`" and j + 1 < n:
-                    v, j = _ps_escape(text, j + 1)
-                    val.append(("lit", v))
-                elif d in _PS_DQ:
-                    if j + 1 < n and text[j + 1] in _PS_DQ:    # "" is a literal quote
-                        val.append(("lit", '"'))
-                        j += 2
-                    else:
-                        closed = True
-                        j += 1
-                        break
-                else:
-                    val.append(("raw", d))
-                    j += 1
-            if not closed:
+        if c in _PS_DQ or c in _PS_SQ:
+            quoted = _ps_quoted(text, i, legacy)
+            if quoted is None:                             # unterminated: copy the rest
                 out.append(text[i:])
                 break
-            enc = []
-            for kind, v in val:
-                for ch in v:
-                    if ch in '\\"`' or (ch == "$" and kind == "lit"):
-                        enc.append("\\" + ch)
-                    else:
-                        enc.append(ch)
-            out.append('"' + "".join(enc) + '"')
-            i = j
+            value, i = quoted
+            _append_posix(out, _posix_dq(value) if c in _PS_DQ else _posix_literal(value))
             at_word_start = False
             continue
-        if c in _PS_SQ:
-            j, val = i + 1, []
-            closed = False
-            while j < n:
-                d = text[j]
-                if d in _PS_SQ:
-                    if j + 1 < n and text[j + 1] in _PS_SQ:    # '' is a literal quote
-                        val.append("'")
-                        j += 2
-                    else:
-                        closed = True
-                        j += 1
-                        break
-                else:
-                    val.append(d)
+        if c == "$" and braced_closes and text.startswith("{", i + 1):
+            # ${...} is one variable whatever its name holds (spaces, #, quotes); a
+            # backtick makes the next character part of the name
+            j, name = i + 2, []
+            while j < n and text[j] != "}":
+                if text[j] == "`" and j + 1 < n:
                     j += 1
-            if not closed:
-                out.append(text[i:])
-                break
-            out.append("'" + "".join(val).replace("'", "'\\''") + "'")
-            i = j
-            at_word_start = False
-            continue
+                name.append(text[j])
+                j += 1
+            if j < n:
+                out.append(_posix_dq("${" + "".join(name) + "}"))
+                i = j + 1
+                at_word_start = False
+                continue
+            braced_closes = False
         if c == "`":
             if i + 1 >= n:
                 i += 1
                 continue
-            nxt = text[i + 1]
-            if nxt == "\n":
+            if text[i + 1] in "\r\n":                      # continuation: LF, CRLF or CR
                 out.append(" ")
-                i += 2
-            elif nxt == "\r" and text.startswith("\n", i + 2):
-                out.append(" ")
-                i += 3
-            else:
-                # PowerShell decodes the same escapes in a bareword (`echo a`tb` is the
-                # one argument a<TAB>b). A decoded character that would split or quote
-                # a POSIX word is emitted inside "..." so the word keeps its value.
-                v, i = _ps_escape(text, i + 1)
-                for ch in v:
-                    if ch in '\\"`$':
-                        out.append('"\\' + ch + '"')
-                    elif ch in _POSIX_BARE_SPECIAL or ch < " " or ch in _WORD_BREAKS:
-                        out.append('"' + ch + '"')
-                    else:
-                        out.append(ch)
+                i += 3 if text.startswith("\r\n", i + 1) else 2
+                at_word_start = True
+                continue
+            # PowerShell decodes the same escapes in a bareword (`echo a`tb` is the
+            # one argument a<TAB>b). A decoded character that would split or quote
+            # a POSIX word is quoted so the word keeps its value.
+            v, i = _ps_escape(text, i + 1, legacy)
+            for ch in v:
+                if ch in _POSIX_BARE_SPECIAL or ch < " " or ch in _WORD_BREAKS:
+                    _append_posix(out, _posix_literal(ch))
+                else:
+                    out.append(ch)
             at_word_start = False
             continue
         if c == "\\":
-            out.append("\\\\")
+            _append_posix(out, _posix_literal(c))
             i += 1
             at_word_start = False
             continue
@@ -1344,21 +1396,19 @@ def _ps_unescape(text: str) -> str:
     return "".join(out)
 
 
-def _ps_unescape_everywhere(text: str) -> str:
+def _ps_unescape_everywhere(text: str, legacy: bool = False) -> str:
     """Every backtick escape decoded, whatever quoting or comment _ps_unescape()
-    believes it is in: a backstop reading, so a scanner mistake about context cannot
-    leave a real escape undecoded (see evaluate())."""
+    believes it is in, and backtick-newline read as a continuation: a backstop
+    reading, so a scanner mistake about context cannot leave a real escape undecoded
+    (see evaluate()). legacy: as in _ps_escape."""
     out, i, n = [], 0, len(text)
     while i < n:
         if text[i] == "`" and i + 1 < n:
-            if text[i + 1] == "\n":
+            if text[i + 1] in "\r\n":                      # continuation: LF, CRLF or CR
                 out.append(" ")
-                i += 2
-            elif text[i + 1] == "\r" and text.startswith("\n", i + 2):
-                out.append(" ")
-                i += 3
+                i += 3 if text.startswith("\r\n", i + 1) else 2
             else:
-                v, i = _ps_escape(text, i + 1)
+                v, i = _ps_escape(text, i + 1, legacy)
                 out.append(v)
             continue
         out.append(text[i])
@@ -1369,7 +1419,8 @@ def _ps_unescape_everywhere(text: str) -> str:
 def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     """Return the list of block reasons for a raw command string (+ optional query).
     Pure function -- no I/O -- so it is directly unit-testable. shell is "bash" or
-    "powershell" (the payload's tool_name); it only enables here-string handling."""
+    "powershell" (the payload's tool_name); "powershell" adds here-string handling
+    and the PowerShell readings below."""
     if raw is None:
         return []
     if len(raw) > _MAX_INSPECT_LEN:
@@ -1391,15 +1442,24 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
             # instead of being dropped.
             segments = segments + _segments(raw, shell="powershell", ps_slashes=False,
                                             lenient_on_error=True)
-            # ...and the text PowerShell actually produces from its escapes and
-            # typographic quotes (see _ps_unescape), which is what a native program
-            # such as bash receives.
+            # ...and the text PowerShell itself produces from its escapes and
+            # typographic quotes, which is what a native program such as bash
+            # receives: _ps_unescape() follows PowerShell's quoting, and
+            # _ps_unescape_everywhere() decodes every escape whatever the context, so
+            # a scanner mistake about quoting cannot leave an escape undecoded. With a
+            # `e or `u in the text, both are also read with Windows PowerShell 5.1's
+            # escapes. A reading identical to the raw text, already judged above with
+            # the same arguments, or to another reading adds nothing and is skipped.
             if "`" in raw or any(q in raw for q in _PS_TYPOGRAPHIC_QUOTES):
-                segments = segments + _segments(_ps_unescape(raw), shell="powershell",
-                                                ps_slashes=False, lenient_on_error=True)
-                segments = segments + _segments(_ps_unescape_everywhere(raw),
-                                                shell="powershell", ps_slashes=False,
-                                                lenient_on_error=True)
+                readings = [_ps_unescape(raw), _ps_unescape_everywhere(raw)]
+                if "`e" in raw or "`u" in raw:
+                    readings += [_ps_unescape(raw, legacy=True),
+                                 _ps_unescape_everywhere(raw, legacy=True)]
+                for text in dict.fromkeys(readings):
+                    if text != raw:
+                        segments = segments + _segments(text, shell="powershell",
+                                                        ps_slashes=False,
+                                                        lenient_on_error=True)
     except _Uninspectable as exc:
         return [f"uninspectable command ({exc})"]
     except ValueError as exc:
