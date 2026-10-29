@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/guardrails/command-guard.sh\"",
+            "command": "bash -p \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/guardrails/command-guard.sh\"",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/scope-guard.sh\"",
+            "command": "bash -p \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/scope-guard.sh\"",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/dispatcher/post-write.sh\"",
+            "command": "bash -p \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/dispatcher/post-write.sh\"",
             "timeout": 90
           }
         ]
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/tracker-reminder.sh\"",
+            "command": "bash -p \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/tracker-reminder.sh\"",
             "timeout": 5
           }
         ]
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/config-guard.sh\"",
+            "command": "bash -p \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/config-guard.sh\"",
             "timeout": 10
           }
         ]
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/config-guard.sh\"",
+            "command": "bash -p \"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/modules/config-guard.sh\"",
             "timeout": 10
           }
         ]

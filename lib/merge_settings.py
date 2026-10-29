@@ -13,7 +13,9 @@ Rules:
     are replaced, not duplicated.
   * permissions.deny: union with the existing list (order-preserving, de-duplicated).
   * Everything else in the existing file (model, permissions.allow, env, ...) is
-    left exactly as it was.
+    left exactly as it was. An `env` key that can run code before the baseline
+    hooks, redirect them or set their posture (RISKY_ENV_NAMES) is reported on
+    stderr, not removed.
 
 Failure model — deliberately FAIL LOUD. An existing settings.json that cannot be
 read, cannot be parsed, or has a shape this merge cannot preserve is *not* treated
@@ -41,11 +43,28 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
 
 BASELINE_MARKER = "/.claude/hooks/baseline/"
+
+# Environment values a project settings `env` block must not set, whatever the value.
+# MIRRORS RISKY_ENV_* in hooks/modules/config-guard.sh, which explains each entry; a
+# test asserts the two agree. Names are compared upper-cased.
+RISKY_ENV_NAMES = ["BASH_ENV", "SHELLOPTS", "BASHOPTS", "POSIXLY_CORRECT", "BASH_COMPAT",
+                   "FUNCNEST", "EXECIGNORE", "CDPATH", "GLOBIGNORE",
+                   "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_GIT_BASH_PATH", "PATH",
+                   "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "CLAUDE_PROJECT_DIR",
+                   "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                   "GIT_CEILING_DIRECTORIES", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF"]
+RISKY_ENV_PREFIXES = ["DYLD_", "BCL_", "_BCL_", "GIT_CONFIG_"]
+RISKY_ENV_SUBSTRINGS = ["BASH_FUNC_"]
+# The one form a baseline hook command may take (group 2: the script), and the keys
+# beside it that let it run as written. MIRRORS BASELINE_LAUNCH and
+# _entry_runs_as_written in hooks/modules/config-guard.sh, which explains them.
+BASELINE_LAUNCH = r'^[ \t]*bash[ \t]+-p[ \t]+("?)(?:\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR)/\.claude/hooks/baseline/([A-Za-z0-9_./-]+\.sh)\1[ \t]*\Z'
 
 EXIT_PARSE = 3
 EXIT_SHAPE = 4
@@ -265,6 +284,77 @@ def merge_deny(existing_perms: dict, template_perms: dict) -> list:
     return merged
 
 
+def risky_env_keys(settings: dict) -> list[str]:
+    """The keys of settings["env"] that RISKY_ENV_* cover, whatever their value (an
+    empty PATH breaks the hook command too), sorted."""
+    env = settings.get("env")
+    if not isinstance(env, dict):
+        return []
+    return sorted(
+        k for k in env
+        if k.upper() in RISKY_ENV_NAMES
+        or any(k.upper().startswith(p) for p in RISKY_ENV_PREFIXES)
+        or any(s in k.upper() for s in RISKY_ENV_SUBSTRINGS))
+
+
+def hook_entries(obj: Any):
+    """Every {type: command} entry with a string command anywhere under obj."""
+    if isinstance(obj, dict):
+        if obj.get("type") == "command" and isinstance(obj.get("command"), str):
+            yield obj
+        for value in obj.values():
+            yield from hook_entries(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from hook_entries(item)
+
+
+def _launched_script(entry: dict, min_timeouts: dict):
+    """The script entry runs as BASELINE_LAUNCH with keys that let it run as written
+    (no args, bash shell, not async, timeout at least min_timeouts[script] when that is
+    a number), else None."""
+    m = re.match(BASELINE_LAUNCH, entry["command"])
+    if not m:
+        return None
+    script, timeout = m.group(2), entry.get("timeout")
+    want = min_timeouts.get(script)
+    if ("args" in entry or entry.get("shell") not in (None, "bash")
+            or entry.get("async") or entry.get("asyncRewake")):
+        return None
+    if _is_number(want) and not (_is_number(timeout) and timeout >= want):
+        return None
+    return script
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def baseline_timeouts(template: dict) -> dict:
+    """{script: timeout} for every baseline script the template launches."""
+    return {m.group(2): e.get("timeout") for e in hook_entries(template.get("hooks"))
+            for m in [re.match(BASELINE_LAUNCH, e["command"])] if m}
+
+
+def baseline_launches(settings: dict, min_timeouts: dict | None = None) -> set:
+    """The baseline scripts some entry runs exactly as written (_launched_script)."""
+    mins = min_timeouts or {}
+    return {s for e in hook_entries(settings.get("hooks"))
+            for s in [_launched_script(e, mins)] if s}
+
+
+def baseline_launch_problems(settings: dict, min_timeouts: dict | None = None) -> list[str]:
+    """The baseline scripts (path under BASELINE_MARKER) that some entry runs in any
+    other way, sorted. An entry naming no script is listed by its command."""
+    mins, found = min_timeouts or {}, set()
+    for e in hook_entries(settings.get("hooks")):
+        if BASELINE_MARKER not in e["command"] or _launched_script(e, mins):
+            continue
+        script = re.search(re.escape(BASELINE_MARKER) + r"(\S+?\.sh)", e["command"])
+        found.add(script.group(1) if script else e["command"].strip())
+    return sorted(found)
+
+
 def main() -> int:
     if len(sys.argv) != 4:
         sys.stderr.write("usage: merge_settings.py <existing|-> <template> <output>\n")
@@ -292,6 +382,13 @@ def main() -> int:
         Path(output_path).write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     except OSError as exc:
         fatal(EXIT_WRITE, f"could not write merged settings to {output_path}: {exc}")
+    # ascii()-escaped: a key name cannot carry control sequences to the terminal.
+    risky = [ascii(k)[1:-1] for k in risky_env_keys(existing)]
+    if risky:
+        sys.stderr.write(
+            f"WARNING: settings.json env sets {', '.join(risky)}. Such values can run code "
+            "before the baseline hooks, redirect them, or change their posture. Kept as is; "
+            "remove them unless you set them on purpose.\n")
     return 0
 
 
