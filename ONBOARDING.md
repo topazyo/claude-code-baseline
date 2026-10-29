@@ -142,7 +142,8 @@ tracker-reminder is on `Stop`.
 > `bash "…"` fails — so the guards fail, and every shell command and every
 > `Write`/`Edit` is **refused** (fail-closed: the guards carry `"onFailure":
 > "block"`, and since 2.1.299 this happens even without it). **Git for Windows (or
-> `CLAUDE_CODE_GIT_BASH_PATH` pointing at its `bash.exe`) is therefore a requirement
+> `CLAUDE_CODE_GIT_BASH_PATH` pointing at its `bash.exe`, set in your user environment
+> or `~/.claude/settings.json`, not a repo's settings) is therefore a requirement
 > on Windows**; WSL's `bash` does not count for a Claude Code running natively on
 > Windows. Below v2.1.295 `onFailure` is unsupported and a guard that cannot start
 > most likely fails open, as before (unverified), leaving the `permissions.deny`
@@ -766,7 +767,7 @@ Found a bypass? .......... do NOT open a public issue → SECURITY.md (private r
   in PowerShell, where `bash "…/command-guard.sh"` fails. The guards fail **closed**:
   every shell command and every `Write`/`Edit` is refused (`onFailure: "block"`, and
   since 2.1.299 even without it). So Git for Windows (or `CLAUDE_CODE_GIT_BASH_PATH`
-  pointing at its `bash.exe`) is a **requirement** on Windows; `install.sh` prints an
+  pointing at its `bash.exe`, set outside the repo's settings) is a **requirement** on Windows; `install.sh` prints an
   advisory note on Git Bash/MSYS/Cygwin and WSL hosts. WSL's `bash` does not count for
   a Claude Code running natively on Windows; running Claude Code inside WSL2 is fine.
   Below v2.1.295 a guard that cannot start most likely fails open instead (unverified),

@@ -130,7 +130,9 @@ run_gate() {
     } >&2
     bcl_failclosed_exit; return $?
   fi
-  bcl_timeout "$secs" bash "$hook" <<< "$PAYLOAD" || rc=$?
+  # -p, as in the wired hook commands: a plain bash child would still run an
+  # inherited BASH_ENV file and import exported functions (see common.sh).
+  bcl_timeout "$secs" bash -p "$hook" <<< "$PAYLOAD" || rc=$?
   case $rc in
     0) return 0 ;;
     2) return 2 ;;
@@ -159,7 +161,7 @@ run_gate() {
 run_helper() {
   local label="$1" secs="$2" hook="$3" rc=0
   bcl_child_unusable "$hook" >/dev/null && return 0
-  bcl_timeout "$secs" bash "$hook" <<< "$PAYLOAD" || rc=$?
+  bcl_timeout "$secs" bash -p "$hook" <<< "$PAYLOAD" || rc=$?
   if [[ $rc -eq 124 ]]; then
     echo "[baseline] NOTE: $label exceeded its ${secs}s budget and was killed; it may have done only part of its work." >&2
   fi

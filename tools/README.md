@@ -23,20 +23,22 @@ For each repo it reports:
 
 | Column | Meaning |
 |--------|---------|
-| `installed` | Is `.claude/hooks/baseline/` present? (Has the baseline been adopted at all.) The tool never opens `settings.json`, so this says the hook *files* are on disk — not that anything is wired to run them. A repo whose install copied the scripts but failed before merging `settings.json` reports `installed=yes` with no hooks firing. |
+| `installed` | Is `.claude/hooks/baseline/` present? (Has the baseline been adopted at all.) This says the hook *files* are on disk; whether `settings.json` runs them is the `settings` row below. |
 | `posture` | `enforcement` (`block`/`warn`), resolved via `common.sh`'s `bcl_posture`. |
 | `failClosed` | The global fail-closed toggle. |
 | `version` | The repo's **installed** `.claude/hooks/baseline/VERSION` (the baseline revision its hooks came from). |
 | `drift` | `OK` (matches the source `baselineVersion`), `DRIFT` (on an older/different baseline), `no-version` (installed but pre-`VERSION` baseline), or `not-installed`. |
 | `minClaudeCodeVersion` + `ok` | The repo's pinned min Claude Code version, and whether it equals this source tree's canonical pin (a config-drift signal). |
 | `guardrails` / `modules` | Which are **enabled**, resolved via `common.sh`'s `bcl_guardrail_enabled` / `bcl_module_enabled` — the *same* readers the hooks use. |
+| `settings` (JSON `settingsEnvRisk`, `hookLaunchProblems`) | `risky env`: keys of `.claude/settings.json` / `.claude/settings.local.json` `env` that can run code before the baseline hooks, redirect them or switch them off (the installer's list, `lib/merge_settings.py`). `hook wiring`: baseline scripts the template wires that `settings.json` does not run exactly as `bash -p "<project>/.claude/hooks/baseline/<script>"` with the template's keys beside it (no `args`, a bash `shell`, not `async`, at least the template's `timeout`), including ones not wired at all, plus a `disableAllHooks` in either file. A check that cannot run reports `check-failed`. This tool runs outside Claude Code, so the shell those env values reach does not start it. |
 
 Modes:
 
 - **`--drift`** *(default view)* — print the per-repo report. `drift` is the headline signal.
 - **`--strict`** — exit non-zero if **any installed** repo has drifted from the source
-  `baselineVersion`. A `not-installed` repo does **not** trip this (that's "not adopted,"
-  a separate state from "behind"). *(Intended CI consumer below.)*
+  `baselineVersion`, or has a `settings` finding. A `not-installed` repo does **not**
+  trip this (that's "not adopted," a separate state from "behind"). *(Intended CI
+  consumer below.)*
 - **`--json <outfile>`** — also write the full report as JSON to `<outfile>`. This is the
   **only** filesystem write the tool performs; without it, the tool writes nothing.
 

@@ -84,13 +84,15 @@ and the merged deny-list carries a PowerShell floor: `Remove-Item`/`rm`/`del`/
 
 Two limits, stated plainly:
 
-1. **The hook command is `bash "…/command-guard.sh"`, so Git Bash is a
+1. **The hook command is `bash -p "…/command-guard.sh"`, so Git Bash is a
    requirement on Windows.** When Claude Code cannot find Git Bash, a hook with
    no `shell` runs in PowerShell, where `bash "…"` fails. The guards then fail
    **closed**: every shell command and every `Write`/`Edit` is refused (the
    guards carry `"onFailure": "block"`, and since 2.1.299 this happens even
    without it). Install Git for Windows, or point `CLAUDE_CODE_GIT_BASH_PATH` at
-   its `bash.exe`; WSL's `bash` does not count for a Claude Code running
+   its `bash.exe` in your user environment or `~/.claude/settings.json` (a
+   repo's settings file that sets it is reported, see "What this does not
+   protect against"); WSL's `bash` does not count for a Claude Code running
    natively on Windows. Below v2.1.295 `onFailure` is unsupported, and how
    those releases treat the key is unverified: most likely they ignore it and a
    guard that cannot start fails open, as before, leaving the `permissions.deny`
@@ -173,6 +175,20 @@ limit — not a bug. Read it before you rely on any of the above.
   config-guard go inert, as they do with no Python at all. The opt-in `autoFormat`
   and `runTests` deliberately run the repo's own formatter and tests without this
   isolation.
+- **The hook environment is trusted up to the shell that runs the hook.** Every
+  baseline hook, and every child the dispatcher starts, runs as `bash -p`, and the
+  hooks drop the bash values `-p` leaves alone as they load, so a `BASH_ENV` startup
+  file, an exported function or `SHELLOPTS` in the hook's environment no longer acts
+  before or inside a hook. The shell that runs the hook command string comes first
+  and is Claude Code's (bash by default, per the hooks documentation; its exact
+  invocation is not documented), so it may act on such values on any platform, and
+  `PATH`, `LD_PRELOAD`/`DYLD_*` or `CLAUDE_CODE_SHELL_PREFIX` affect it too. A settings
+  file's `env` block can set any of them. config-guard (opt-in) reports one in an
+  in-session change to `.claude/settings.json`, `install.sh` warns about one in the
+  file it merges, and `tools/baseline-status.sh` reports one in `settings.json` or
+  `settings.local.json` from outside Claude Code. None of them removes the value, and
+  `~/.claude/settings.json` and the environment Claude Code is launched with are not
+  checked: set values you need, such as `CLAUDE_CODE_GIT_BASH_PATH`, there.
 - **Below Claude Code v2.1.295, a hook that cannot start most likely fails
   open.** From 2.1.295 the two guards' `"onFailure": "block"` refuses the call
   when the hook can't start, times out, or exits with anything but 0 or 2. Older

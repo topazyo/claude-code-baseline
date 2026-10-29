@@ -81,6 +81,32 @@ if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else n
 # A not-installed repo must NOT trip --strict (it is "not adopted", not "behind").
 if timeout -k 5 60 bash "$STATUS" --strict "$B" >/dev/null 2>&1; then ok; else no "--strict should pass for a not-installed repo"; fi
 
+echo "== baseline-status: settings findings (risky env, hook launch) =="
+# The one detector outside Claude Code, so the shell a risky env value reaches cannot
+# switch it off. A fresh install has no finding; a BASH_ENV and a disableAllHooks in
+# settings.local.json, and a command-guard launched as plain `bash`, are reported and
+# fail --strict.
+OUT2="$(winpath "$TMP/out2.json")"
+findings() {
+  timeout -k 5 60 bash "$STATUS" --json "$OUT2" "$A" >/dev/null 2>&1
+  "$PY" -c "import json,sys; r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0]; print(r['settingsEnvRisk'], r['hookLaunchProblems'])" "$OUT2" 2>&1
+}
+got="$(findings)"
+[ "$got" = "[] []" ] && ok || no "fresh install should have no settings finding: $got"
+cp "$A/.claude/settings.json" "$TMP/settings.saved"
+printf '{"env": {"BASH_ENV": "/tmp/x.sh", "NODE_ENV": "production"}, "disableAllHooks": true}\n' > "$A/.claude/settings.local.json"
+"$PY" -c "import json,sys
+p=sys.argv[1]; s=json.load(open(p,encoding='utf-8'))
+for g in s['hooks']['PreToolUse']:
+    for h in g['hooks']:
+        if 'command-guard.sh' in h['command']: h['command']=h['command'].replace('bash -p ','bash ',1)
+json.dump(s,open(p,'w',encoding='utf-8'))" "$A/.claude/settings.json"
+got="$(findings)"
+[ "$got" = "['settings.local.json:BASH_ENV'] ['guardrails/command-guard.sh', 'settings.local.json disableAllHooks']" ] && ok || no "settings findings not reported: $got"
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on a settings finding"; else ok; fi
+cp "$TMP/settings.saved" "$A/.claude/settings.json"; rm -f "$A/.claude/settings.local.json"
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else no "--strict should PASS once the settings are restored"; fi
+
 echo "== baseline-status: local-only (no network primitives in source) =="
 if grep -E '(curl|wget|nc |/dev/tcp|ssh |scp |https?://)' "$STATUS" >/dev/null 2>&1; then
   no "network primitive found in baseline-status.sh"
