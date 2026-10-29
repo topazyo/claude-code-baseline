@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 109
+FP_FLOOR = 116
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -509,7 +509,9 @@ CASES = [
 ]
 
 # PowerShell payloads (tool_name "PowerShell"): evaluated with shell="powershell",
-# which only adds @'...'@ / @"..."@ here-string handling. Same tuple shape as CASES.
+# which adds @'...'@ / @"..."@ here-string handling and the PowerShell readings
+# (backslash as a path separator; backtick escapes and typographic quotes decoded,
+# see READING_CASES). Same tuple shape as CASES.
 PS_CASES = [
     ("ps fp here-string commit with apostrophe",
      "git commit -m @'\nFix the parser\n\nIt's quote-aware now.\n'@", A, ()),
@@ -574,6 +576,25 @@ PS_CASES = [
     ('ps fp user@host argument', 'ssh user@host "uptime"', A, ()),
     ('ps fp backtick escape inside a comment', 'git status # tabs are `t', A, ()),
     ('ps fp backtick line continuation', 'git log `\n  --oneline', A, ()),
+    ('ps fp backtick-CRLF line continuation', 'git log `\r\n  --oneline', A, ()),
+    ("ps fp backticks in a verbatim here-string",
+     "git commit -m @'\nUse `t and `n literally\n'@", A, ()),
+    ('ps fp backtick-e color codes in Write-Host', 'Write-Host "`e[32mgreen`e[0m"', A, ()),
+    ('ps fp backtick-u{} in Write-Host', 'Write-Host "`u{2713} done"', A, ()),
+    ('ps fp backtick-0 in a string', 'Write-Output "a`0b"', A, ()),
+    ('ps fp braced variable name with a space', 'Write-Output ${a #b} c`td', A, ()),
+    # evaluate() judges the Windows PowerShell 5.1 readings too: only they give the word
+    # hello (PowerShell 7 reads `e as ESC), so only they meet this repo policy pattern.
+    ('ps 5.1 reading reaches a repo policy pattern', 'Write-Output h`ello', B, ("hello",)),
+    ('ps fp repo policy pattern not in the text', 'Write-Output h`ello', A, ("goodbye",)),
+    ('ps 5.1 reading of backtick-u{} reaches a repo policy pattern',
+     'Write-Output a`u{41}', B, ("au{41}",)),
+    # Accepted cost of the context-free reading, which decodes escapes inside '...'
+    # too: a decoded line that starts with a blocked command is inspected like one.
+    ("ps conservative: backtick-n in a single-quoted message",
+     "git commit -m 'Steps:`ngit push --force-with-lease'", B, ()),
+    ("ps conservative: backtick-n in a double-quoted message",
+     'git commit -m "Steps:`n`tgit push --force-with-lease"', B, ()),
 ]
 
 # tool_name plumbing through main(): the same text is a PowerShell here-string only
@@ -586,6 +607,65 @@ MAIN_CASES = [
      'bash -c \u201crm -rf ~\u201d', B),
     ("main PowerShell tool_name decodes backtick escapes", "PowerShell",
      'bash -c "rm -rf `t ~"', B),
+]
+
+# Each PowerShell reading on its own (see evaluate()), for harmless input. evaluate()
+# unions the readings, so a fixture above stays green while ANY reading catches it;
+# these pin what each reading itself produces: the words of its first command (as
+# _segments returns them, lowercased), or, given a str, its exact text.
+_LDQ, _LSQ, _RSQ = chr(0x201C), chr(0x2018), chr(0x2019)
+READING_CASES = [
+    # (label, reading, legacy (Windows PowerShell 5.1), PowerShell text, expected)
+    ("escaped $ in a string keeps no backslash", "_ps_unescape", False,
+     'Write-Output "cost `$5"', ["write-output", "cost $5"]),
+    ("escaped backtick in a string", "_ps_unescape", False,
+     'Write-Output "a``b"', ["write-output", "a`b"]),
+    ("escaped quote after a Windows path", "_ps_unescape", False,
+     'Write-Output "C:\\dir`" x"', ["write-output", 'c:\\dir" x']),
+    ("backslash in a string keeps its value", "_ps_unescape", False,
+     'Write-Output "a\\b"', ["write-output", "a\\b"]),
+    ("doubled quotes in strings", "_ps_unescape", False,
+     'Write-Output "say ""hi""" \'it\'\'s\'', ["write-output", 'say "hi"', "it's"]),
+    ("bareword escaped apostrophe and $", "_ps_unescape", False,
+     "Write-Output a`'b`$c", ["write-output", "a'b$c"]),
+    ("bareword backslash and escape", "_ps_unescape", False,
+     "Write-Output C:\\tools\\x`ty", ["write-output", "c:\\tools\\x\ty"]),
+    ("admin-share path: a bare $ before a backslash", "_ps_unescape", False,
+     "Write-Output \\\\srv\\c$\\dir", ["write-output", "\\\\srv\\c$\\dir"]),
+    ("a bare $ before an escape", "_ps_unescape", False,
+     "Write-Output a$`tb", ["write-output", "a$\tb"]),
+    ("doubled typographic quote keeps the character", "_ps_unescape", False,
+     'Write-Output "a' + _LDQ + _LDQ + 'b"', ["write-output", "a" + _LDQ + "b"]),
+    ("typographic single quotes", "_ps_unescape", False,
+     "Write-Output " + _LSQ + "a b" + _RSQ, ["write-output", "a b"]),
+    ("braced variable with a space and #", "_ps_unescape", False,
+     "Write-Output ${a #b} c`td", ["write-output", "${a #b}", "c\td"]),
+    ("${#} is a variable, not a comment", "_ps_unescape", False,
+     "echo ${#} a`tb", ["echo", "${#}", "a\tb"]),
+    ("mid-word <# is not a block comment", "_ps_unescape", False,
+     "Write-Output x<#y a`tb", "Write-Output x<#y a'\t'b"),
+    ("expandable here-string body decoded", "_ps_unescape", False,
+     'Write-Output @"\na`tb\n"@', ["write-output", "a\tb"]),
+    ("backtick + lone CR continues the line", "_ps_unescape", False,
+     "git log `\r--oneline", ["git", "log", "--oneline"]),
+    ("a comment after a continuation is not decoded", "_ps_unescape", False,
+     "git status `\n# note `t", "git status  # note `t"),
+    ("backtick-0 ends the text before it", "_ps_unescape", False,
+     'Write-Output "a`0b"', ["write-output", "a\nb"]),
+    ("PowerShell 7 backtick-e", "_ps_unescape", False,
+     "Write-Output h`ello", ["write-output", "h\x1bllo"]),
+    ("Windows PowerShell 5.1 has no backtick-e", "_ps_unescape", True,
+     "Write-Output h`ello", ["write-output", "hello"]),
+    ("PowerShell 7 backtick-u{}", "_ps_unescape", False,
+     'Write-Output "`u{41}"', ["write-output", "a"]),
+    ("Windows PowerShell 5.1 has no backtick-u{}", "_ps_unescape", True,
+     'Write-Output "`u{41}"', ["write-output", "u{41}"]),
+    ("context-free reading decodes inside '...'", "_ps_unescape_everywhere", False,
+     "Write-Output 'a`tb'", ["write-output", "a\tb"]),
+    ("context-free reading, 5.1", "_ps_unescape_everywhere", True,
+     "Write-Output h`ello", ["write-output", "hello"]),
+    ("context-free reading: backtick + lone CR", "_ps_unescape_everywhere", False,
+     "git log `\r--oneline", ["git", "log", "--oneline"]),
 ]
 
 
@@ -609,6 +689,18 @@ def _main_blocks(tool_name, cmd):
     return bool(proc.stdout.strip())
 
 
+def _reading_result(reading, legacy, text, expected):
+    """What one PowerShell reading gives for text, in the form READING_CASES expects."""
+    out = getattr(m, reading)(text, legacy=legacy)
+    if isinstance(expected, str):
+        return out
+    try:
+        segs = m._segments(out, shell="powershell", ps_slashes=False)
+    except ValueError as exc:  # the reading does not tokenize: report it, do not raise
+        return f"ValueError: {exc}"
+    return list(segs[0]) if segs else []
+
+
 def _all_cases():
     """(label, cmd, should_block, extra, shell) across the bash and PowerShell lists."""
     return ([c + ("bash",) for c in CASES] + [c + ("powershell",) for c in PS_CASES])
@@ -623,6 +715,10 @@ if pytest is not None:
     @pytest.mark.parametrize("label,tool_name,cmd,should_block", MAIN_CASES)
     def test_main_tool_name(label, tool_name, cmd, should_block):
         assert _main_blocks(tool_name, cmd) == should_block, label
+
+    @pytest.mark.parametrize("label,reading,legacy,text,expected", READING_CASES)
+    def test_ps_reading(label, reading, legacy, text, expected):
+        assert _reading_result(reading, legacy, text, expected) == expected, label
 
     def test_fp_floor():
         n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in _all_cases() if not sb)
@@ -650,11 +746,20 @@ def run():
         else:
             failed += 1
             print(f"  FAIL [{label}] want={'block' if should_block else 'allow'}: {cmd!r}")
+    for label, reading, legacy, text, expected in READING_CASES:
+        got = _reading_result(reading, legacy, text, expected)
+        if got == expected:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [reading: {label}] {reading}(legacy={legacy}) of {text!r}: "
+                  f"want {expected!r}, got {got!r}")
     n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in cases if not sb)
     n_block = len(cases) - n_allow
+    total = len(cases) + len(MAIN_CASES) + len(READING_CASES)
     print(f"\ncommand-guard fixtures: {passed} passed, {failed} failed, "
-          f"{len(cases) + len(MAIN_CASES)} total ({n_allow} allow / {n_block} block, "
-          f"+{len(MAIN_CASES)} via main())")
+          f"{total} total ({n_allow} allow / {n_block} block, "
+          f"+{len(MAIN_CASES)} via main(), +{len(READING_CASES)} PowerShell readings)")
     # FP-budget floor: the allow corpus must never shrink below the last release floor.
     if n_allow < FP_FLOOR:
         failed += 1
