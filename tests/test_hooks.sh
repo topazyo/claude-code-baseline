@@ -170,6 +170,73 @@ leaked="$(env -i PATH="$PATH" _BCL_SOURCED=1 _BCL_LOOKUP=warn BCL_READ_ERROR=x _
   | awk '/^_?BCL_/ { n++ } /^__env_done__$/ { ok = 1 } END { print ok ? n + 0 : "noenv" }')"
 if [ "$leaked" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [common.sh passed inherited _BCL_/BCL_ variables on to a child: $leaked]"; fi
 
+echo "== hooks launched with bash -p ignore bash startup values =="
+# A plain `bash` acts on its environment before a hook's first line: it runs the file
+# BASH_ENV names, imports exported functions (BASH_FUNC_<name>%%) and applies
+# SHELLOPTS. Every wired hook command and every child the dispatcher starts is
+# `bash -p`, which does none of that, and common.sh drops the values -p leaves alone
+# (FUNCNEST among them). The values below only write a marker file when they act: with
+# each set, the hooks still block with their real messages and the marker never
+# appears. (Hooks only judge payloads; nothing in a payload runs.)
+MARK="$TMP/startup.marker"
+printf 'echo ran >> "%s"\n' "$MARK" > "$TMP/startup-mark.sh"
+FN_TIMEOUT="() { echo ran >> \"$MARK\"; command timeout \"\$@\"; }"
+FN_SOURCE="() { echo ran >> \"$MARK\"; builtin source \"\$@\"; }"
+# run_p <desc> <hook-relpath> <payload> <expected-rc> <expected-output> <VAR=value>
+run_p() {
+  local desc="$1" hook="$2" payload="$3" want="$4" needle="$5" assign="$6" got out
+  rm -f "$MARK"
+  out="$(printf '%s' "$payload" | env "$assign" bash -p "$H/$hook" 2>&1)"; got=$?
+  if [ "$got" = "$want" ] && printf '%s' "$out" | grep -qF "$needle" && [ ! -f "$MARK" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] want=$want got=$got marker=$([ -f "$MARK" ] && echo yes || echo no)"; fi
+}
+rm -f "$TMP/rules.saved" "$TMP/compose.saved"
+[ -f "$RULES" ] && cp "$RULES" "$TMP/rules.saved"
+[ -f "$WT/docker-compose.yml" ] && cp "$WT/docker-compose.yml" "$TMP/compose.saved"
+printf 'services:\n  app:\n    user: "0:0"\n' > "$WT/docker-compose.yml"
+setcfg "c['modules']['securityDefaults']['enabled']=True"
+valid_rules
+for value in "BASH_ENV=$TMP/startup-mark.sh" "BASH_FUNC_timeout%%=$FN_TIMEOUT" \
+             "BASH_FUNC_source%%=$FN_SOURCE" 'SHELLOPTS=xtrace' 'FUNCNEST=1'; do
+  run_p "command-guard, bash -p, ${value%%=*}"     guardrails/command-guard.sh "$(bash_payload 'git push --force origin main')" 2 "Blocked by Claude Code baseline command-guard" "$value"
+  run_p "post-write, bash -p, ${value%%=*}"        dispatcher/post-write.sh "$(write_payload "$WT/docker-compose.yml")" 2 "REGRESSION BLOCKER" "$value"
+  run_p "security-defaults, bash -p, ${value%%=*}" modules/security-defaults.sh "$(write_payload "$WT/docker-compose.yml")" 2 "REGRESSION BLOCKER" "$value"
+done
+resetcfg
+if [ -f "$TMP/rules.saved" ]; then cp "$TMP/rules.saved" "$RULES"; else rm -f "$RULES"; fi
+if [ -f "$TMP/compose.saved" ]; then cp "$TMP/compose.saved" "$WT/docker-compose.yml"; else rm -f "$WT/docker-compose.yml"; fi
+# Controls, so the checks above cannot pass because a value had no effect at all: under
+# a plain `bash` each value acts (the marker, xtrace lines), under `bash -p` it does
+# not. An allowed command keeps these free of any guard verdict.
+# mark_run <VAR=value> <launcher...>: the marker's line count after one command-guard run
+mark_run() {
+  local assign="$1"; shift
+  rm -f "$MARK"
+  printf '%s' "$(bash_payload 'git status')" | env "$assign" "$@" "$H/guardrails/command-guard.sh" >/dev/null 2>&1
+  if [ -f "$MARK" ]; then awk 'END { print NR }' "$MARK"; else echo 0; fi
+}
+for spec in "BASH_ENV=$TMP/startup-mark.sh" "BASH_FUNC_timeout%%=$FN_TIMEOUT" "BASH_FUNC_source%%=$FN_SOURCE"; do
+  plain="$(mark_run "$spec" bash)"; priv="$(mark_run "$spec" bash -p)"
+  if [ "$plain" -ge 1 ] && [ "$priv" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [${spec%%=*}: plain bash marker=$plain (want >=1), bash -p marker=$priv (want 0)]"; fi
+done
+xplain="$(printf '%s' "$(bash_payload 'git status')" | env SHELLOPTS=xtrace bash "$H/guardrails/command-guard.sh" 2>&1 | awk '/^\+/ { n++ } END { print n + 0 }')"
+xpriv="$(printf '%s' "$(bash_payload 'git status')" | env SHELLOPTS=xtrace bash -p "$H/guardrails/command-guard.sh" 2>&1 | awk '/^\+/ { n++ } END { print n + 0 }')"
+if [ "$xplain" -ge 1 ] && [ "$xpriv" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [SHELLOPTS=xtrace: plain bash traced $xplain lines (want >=1), bash -p traced $xpriv (want 0)]"; fi
+# A -p shell still exports BASH_ENV. common.sh drops it, so a plain bash that a hook
+# starts after loading the library (bats, the sh git or npm spawn) does not run the file.
+rm -f "$MARK"
+env "BASH_ENV=$TMP/startup-mark.sh" bash -p -c '. "$1"; bash -c :' _ "$H/lib/common.sh" >/dev/null 2>&1
+if [ ! -f "$MARK" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a plain bash started after common.sh loaded ran BASH_ENV]"; fi
+# The dispatcher's children are -p too (exported functions cannot be dropped, only
+# ignored by a -p child). Statically, and with the marker on a real write: every child
+# sources common.sh, so a plain-bash child would call an exported `source`.
+nplain="$(awk '/bash "\$hook"/ { n++ } END { print n + 0 }' "$H/dispatcher/post-write.sh")"
+npriv="$(awk '/bash -p "\$hook"/ { n++ } END { print n + 0 }' "$H/dispatcher/post-write.sh")"
+if [ "$nplain" = 0 ] && [ "$npriv" = 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [post-write.sh child launches: $nplain plain bash, $npriv bash -p (want 0 and 2)]"; fi
+rm -f "$MARK"
+printf '%s' "$(write_payload "$WT/notes.txt")" | env "BASH_FUNC_source%%=$FN_SOURCE" bash -p "$H/dispatcher/post-write.sh" >/dev/null 2>&1
+if [ ! -f "$MARK" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a dispatcher child imported an exported function under bash -p ($(awk 'END { print NR }' "$MARK") times)]"; fi
+rm -f "$MARK" "$TMP/startup-mark.sh"
+
 echo "== baseline Python is isolated from the project (-I -S -X utf8) =="
 # The hooks, the installer and the status tool start Python with -c, - or a script.
 # Without isolation, a json.py or shlex.py in the project (the hooks' working
@@ -332,7 +399,7 @@ import json, os, sys
 d = sys.argv[1]
 DENY = ["Edit(.env*)","Read(.env*)","Edit(**/secrets/**)","Read(**/secrets/**)",
         "Edit(.claude/baseline.config.json)","Edit(.claude/settings.json)","Edit(.claude/hooks/baseline/**)"]
-def c(p): return {"type":"command","command":"bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/" + p}
+def c(p): return {"type":"command","command":"bash -p ${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/" + p, "timeout": 90}
 def g(p, of="block"): return dict(c(p), onFailure=of)   # a PreToolUse guard (D2)
 # Properly-wired: real {type:command} hooks INVOKING all five baseline scripts.
 wired = {"PreToolUse":[{"hooks":[g("guardrails/command-guard.sh"), g("modules/scope-guard.sh")]}],
@@ -378,6 +445,58 @@ variant("_t_soft.json", set_of("command-guard", "continue"))
 variant("_t_soft_sg.json", set_of("scope-guard", "continue"))
 variant("_t_of_gone.json", set_of("command-guard", None))
 variant("_t_cg_moved.json", move_cg)
+# Baseline hook launches other than exactly `bash -p <script>`: the old plain form (an
+# install from before -p, reported as out of date), and forms that keep -p but discard
+# the verdict, never run the script, or undo -p (reported as tamper).
+def relaunch(script, rewrite):
+    def change(s):
+        for grps in s["hooks"].values():
+            for grp in grps:
+                for h in grp["hooks"]:
+                    if script in h["command"]:
+                        h["command"] = rewrite(h["command"])
+    return change
+plain = lambda c: c.replace("bash -p ", "bash ", 1)
+variant("_t_nop.json",    relaunch("command-guard", plain))
+variant("_t_nop_cg.json", relaunch("config-guard", plain))
+variant("_t_stale.json",  lambda s: [relaunch(x, plain)(s) for x in ("command-guard", "scope-guard",
+                                     "post-write", "tracker-reminder", "config-guard")])
+variant("_t_or_true.json", relaunch("command-guard", lambda c: c + " || true"))
+variant("_t_dash_c.json",  relaunch("command-guard", lambda c: c.replace("bash -p ", "bash -p -c : ", 1)))
+variant("_t_plus_p.json",  relaunch("command-guard", lambda c: c.replace("bash -p ", "bash -p +p ", 1)))
+variant("_t_vt.json",      relaunch("command-guard", lambda c: c.replace("bash -p ", "bash" + chr(11) + "-p ", 1)))
+# The keys beside an exact command that stop it running as written.
+def rekey(script, **keys):
+    def change(s):
+        for grps in s["hooks"].values():
+            for grp in grps:
+                for h in grp["hooks"]:
+                    if script in h["command"]:
+                        h.update(keys)
+    return change
+variant("_t_args.json",    rekey("command-guard", args=["-p"]))
+variant("_t_shell.json",   rekey("post-write", shell="powershell"))
+variant("_t_async.json",   rekey("post-write", **{"async": True}))
+variant("_t_rewake.json",  rekey("config-guard", asyncRewake=True))
+variant("_t_timeout.json", rekey("post-write", timeout=1))
+# env values that can run code before the hooks, redirect them or switch them off,
+# whatever the value; bash_env and Path check the case-insensitive match. Then values
+# that must stay allowed.
+for i, (k, v) in enumerate([("BASH_ENV", "/tmp/x.sh"), ("BASH_FUNC_timeout%%", "() { :; }"),
+                            ("SHELLOPTS", "noexec"), ("Path", "/tmp/bin"),
+                            ("DYLD_INSERT_LIBRARIES", "/tmp/x.dylib"),
+                            ("CLAUDE_PROJECT_DIR", "/tmp"), ("_BCL_PY", "/tmp/py"),
+                            ("FUNCNEST", "1"), ("CLAUDE_CODE_SHELL_PREFIX", "/tmp/wrap"),
+                            ("bash_env", "/tmp/x.sh"), ("BASH_ENV", " "), ("PATH", ""),
+                            ("BASH_ENV", None), ("FUNCNEST", 1), ("GIT_DIR", "/tmp/g"),
+                            ("POSIXLY_CORRECT", "1"), ("CDPATH", "/tmp"), ("GIT_EXEC_PATH", "/tmp")]):
+    variant("_t_env%d.json" % i, lambda s, k=k, v=v: s.setdefault("env", {}).update({k: v}))
+variant("_t_env_ok.json", lambda s: s.setdefault("env", {}).update(
+    {"FOO": "1", "PYTHONPATH": "/tmp/py", "NODE_ENV": "production", "GIT_AUTHOR_NAME": "a",
+     "ENV": "production"}))
+# A stale launch plus a real tamper is headed as tamper.
+variant("_t_stale_env.json", lambda s: (relaunch("command-guard", plain)(s),
+                                        s.setdefault("env", {}).update({"BASH_ENV": "/tmp/x.sh"})))
 PY
 setcfg "c['modules']['configGuard']['enabled']=True"
 run "clean settings -> 0"        modules/config-guard.sh "$(ccp project_settings "$GOOD")" 0
@@ -390,6 +509,34 @@ run "guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_setti
 run "scope-guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_soft_sg.json")" 2
 run "guard onFailure removed -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_of_gone.json")" 2
 run "guard moved out of PreToolUse -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_cg_moved.json")" 2
+run "command-guard without bash -p -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_nop.json")" 2
+run "config-guard without bash -p -> 2"  modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_nop_cg.json")" 2
+run "launch with || true -> 2"           modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_or_true.json")" 2
+run "launch with -c : -> 2"              modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_dash_c.json")" 2
+run "launch with +p -> 2"                modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_plus_p.json")" 2
+run "launch with a VT separator -> 2"    modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_vt.json")" 2
+run "launch with args -> 2"              modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_args.json")" 2
+run "launch in powershell -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_shell.json")" 2
+run "launch async -> 2"                  modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_async.json")" 2
+run "launch asyncRewake -> 2"            modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_rewake.json")" 2
+run "launch with a short timeout -> 2"   modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_timeout.json")" 2
+for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+  run "risky env value $i -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_env$i.json")" 2
+done
+run "harmless env values -> 0"           modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_env_ok.json")" 0
+# The heading follows the worst finding: an install from before -p is out of date, a
+# risky env value is reported as such, and anything else is tamper.
+# head_of <settings>: the report's first line
+head_of() { printf '{"source":"project_settings","file_path":"%s"}' "$1" | bash -p "$H/modules/config-guard.sh" 2>&1 | awk 'NF { print; exit }'; }
+for spec in "_t_stale.json|BASELINE OUT OF DATE" "_t_nop.json|BASELINE OUT OF DATE" \
+            "_t_env0.json|RISKY ENVIRONMENT VALUE" "_t_stale_env.json|RISKY ENVIRONMENT VALUE" \
+            "_t_or_true.json|SETTINGS TAMPER DETECTED" "_t_disable.json|SETTINGS TAMPER DETECTED"; do
+  h1="$(head_of "$TDIR/${spec%%|*}")"
+  case "$h1" in *"${spec#*|}"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard heading for ${spec%%|*}: $h1]" ;; esac
+done
+# FUNCNEST applies even under -p (common.sh drops it): config-guard still reports.
+out="$(printf '{"source":"project_settings","file_path":"%s"}' "$TDIR/_t_disable.json" | env FUNCNEST=1 bash -p "$H/modules/config-guard.sh" 2>&1)"; rc=$?
+if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "SETTINGS TAMPER DETECTED"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [config-guard under FUNCNEST=1: rc=$rc]"; fi
 run "non-object json -> 2"       modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_list.json")" 2
 run "missing settings -> 2"      modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_nope.json")" 2
 run "non-watched source -> 0"    modules/config-guard.sh "$(ccp user_settings "$GOOD")" 0
@@ -416,15 +563,24 @@ import ast, json, re, sys
 src = sys.argv[1]
 tmpl = json.load(open(src + "/settings.template.json", encoding="utf-8"))
 guard = open(src + "/hooks/modules/config-guard.sh", encoding="utf-8").read()
-def pylist(name):
+merge = open(src + "/lib/merge_settings.py", encoding="utf-8").read()
+def pylist(name, text=guard):
     # Parse the literal rather than scraping the source text between quotes. An entry
     # containing a backslash — the Windows path forms among the PowerShell deny rules —
     # is written "\\" in the source but denotes ONE backslash, so a regex scrape
     # reports drift between two files that actually agree. (Writing a single backslash
     # in the source to satisfy the scrape would be worse: "\\baseline" as one
     # backslash is the escape \\b, a backspace.)
-    m = re.search(name + r" = (\[.*?\])", guard, re.S)
+    m = re.search(name + r" = (\[.*?\])", text, re.S)
     return list(ast.literal_eval(m.group(1))) if m else []
+# env + launch coupling: config-guard flags the same env keys, and accepts the same
+# launch form, as the installer and baseline-status (lib/merge_settings.py)
+def pystr(name, text=guard):
+    m = re.search(name + r" = (r'[^'\n]*')", text)
+    return ast.literal_eval(m.group(1)) if m else ""
+env_ok = (all(pylist(n) and pylist(n) == pylist(n, merge)
+              for n in ("RISKY_ENV_NAMES", "RISKY_ENV_PREFIXES", "RISKY_ENV_SUBSTRINGS"))
+          and pystr("BASELINE_LAUNCH") and pystr("BASELINE_LAUNCH") == pystr("BASELINE_LAUNCH", merge))
 # deny-list coupling
 deny_ok = sorted(tmpl["permissions"]["deny"]) == sorted(pylist("EXPECTED_DENY")) and pylist("EXPECTED_DENY")
 # wired-scripts coupling: every script the template `bash`-invokes must be in REQUIRED_HOOK_CMDS, and vice-versa
@@ -439,9 +595,24 @@ walk(tmpl.get("hooks", {}))
 wired = set(re.findall(r"\.claude/hooks/baseline/(\S+?\.sh)", " ".join(cmds)))
 req = set(pylist("REQUIRED_HOOK_CMDS"))
 hooks_ok = wired == req and req
-raise SystemExit(0 if deny_ok and hooks_ok else 1)
+# every baseline hook the template wires takes config-guard's exact launch form (2c),
+# and config-guard's minimum timeouts are the template's
+launch_pat = pystr("BASELINE_LAUNCH")   # "" if config-guard has none: drift, not a crash
+launch_ok = bool(launch_pat) and all(re.match(launch_pat, c) for c in cmds if "/.claude/hooks/baseline/" in c)
+m = re.search(r"BASELINE_TIMEOUTS = (\{.*?\})", guard, re.S)
+tmpl_timeouts = {}
+def walk_t(o):
+    if isinstance(o, dict):
+        mm = launch_pat and o.get("type") == "command" and re.match(launch_pat, o.get("command", ""))
+        if mm: tmpl_timeouts[mm.group(2)] = o.get("timeout")
+        for v in o.values(): walk_t(v)
+    elif isinstance(o, list):
+        for it in o: walk_t(it)
+walk_t(tmpl.get("hooks", {}))
+launch_ok = launch_ok and m and ast.literal_eval(m.group(1)) == tmpl_timeouts
+raise SystemExit(0 if deny_ok and hooks_ok and env_ok and launch_ok else 1)
 PY
-then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [coupling drift: settings.template.json vs config-guard EXPECTED_DENY / REQUIRED_HOOK_CMDS]"; fi
+then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [coupling drift: settings.template.json vs config-guard EXPECTED_DENY / REQUIRED_HOOK_CMDS / BASELINE_LAUNCH / BASELINE_TIMEOUTS, or config-guard vs merge_settings RISKY_ENV_* / BASELINE_LAUNCH]"; fi
 resetcfg
 
 echo "== baseline version stamp + config-keep contract (Q3) =="
@@ -543,6 +714,7 @@ if h['Stop'][:1]!=[None]: bad.append('null Stop entry not kept in place')
 grps=[(ev,g) for ev,gs in h.items() for g in gs if g is not None]
 allh=[x for ev,g in grps for x in g['hooks']]
 if sum('command-guard.sh' in x.get('command','') for x in allh)!=1: bad.append('command-guard not exactly once')
+if not all(x['command'].startswith('bash -p ') for x in allh if 'command-guard.sh' in x.get('command','')): bad.append('command-guard not relaunched as bash -p')
 if any('retired.sh' in x.get('command','') for x in allh): bad.append('retired baseline hook kept')
 empty=[(ev,g.get('matcher')) for ev,g in grps if not g['hooks']]
 if empty!=[('PostToolUse','Write')]: bad.append('empty groups %r' % (empty,))
@@ -552,6 +724,15 @@ if [ "$mk" = "ok" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  F
 cp "$MG/.claude/settings.json" "$TMP/mergekeep.first.json"
 timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$MG")" >/dev/null 2>&1 </dev/null
 if cmp -s "$MG/.claude/settings.json" "$TMP/mergekeep.first.json"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [merge-keep re-run changed settings.json]"; fi
+# An env value that can run code before the hooks is reported by the installer and kept
+# exactly as it was (never clobber an existing key).
+EV="$TMP/envwarn"; mkdir -p "$EV/.claude"; ( cd "$EV" && git init -q )
+printf '{"env": {"BASH_ENV": "/tmp/startup.sh", "NODE_ENV": "production"}}\n' > "$EV/.claude/settings.json"
+evout="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$EV")" 2>&1 </dev/null)"; rc=$?
+evenv="$("$PY" -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1],encoding='utf-8')).get('env'), sort_keys=True))" "$(winpath "$EV/.claude/settings.json")" 2>&1)"
+if [ "$rc" = 0 ] && printf '%s' "$evout" | grep -qF "WARNING: settings.json env sets BASH_ENV." \
+   && [ "$evenv" = '{"BASH_ENV": "/tmp/startup.sh", "NODE_ENV": "production"}' ]; then
+  pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install env warning: rc=$rc env=$evenv]"; fi
 
 echo "== install.sh picks a Python that runs (B2) =="
 # On Windows `python3` is usually the Store app execution alias, which is a stub when

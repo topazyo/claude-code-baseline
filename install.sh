@@ -197,12 +197,13 @@ sys.exit(0 if p(sys.argv[1]) >= p(sys.argv[2]) else 1)' "$CC_VER" "$MIN_CC" 2>/d
   fi
 fi
 
-# 0b. Advisory platform note. The guard hooks run `bash "..."` and set onFailure:
+# 0b. Advisory platform note. The guard hooks run `bash -p "..."` and set onFailure:
 #     block, so a Claude Code that cannot find Git Bash on Windows refuses every
 #     shell command and every edit (fail-closed). Never blocks the install.
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*)
-    say "Windows: Claude Code must find Git Bash (Git for Windows, or CLAUDE_CODE_GIT_BASH_PATH);"
+    say "Windows: Claude Code must find Git Bash (Git for Windows, or CLAUDE_CODE_GIT_BASH_PATH set in"
+    say "your user environment or ~/.claude/settings.json, not in the repo's settings);"
     say "without it the guard hooks cannot start and every shell command and edit is refused." ;;
   *)
     if [[ -n "${WSL_DISTRO_NAME:-}" || -e /proc/sys/fs/binfmt_misc/WSLInterop ]] \

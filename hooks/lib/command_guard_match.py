@@ -80,16 +80,17 @@ top-level heredoc body, still fails to tokenize and is blocked.
 
 PowerShell payloads are also judged as the text PowerShell produces from its backtick
 escapes and typographic quotes, with PowerShell 7's and Windows PowerShell 5.1's
-escapes (see _ps_unescape and evaluate()). Limits: a $( ) subexpression holding a
-nested "..." string is scanned as if the inner quote closed the outer string (the
-context-free reading still decodes every escape in it); --% (stop-parsing) is not
-modelled, so the text after it is judged decoded as well as raw, and the raw readings
-give what the program receives there; and PowerShell cmdlets (Remove-Item ...) are
-matched by the deny-list only. The context-free reading decodes escapes inside '...'
-too, so a single-quoted commit message holding `n followed by a blocked command at
-the start of the next line is blocked, the cost the multi-line pass already accepts
-for a real newline; a "..." message whose decoded line starts with one is blocked
-the same way.
+escapes, and with the Unicode space characters PowerShell separates words on read as
+spaces (see _ps_unescape, _PS_SPACES and _powershell_segments). Limits: a $( )
+subexpression holding a nested "..." string is scanned as if the inner quote closed
+the outer string (the context-free reading still decodes every escape in it); --%
+(stop-parsing) is not modelled, so the text after it is judged decoded as well as
+raw, and the raw readings give what the program receives there; and PowerShell
+cmdlets (Remove-Item ...) are matched by the deny-list only. The context-free reading
+decodes escapes inside '...' too, so a single-quoted commit message holding `n
+followed by a blocked command at the start of the next line is blocked, the cost the
+multi-line pass already accepts for a real newline; a "..." message whose decoded
+line starts with one is blocked the same way.
 """
 from __future__ import annotations
 
@@ -1020,6 +1021,23 @@ _WORD_BREAKS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 _AS_LINE_BREAK = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\n"))
 _AS_SPACE = str.maketrans(dict.fromkeys(_WORD_BREAKS, " "))
 
+# Characters PowerShell separates words on and the readings take for part of a word.
+# Beyond tab, VT, FF and space, PowerShell's whitespace is NBSP, NEL and every
+# character .NET's char.IsSeparator() accepts (CharTraits.cs, IsWhitespace); VT, FF,
+# NEL, U+2028 and U+2029 are _WORD_BREAKS already, whose space reading covers them.
+# U+180E was a space separator before Unicode 6.3, and .NET Framework 4 to 4.5.2,
+# which Windows PowerShell 5.1 can run on, classify characters with Unicode 5.0.
+# A PowerShell payload holding any of them is also judged with each one a space (see
+# _powershell_segments); bash reads them as part of a word, so a Bash payload is not.
+# The mapping covers the whole text, quoted strings and inline bash -c scripts too:
+# a quoted string stays one word, and the extra splitting there only adds segments.
+# The readings that keep one inside its word stay, so a command word glued by one to
+# a $ word (Write-Output, NBSP, $env:PATH) is still blocked as an expansion in command
+# position.
+_PS_SPACES = "".join(map(chr, (0xA0, 0x1680, 0x180E, *range(0x2000, 0x200B),
+                               0x202F, 0x205F, 0x3000)))
+_PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
+
 
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
               piped: bool = False, lenient_on_error: bool = False):
@@ -1416,11 +1434,47 @@ def _ps_unescape_everywhere(text: str, legacy: bool = False) -> str:
     return "".join(out)
 
 
+def _powershell_segments(raw: str):
+    """Every segment evaluate() judges for a PowerShell payload: the readings below of
+    the raw text and, when it holds one of _PS_SPACES, the same readings of the text
+    with each of them a space, as PowerShell reads them outside a string. The raw
+    readings stay, so this only adds segments. Raises as _segments() does."""
+    segments = []
+    for text in dict.fromkeys((raw, raw.translate(_PS_AS_SPACE))):
+        segments += _segments(text, shell="powershell")
+        # PowerShell reads `\` as a path separator, but a script it hands to bash
+        # (`bash -c "git push \` + newline + `--force"`) reads it as an escape or a
+        # line continuation. Judge the POSIX reading too and add its segments; a line
+        # of it that does not tokenize is judged piecewise (quote-blind) instead of
+        # being dropped.
+        segments += _segments(text, shell="powershell", ps_slashes=False,
+                              lenient_on_error=True)
+        # ...and the text PowerShell itself produces from its escapes and typographic
+        # quotes, which is what a native program such as bash receives: _ps_unescape()
+        # follows PowerShell's quoting, and _ps_unescape_everywhere() decodes every
+        # escape whatever the context, so a scanner mistake about quoting cannot leave
+        # an escape undecoded. With a `e or `u in the text, both are also read with
+        # Windows PowerShell 5.1's escapes. A reading identical to the text, already
+        # judged above with the same arguments, or to another reading adds nothing and
+        # is skipped. An escape's value is a literal character, so a _PS_SPACES
+        # character it produces stays part of its word.
+        if "`" in text or any(q in text for q in _PS_TYPOGRAPHIC_QUOTES):
+            readings = [_ps_unescape(text), _ps_unescape_everywhere(text)]
+            if "`e" in text or "`u" in text:
+                readings += [_ps_unescape(text, legacy=True),
+                             _ps_unescape_everywhere(text, legacy=True)]
+            for reading in dict.fromkeys(readings):
+                if reading != text:
+                    segments += _segments(reading, shell="powershell", ps_slashes=False,
+                                          lenient_on_error=True)
+    return segments
+
+
 def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     """Return the list of block reasons for a raw command string (+ optional query).
     Pure function -- no I/O -- so it is directly unit-testable. shell is "bash" or
     "powershell" (the payload's tool_name); "powershell" adds here-string handling
-    and the PowerShell readings below."""
+    and the PowerShell readings (see _powershell_segments)."""
     if raw is None:
         return []
     if len(raw) > _MAX_INSPECT_LEN:
@@ -1433,33 +1487,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
         return []
 
     try:
-        segments = _segments(raw, shell=shell)
-        if shell == "powershell":
-            # PowerShell reads `\` as a path separator, but a script it hands to bash
-            # (`bash -c "git push \` + newline + `--force"`) reads it as an escape or
-            # a line continuation. Judge the POSIX reading too and add its segments;
-            # a line of it that does not tokenize is judged piecewise (quote-blind)
-            # instead of being dropped.
-            segments = segments + _segments(raw, shell="powershell", ps_slashes=False,
-                                            lenient_on_error=True)
-            # ...and the text PowerShell itself produces from its escapes and
-            # typographic quotes, which is what a native program such as bash
-            # receives: _ps_unescape() follows PowerShell's quoting, and
-            # _ps_unescape_everywhere() decodes every escape whatever the context, so
-            # a scanner mistake about quoting cannot leave an escape undecoded. With a
-            # `e or `u in the text, both are also read with Windows PowerShell 5.1's
-            # escapes. A reading identical to the raw text, already judged above with
-            # the same arguments, or to another reading adds nothing and is skipped.
-            if "`" in raw or any(q in raw for q in _PS_TYPOGRAPHIC_QUOTES):
-                readings = [_ps_unescape(raw), _ps_unescape_everywhere(raw)]
-                if "`e" in raw or "`u" in raw:
-                    readings += [_ps_unescape(raw, legacy=True),
-                                 _ps_unescape_everywhere(raw, legacy=True)]
-                for text in dict.fromkeys(readings):
-                    if text != raw:
-                        segments = segments + _segments(text, shell="powershell",
-                                                        ps_slashes=False,
-                                                        lenient_on_error=True)
+        segments = (_powershell_segments(raw) if shell == "powershell"
+                    else _segments(raw, shell=shell))
     except _Uninspectable as exc:
         return [f"uninspectable command ({exc})"]
     except ValueError as exc:

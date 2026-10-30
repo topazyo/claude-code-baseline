@@ -64,10 +64,11 @@ for name, prof in [("balanced", bal), ("strict", strict)]:
             fails.append(f"{name}: hooks.{event} missing or not a non-empty array")
             continue
         ok = False
-        # Launcher-anchored (mirrors R5 config-guard): the command must `bash` the
-        # script as a single argument token, not merely mention its name (e.g. in a
-        # trailing comment or a different path segment).
-        launches = re.compile(r'(^|\s)bash\s+"?\S*' + re.escape(want_script) + r'"?(\s|$)')
+        # Exactly the launch config-guard's (2c) accepts for a repo install: `bash -p` and
+        # the quoted script under the placeholder, nothing else on the line (a trailing
+        # `|| true` would discard the verdict). -p: a plain bash runs an inherited
+        # BASH_ENV file and imports exported functions before the hook.
+        launches = re.compile(r'\Abash -p "' + re.escape("<BASELINE_PREFIX>/" + want_script) + r'"\Z')
         for g in groups:
             if not isinstance(g, dict) or g.get("matcher") != want_matcher:
                 continue

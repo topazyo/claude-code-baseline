@@ -21,7 +21,9 @@
 #   tools/baseline-status.sh [--drift] [--strict] [--json <outfile>] <repo>...
 #     --drift           (default view) report version drift + posture per repo.
 #     --strict          exit non-zero if ANY installed repo has drifted from the
-#                       source version (an un-installed repo does NOT trip this).
+#                       source version, or has a settings finding (a risky env value,
+#                       or a baseline hook not run as the template wires it). An
+#                       un-installed repo does NOT trip this.
 #     --json <outfile>  ALSO write the full per-repo report as JSON to <outfile>
 #                       (the only filesystem write this tool ever performs).
 #
@@ -70,17 +72,71 @@ PY
 SRC_VER="$(read_src_key baselineVersion)"
 SRC_MIN="$(read_src_key minClaudeCodeVersion)"
 
+# settings_check <repo> -> "<env findings>\x1f<launch findings>", each comma-separated.
+# env: keys of the repo's settings.json / settings.local.json `env` that can run code
+# before the baseline hooks, redirect them or switch them off. launch: baseline scripts
+# the template wires that settings.json does not run exactly as `bash -p <script>`
+# with the template's keys, and a disableAllHooks in either file. Same rules as the
+# installer (lib/merge_settings.py). This tool runs outside Claude Code, so unlike
+# config-guard it is not started by the shell those values reach.
+settings_check() {
+  "$PY" -I -S -X utf8 - "$SRC_ROOT" "$1" <<'PY'
+import contextlib, io, os, sys
+src, repo = sys.argv[1], sys.argv[2]
+sys.dont_write_bytecode = True   # importing lib/merge_settings.py must not write into the source tree
+sys.path.insert(0, os.path.join(src, "lib"))
+import merge_settings as ms
+
+def read(path):
+    with contextlib.redirect_stderr(io.StringIO()):   # ms.load reports on stderr
+        try:
+            return ms.load(path, "settings")
+        except SystemExit:
+            return None
+
+def name(text):
+    # ascii()-escaped, commas too: a key name cannot shift the report's fields.
+    return ascii(text)[1:-1].replace(",", "\\x2c")
+
+mins = ms.baseline_timeouts(ms.strip_comments(read(os.path.join(src, "settings.template.json")) or {}))
+if not mins:   # no template to compare with: the check could not run
+    sys.exit("settings.template.json unreadable or wires no baseline hook")
+env, launch = [], set()
+for fname in ("settings.json", "settings.local.json"):
+    path = os.path.join(repo, ".claude", fname)
+    if not os.path.exists(path):
+        if fname == "settings.json":
+            launch.add("no settings.json")
+        continue
+    data = read(path)
+    if not isinstance(data, dict):
+        env.append(fname + ":unreadable")
+        if fname == "settings.json":
+            launch.add("settings.json unreadable")
+        continue
+    env += [fname + ":" + name(k) for k in ms.risky_env_keys(data)]
+    if data.get("disableAllHooks", False) not in (False, 0, None, "", "false", "False", "0", "no", "off"):
+        launch.add(fname + " disableAllHooks")   # same reading as config-guard (1)
+    if fname == "settings.json":
+        launch |= {name(s) for s in ms.baseline_launch_problems(data, mins)}
+        launch |= set(mins) - ms.baseline_launches(data, mins)
+print(",".join(env) + "\x1f" + ",".join(sorted(launch)))
+PY
+}
+
 GUARDRAILS=(commandGuard autoFormat)
 MODULES=(securityDefaults fixTags scopeGuard configGuard runTests trackerReminder autoStage)
 
 RECORDS=""
 any_drift=0
+any_settings=0
 
 echo "baseline status — source baselineVersion: ${SRC_VER:-<unset>}  (min Claude Code pin: ${SRC_MIN:-<unset>})"
 echo
 
 for repo in "${REPOS[@]}"; do
   installed=0; enf=""; fc=""; guards=""; mods=""; minver=""; minok=0; instver=""; drift="not-installed"
+  envrisk=""; launch=""
   hooks_dir="$repo/.claude/hooks/baseline"
   ver_file="$hooks_dir/VERSION"
 
@@ -101,6 +157,14 @@ for repo in "${REPOS[@]}"; do
     elif [[ "$instver" == "$SRC_VER" ]]; then drift="OK"
     else drift="DRIFT"; fi
     [[ "$drift" != "OK" ]] && any_drift=1
+    # A check that could not run is a finding, never a clean report.
+    # \x1f, not a tab: read collapses a leading tab, which would shift an empty env
+    # field's neighbour into it.
+    sc="$(settings_check "$repo")" || sc=$'check-failed\x1fcheck-failed'
+    sc="${sc//$'\r'/}"   # Windows Python print() emits CRLF
+    [[ "$sc" == *$'\x1f'* ]] || sc=$'check-failed\x1fcheck-failed'
+    IFS=$'\x1f' read -r envrisk launch <<< "$sc"
+    [[ -n "$envrisk$launch" ]] && any_settings=1
   fi
 
   # Human-readable per-repo block (the report; --json is the machine form).
@@ -109,13 +173,15 @@ for repo in "${REPOS[@]}"; do
     echo "  installed=yes  posture=$enf  failClosed=$fc  version=${instver:-<none>}  drift=$drift"
     echo "  minClaudeCodeVersion=${minver:-<none>}  (canonical $SRC_MIN, ok=$([[ $minok -eq 1 ]] && echo yes || echo no))"
     echo "  guardrails: ${guards:-<none>}   modules: ${mods:-<none>}"
+    echo "  settings: risky env=${envrisk:-none}   hook wiring=${launch:-ok}"
   else
     echo "  installed=no   (no .claude/hooks/baseline/ — baseline not adopted here)"
   fi
   echo
 
-  RECORDS+="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
-    "$repo" "$installed" "$enf" "$fc" "$guards" "$mods" "$minver" "$minok" "$instver" "$drift")"$'\n'
+  RECORDS+="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$repo" "$installed" "$enf" "$fc" "$guards" "$mods" "$minver" "$minok" "$instver" "$drift" \
+    "$envrisk" "$launch")"$'\n'
 done
 
 if [[ -n "$JSON_OUT" ]]; then
@@ -130,9 +196,9 @@ for line in sys.stdin.read().splitlines():
     if not line:
         continue
     f = line.split("\t")
-    while len(f) < 10:
+    while len(f) < 12:
         f.append("")
-    repo, installed, enf, fc, guards, mods, minver, minok, instver, drift = f[:10]
+    repo, installed, enf, fc, guards, mods, minver, minok, instver, drift, envrisk, launch = f[:12]
     recs.append({
         "repo": repo,
         "installed": installed == "1",
@@ -144,6 +210,8 @@ for line in sys.stdin.read().splitlines():
         "minVersionOk": minok == "1",
         "baselineVersion": instver or None,
         "drift": drift,
+        "settingsEnvRisk": [x for x in envrisk.split(",") if x],
+        "hookLaunchProblems": [x for x in launch.split(",") if x],
     })
 with open(out, "w", encoding="utf-8") as fh:
     json.dump({"sourceBaselineVersion": srcver or None,
@@ -156,6 +224,10 @@ fi
 
 if [[ $STRICT -eq 1 && $any_drift -eq 1 ]]; then
   echo "drift detected (--strict): one or more installed repos are not on baselineVersion ${SRC_VER:-<unset>}" >&2
+  exit 1
+fi
+if [[ $STRICT -eq 1 && $any_settings -eq 1 ]]; then
+  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, no disableAllHooks)" >&2
   exit 1
 fi
 exit 0
