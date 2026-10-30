@@ -319,9 +319,11 @@ the live docs) pinned it at high confidence:
 > (1) **Path form.** `./` *is* supported — for project settings, `./` or no prefix is
 > relative to the project root. The `//` root-relative convention this roadmap imported
 > belongs to permission rules, not to the sandbox. So a repo-local `.env` **can** be put
-> in `denyRead`, and `managed/allowlist.example.json` now does exactly that. The
-> `sandbox.filesystem` assertion in `tests/test_managed.sh` that rejects `./` entries
-> encoded the error and must be inverted. (2) **Reach.** `denyRead`/`denyWrite` block
+> in a repo's own `denyRead`. *(Corrected 2026-10-30: `managed/allowlist.example.json`
+> does not list `./.env`, `./.env.*` or `./secrets`, because it is deployed as managed
+> settings, where the docs give `./` no meaning; `tests/test_managed.sh` rejects `./` in
+> that file for that reason, and `managed/README.md` says what to add per deployment.)*
+> (2) **Reach.** `denyRead`/`denyWrite` block
 > **subprocess** access, enforced by the OS against every child process — the opposite of
 > "Claude's read tools only." That makes the sandbox, not hygiene alone, the real answer
 > to the subprocess-read gap R7 spent three paragraphs calling unclosable. Separately, the
@@ -357,8 +359,9 @@ carried was itself wrong in three places, and the profile changed with the facts
   secret."* False in both halves. `Read(.env*)` covers the Bash file commands Claude Code
   recognizes, so `cat .env` is refused; and `sandbox.filesystem.denyRead` is an OS-level
   block on **every** child process, which is what actually stops
-  `python -c "open('.env').read()"`. `allowlist.example.json` now carries
-  `denyRead: ["./.env", "./.env.*", "./secrets"]`. Hygiene (don't keep real secrets on
+  `python -c "open('.env').read()"`. A repo deployment adds `./.env`, `./.env.*` and
+  `./secrets` to `denyRead`; the managed example lists absolute and `~/` paths only (see
+  `managed/README.md`). Hygiene (don't keep real secrets on
   disk) is still the advice that survives a session ending — the sandbox is a per-session
   control, not a property of the repository — but it is no longer the *only* answer.
 - *"`allowedDomains` blocks egress."* It **prompts**. Blocking requires
