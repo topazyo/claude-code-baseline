@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 116
+FP_FLOOR = 120
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -81,6 +81,11 @@ CASES = [
     # --- extraPatterns ---
     ("extra terraform destroy", "terraform destroy -auto-approve", B, ("terraform destroy",)),
     ("extra terraform plan (allow)", "terraform plan", A, ("terraform destroy",)),
+    # bash reads U+180E as part of a word, and Python's \s does not match it, so the
+    # pattern stays unmatched; in a PowerShell payload the matcher reads it as a
+    # space (see _PS_SPACES and PS_CASES).
+    ("extra pattern across a U+180E in bash (allow)",
+     "Write-Output" + chr(0x180E) + "hello", A, ("write-output hello",)),
 
     # --- non-targets (must NOT block — documented intentional scope) ---
     ("ok rm -rf ./build", "rm -rf ./build", A, ()),
@@ -595,6 +600,17 @@ PS_CASES = [
      "git commit -m 'Steps:`ngit push --force-with-lease'", B, ()),
     ("ps conservative: backtick-n in a double-quoted message",
      'git commit -m "Steps:`n`tgit push --force-with-lease"', B, ()),
+    # PowerShell separates words on Unicode space characters too (see SPACE_CASES);
+    # reading them as spaces must not block ordinary commands.
+    ("ps fp no-break space between words", "git" + chr(0xA0) + "status", A, ()),
+    ("ps fp no-break space inside a string",
+     'Write-Output "a' + chr(0xA0) + 'b"', A, ()),
+    ("ps fp ideographic space in a commit message",
+     'git commit -m "note' + chr(0x3000) + 'text"', A, ()),
+    # Python's \s does not match U+180E, so only the reading with it as a space gives
+    # the words this repo policy pattern needs (in bash it stays unmatched: CASES).
+    ("ps U+180E read as a space reaches a repo policy pattern",
+     "Write-Output" + chr(0x180E) + "hello", B, ("write-output hello",)),
 ]
 
 # tool_name plumbing through main(): the same text is a PowerShell here-string only
@@ -668,6 +684,103 @@ READING_CASES = [
      "git log `\r--oneline", ["git", "log", "--oneline"]),
 ]
 
+# PowerShell's word separators beyond space and tab (see _PS_SPACES), checked on the
+# words evaluate() judges for harmless input (as _segments returns them, lowercased):
+# each one is read as a PowerShell word separator, the reading that keeps it inside
+# the word stays, the text with them as spaces gets every reading, and bash reads them
+# as part of a word.
+# (label, shell, text, word lists that must be there, word lists that must not)
+_NBSP = chr(0xA0)
+SPACE_CASES = [
+    (f"U+{ord(c):04X} is read as a PowerShell word separator", "powershell",
+     "Write-Output" + c + "hello",
+     [["write-output", "hello"], ["write-output" + c + "hello"]], [])
+    for c in m._PS_SPACES
+] + [
+    (f"U+{cp:04X}, a _WORD_BREAKS character, separates PowerShell words", "powershell",
+     "Write-Output" + chr(cp) + "hello", [["write-output", "hello"]], [])
+    for cp in (0x0B, 0x0C, 0x85, 0x2028, 0x2029)
+] + [
+    ("decoded reading of the spaced text: a backtick escape", "powershell",
+     "Write-Output" + _NBSP + "a`tb", [["write-output", "a\tb"]], []),
+    ("decoded reading of the spaced text: typographic quotes", "powershell",
+     "Write-Output" + _NBSP + chr(0x201C) + "a b" + chr(0x201D),
+     [["write-output", "a b"]], []),
+    ("POSIX reading of the spaced text: a backslash escape", "powershell",
+     "Write-Output" + _NBSP + "a\\ b", [["write-output", "a b"]], []),
+    ("5.1 reading of the spaced text: backtick-e", "powershell",
+     "Write-Output" + _NBSP + "a`eb", [["write-output", "aeb"]], []),
+    ("context-free reading of the spaced text: '...'", "powershell",
+     "Write-Output" + _NBSP + "'a`tb'", [["write-output", "a\tb"]], []),
+] + [
+    ("bash reads a no-break space as part of a word", "bash",
+     "echo" + _NBSP + "hello", [["echo" + _NBSP + "hello"]], [["echo", "hello"]]),
+    ("a no-break space inside a string stays in its word", "powershell",
+     'Write-Output "a' + _NBSP + 'b"',
+     [["write-output", "a b"], ["write-output", "a" + _NBSP + "b"]],
+     [["write-output", "a", "b"]]),
+    ("a no-break space from an escape stays in its word", "powershell",
+     "Write-Output a`u{a0}b", [["write-output", "a" + _NBSP + "b"]],
+     [["write-output", "a", "b"]]),
+    ("composes with a _WORD_BREAKS line break", "powershell",
+     "Write-Output" + _NBSP + "hello" + "\x0b" + "Write-Output" + _NBSP + "bye",
+     [["write-output", "hello"], ["write-output", "bye"]], []),
+]
+
+
+def _space_case_problem(shell, text, present, absent):
+    """Why the words evaluate() judges for text do not match a SPACE_CASES row, or
+    an empty string when they do."""
+    segs = (m._powershell_segments(text) if shell == "powershell"
+            else m._segments(text, shell=shell))
+    words = [list(s) for s in segs]
+    missing = [w for w in present if w not in words]
+    unexpected = [w for w in absent if w in words]
+    if missing or unexpected:
+        return f"missing {missing!r}, unexpected {unexpected!r}; got {words!r}"
+    return ""
+
+
+def _space_constant_problem():
+    """Why _PS_SPACES is not PowerShell's whitespace less tab, space and _WORD_BREAKS,
+    or an empty string when it is. CharTraits.cs IsWhitespace: tab, VT, FF and space
+    below U+0080, NBSP and NEL up to U+0100, then .NET's char.IsSeparator (categories
+    Zs, Zl, Zp); plus U+180E, a space separator in the Unicode 5.0 data of .NET
+    Framework 4 to 4.5.2. A character that leaves _WORD_BREAKS must then be in
+    _PS_SPACES, so this fails."""
+    import unicodedata
+    seps = {cp for cp in range(0x101, 0x10000)
+            if unicodedata.category(chr(cp)) in ("Zs", "Zl", "Zp")}
+    want = ({chr(cp) for cp in {0x0B, 0x0C, 0xA0, 0x85, 0x180E} | seps}
+            - set(m._WORD_BREAKS))
+    got = set(m._PS_SPACES)
+    if got != want or len(m._PS_SPACES) != len(got):
+        return (f"missing {sorted(hex(ord(c)) for c in want - got)}, extra "
+                f"{sorted(hex(ord(c)) for c in got - want)}, "
+                f"{len(m._PS_SPACES) - len(got)} duplicate(s)")
+    return ""
+
+
+def _space_wiring_problem():
+    """Why evaluate() does not judge a PowerShell payload, and only one, through
+    _powershell_segments (what SPACE_CASES checks), or an empty string when it does."""
+    calls, real = [], m._powershell_segments
+
+    def recording(raw):
+        calls.append(raw)
+        return real(raw)
+
+    m._powershell_segments = recording
+    try:
+        m.evaluate("git status", shell="powershell")
+        n_ps = len(calls)
+        m.evaluate("git status", shell="bash")
+    finally:
+        m._powershell_segments = real
+    if n_ps != 1 or len(calls) != 1:
+        return f"PowerShell payload: {n_ps} call(s), Bash payload: {len(calls) - n_ps}"
+    return ""
+
 
 # Optional pytest entry point. This file is named test_*.py, so `pytest tests/`
 # collects it -- and with every fixture locked inside CASES behind __main__ it
@@ -720,6 +833,16 @@ if pytest is not None:
     def test_ps_reading(label, reading, legacy, text, expected):
         assert _reading_result(reading, legacy, text, expected) == expected, label
 
+    @pytest.mark.parametrize("label,shell,text,present,absent", SPACE_CASES)
+    def test_ps_space(label, shell, text, present, absent):
+        assert not _space_case_problem(shell, text, present, absent), label
+
+    def test_ps_space_constant():
+        assert not _space_constant_problem()
+
+    def test_ps_space_wiring():
+        assert not _space_wiring_problem()
+
     def test_fp_floor():
         n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in _all_cases() if not sb)
         assert n_allow >= FP_FLOOR, (
@@ -754,12 +877,30 @@ def run():
             failed += 1
             print(f"  FAIL [reading: {label}] {reading}(legacy={legacy}) of {text!r}: "
                   f"want {expected!r}, got {got!r}")
+    for label, shell, text, present, absent in SPACE_CASES:
+        problem = _space_case_problem(shell, text, present, absent)
+        if not problem:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [space: {label}] {shell} {text!r}: {problem}")
+    space_checks = (("_PS_SPACES is PowerShell's whitespace", _space_constant_problem),
+                    ("evaluate() uses _powershell_segments", _space_wiring_problem))
+    for label, check in space_checks:
+        problem = check()
+        if not problem:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [space: {label}] {problem}")
     n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in cases if not sb)
     n_block = len(cases) - n_allow
-    total = len(cases) + len(MAIN_CASES) + len(READING_CASES)
+    n_space = len(SPACE_CASES) + 2
+    total = len(cases) + len(MAIN_CASES) + len(READING_CASES) + n_space
     print(f"\ncommand-guard fixtures: {passed} passed, {failed} failed, "
           f"{total} total ({n_allow} allow / {n_block} block, "
-          f"+{len(MAIN_CASES)} via main(), +{len(READING_CASES)} PowerShell readings)")
+          f"+{len(MAIN_CASES)} via main(), +{len(READING_CASES)} PowerShell readings, "
+          f"+{n_space} PowerShell word separators)")
     # FP-budget floor: the allow corpus must never shrink below the last release floor.
     if n_allow < FP_FLOOR:
         failed += 1
