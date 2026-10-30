@@ -106,6 +106,40 @@ got="$(findings)"
 if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on a settings finding"; else ok; fi
 cp "$TMP/settings.saved" "$A/.claude/settings.json"; rm -f "$A/.claude/settings.local.json"
 if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else no "--strict should PASS once the settings are restored"; fi
+# Where the template wires each hook: a command-guard group whose matcher no longer
+# covers the template's is reported as such and fails --strict; a scope-guard that is
+# not wired at all is reported once, by name, with no wiring entry beside it.
+# rewire <python statement on the settings object s>
+rewire() {
+  "$PY" - "$A/.claude/settings.json" "$1" <<'PY'
+import json, sys
+p = sys.argv[1]
+s = json.load(open(p, encoding="utf-8"))
+exec(sys.argv[2])
+json.dump(s, open(p, "w", encoding="utf-8"))
+PY
+}
+rewire 's["hooks"]["PreToolUse"][0]["matcher"] = "Read"'
+got="$(findings)"
+[ "$got" = "[] ['guardrails/command-guard.sh not under PreToolUse Bash|PowerShell']" ] && ok || no "mis-wired matcher not reported: $got"
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on a mis-wired matcher"; else ok; fi
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+# The same with the covering group running a longer script name (an exact launch of a
+# script the template does not wire), so only the wiring check sees it.
+rewire 'g = s["hooks"]["PreToolUse"][0]; s["hooks"]["PreToolUse"].append(dict(g, matcher="Read")); g["hooks"] = [dict(g["hooks"][0], command=g["hooks"][0]["command"].replace("command-guard.sh", "command-guard.sh.sh"))]'
+got="$(findings)"
+[ "$got" = "[] ['guardrails/command-guard.sh not under PreToolUse Bash|PowerShell']" ] && ok || no "longer script name in the covering group not reported: $got"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+rewire 'g = s["hooks"]["PreToolUse"][0]; s["hooks"]["PreToolUse"].append(dict(g, matcher="Read")); g["hooks"] = [dict(g["hooks"][0], command=g["hooks"][0]["command"].replace("baseline/guardrails/", "baseline/x/.claude/hooks/baseline/guardrails/"))]'
+got="$(findings)"
+[ "$got" = "[] ['guardrails/command-guard.sh not under PreToolUse Bash|PowerShell']" ] && ok || no "repeated baseline path in the covering group not reported: $got"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+rewire 's["hooks"]["PreToolUse"] = s["hooks"]["PreToolUse"][:1]'
+got="$(findings)"
+[ "$got" = "[] ['modules/scope-guard.sh']" ] && ok || no "unwired script not reported once: $got"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+got="$(findings)"
+[ "$got" = "[] []" ] && ok || no "restored settings should have no settings finding: $got"
 
 echo "== baseline-status: local-only (no network primitives in source) =="
 if grep -E '(curl|wget|nc |/dev/tcp|ssh |scp |https?://)' "$STATUS" >/dev/null 2>&1; then

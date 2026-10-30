@@ -355,6 +355,66 @@ def baseline_launch_problems(settings: dict, min_timeouts: dict | None = None) -
     return sorted(found)
 
 
+def _matcher_covers(grp: dict, wired: str | None) -> bool:
+    """True only when hook group grp certainly runs for every value a template group with
+    matcher `wired` (None: every value) runs for. MIRRORS _matcher_covers in
+    hooks/modules/config-guard.sh, which explains it; a test runs both on one table."""
+    if "matcher" not in grp:
+        return True
+    m = grp["matcher"]
+    if m in ("", "*"):
+        return True
+    if wired is None or not isinstance(m, str) or not re.fullmatch(r"[A-Za-z0-9_|-]+", m):
+        return False
+    return set(wired.split("|")) <= set(m.split("|"))
+
+
+def baseline_wiring(template: dict) -> list[tuple]:
+    """(script, event, group matcher or None) for every template group entry that runs a
+    baseline script (BASELINE_LAUNCH), sorted. A match-all or non-string matcher reads as
+    None (only a match-all matcher then covers the row)."""
+    rows = set()
+    hooks = template.get("hooks")
+    for event, groups in (hooks.items() if isinstance(hooks, dict) else ()):
+        for grp in groups if isinstance(groups, list) else ():
+            if not isinstance(grp, dict):
+                continue
+            wired = grp.get("matcher")
+            wired = wired if isinstance(wired, str) and wired not in ("", "*") else None
+            for e in hook_entries(grp.get("hooks")):
+                m = re.match(BASELINE_LAUNCH, e["command"])
+                if m:
+                    rows.add((m.group(2), event, wired))
+    return sorted(rows, key=lambda r: (r[0], r[1], r[2] or ""))
+
+
+def _wired_at(hooks: dict, script: str, event: str, wired: str | None) -> bool:
+    """Some group under hooks[event] whose matcher covers `wired` holds, as a direct
+    entry, a command running script (right after its first BASELINE_MARKER, the name
+    ending where a path word ends) with no `if`. MIRRORS _wired_at in
+    hooks/modules/config-guard.sh (check 2d); a test runs both on one table."""
+    marker = re.escape(BASELINE_MARKER)
+    runs = re.compile(r"^\s*bash\s(?:(?!" + marker + r").)*" + marker
+                      + re.escape(script) + r"(?![A-Za-z0-9_./-])")
+    groups = hooks.get(event) if isinstance(hooks, dict) else None
+    for grp in groups if isinstance(groups, list) else []:
+        entries = grp.get("hooks") if isinstance(grp, dict) else None
+        if not isinstance(entries, list) or not _matcher_covers(grp, wired):
+            continue
+        if any(isinstance(h, dict) and h.get("type") == "command" and "if" not in h
+               and isinstance(h.get("command"), str) and runs.search(h["command"])
+               for h in entries):
+            return True
+    return False
+
+
+def baseline_wiring_problems(settings: dict, wiring: list) -> list[tuple]:
+    """The rows of wiring (baseline_wiring) that settings does not wire (_wired_at)."""
+    hooks = settings.get("hooks")
+    hooks = hooks if isinstance(hooks, dict) else {}
+    return [row for row in wiring if not _wired_at(hooks, *row)]
+
+
 def main() -> int:
     if len(sys.argv) != 4:
         sys.stderr.write("usage: merge_settings.py <existing|-> <template> <output>\n")

@@ -80,6 +80,38 @@ SIBLING_CASES = {"hooks": {"PreToolUse": [{"hooks": [
 ]}]}}
 ASYNC_REWAKE = {"hooks": {"Stop": [{"hooks": [
     launch("modules/tracker-reminder.sh", timeout=5, asyncRewake=True)]}]}}
+# Where the template wires each script, and installs that move one of them.
+WIRING = ms.baseline_wiring({"hooks": TEMPLATE})
+INSTALLED = {"hooks": ms.merge_hooks({}, TEMPLATE)}
+
+
+def rewired(change):
+    """A fresh install with change(hooks) applied."""
+    s = json.loads(json.dumps(INSTALLED))
+    change(s["hooks"])
+    return ms.baseline_wiring_problems(s, WIRING)
+
+
+def set_key(event, i, **keys):
+    def change(hooks):
+        hooks[event][i].update(keys)
+    return change
+
+
+def set_entry_key(event, i, **keys):
+    def change(hooks):
+        hooks[event][i]["hooks"][0].update(keys)
+    return change
+
+
+def lookalike(old, new):
+    """command-guard's covering group runs another path ending or holding its name; the
+    real one sits in a group that does not cover the template's matcher."""
+    def change(hooks):
+        real = hooks["PreToolUse"][0]["hooks"][0]
+        hooks["PreToolUse"].append({"matcher": "Read", "hooks": [dict(real)]})
+        real["command"] = real["command"].replace(old, new)
+    return change
 
 
 def merge_env_run():
@@ -169,6 +201,45 @@ checks = [
               "dispatcher/post-write.sh": 90, "modules/tracker-reminder.sh": 5,
               "modules/config-guard.sh": 10}),
     ("merge warns about a risky env key and keeps env as it was", merge_env_run()),
+    # where the template wires each script: event, group matcher, no `if`
+    ("template wiring read for every baseline group",
+     WIRING == [("dispatcher/post-write.sh", "PostToolUse", "Write|Edit"),
+                ("guardrails/command-guard.sh", "PreToolUse", "Bash|PowerShell"),
+                ("modules/config-guard.sh", "ConfigChange", "local_settings"),
+                ("modules/config-guard.sh", "ConfigChange", "project_settings"),
+                ("modules/scope-guard.sh", "PreToolUse", "Write|Edit"),
+                ("modules/tracker-reminder.sh", "Stop", None)]),
+    ("wiring: a fresh install has no problem, nor does a match-all or wider matcher",
+     rewired(lambda h: None) == [] and rewired(set_key("PreToolUse", 0, matcher="*")) == []
+     and rewired(set_key("PreToolUse", 0, matcher="Read|PowerShell|Bash")) == []),
+    ("wiring: a narrower, comma-list or regex matcher reported",
+     rewired(set_key("PreToolUse", 0, matcher="Bash"))
+     == [("guardrails/command-guard.sh", "PreToolUse", "Bash|PowerShell")]
+     and rewired(set_key("PreToolUse", 1, matcher="Write, Edit"))
+     == [("modules/scope-guard.sh", "PreToolUse", "Write|Edit")]
+     and rewired(set_key("PostToolUse", 0, matcher="^(Write|Edit)$"))
+     == [("dispatcher/post-write.sh", "PostToolUse", "Write|Edit")]),
+    ("wiring: a matcher on Stop, and an if on any event, reported",
+     rewired(set_key("Stop", 0, matcher="Bash")) == [("modules/tracker-reminder.sh", "Stop", None)]
+     and rewired(set_entry_key("ConfigChange", 1, **{"if": "Bash(git status)"}))
+     == [("modules/config-guard.sh", "ConfigChange", "local_settings")]),
+    ("wiring: another event, and an entry nested inside another entry, reported",
+     rewired(lambda h: h.update(SessionStart=h.pop("Stop")))
+     == [("modules/tracker-reminder.sh", "Stop", None)]
+     and rewired(lambda h: h["PreToolUse"][1].update(
+         hooks=[{"type": "command", "command": "exit 0", "x": h["PreToolUse"][1]["hooks"][0]}]))
+     == [("modules/scope-guard.sh", "PreToolUse", "Write|Edit")]),
+    ("wiring: a longer script name in the covering group does not count",
+     rewired(lookalike("command-guard.sh", "command-guard.sh.sh"))
+     == [("guardrails/command-guard.sh", "PreToolUse", "Bash|PowerShell")]),
+    ("wiring: a path that holds the baseline path again does not count",
+     rewired(lookalike("baseline/guardrails/", "baseline/x/.claude/hooks/baseline/guardrails/"))
+     == [("guardrails/command-guard.sh", "PreToolUse", "Bash|PowerShell")]),
+    ("wiring: no hooks object, or a wrong-typed one, reports every row, no crash",
+     ms.baseline_wiring_problems({}, WIRING) == WIRING
+     and ms.baseline_wiring_problems({"hooks": ["x"]}, WIRING) == WIRING
+     and ms.baseline_wiring_problems({"hooks": {"Stop": "x", "PreToolUse": [None, {"hooks": "x"}]}},
+                                     WIRING) == WIRING),
 ]
 
 failed = [label for label, ok in checks if not ok]

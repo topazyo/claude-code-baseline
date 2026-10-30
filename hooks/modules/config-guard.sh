@@ -164,6 +164,37 @@ REQUIRED_HOOK_CMDS = [
     "modules/tracker-reminder.sh",
     "modules/config-guard.sh",
 ]
+# Where the template wires each script: (script, event, the group's matcher or None for a
+# group without one). MIRRORS settings.template.json; a test asserts the two agree.
+BASELINE_WIRING = [
+    ("guardrails/command-guard.sh", "PreToolUse", "Bash|PowerShell"),
+    ("modules/scope-guard.sh", "PreToolUse", "Write|Edit"),
+    ("dispatcher/post-write.sh", "PostToolUse", "Write|Edit"),
+    ("modules/tracker-reminder.sh", "Stop", None),
+    ("modules/config-guard.sh", "ConfigChange", "project_settings"),
+    ("modules/config-guard.sh", "ConfigChange", "local_settings"),
+]
+# How Claude Code reads a group's matcher (hooks docs, "Matcher patterns"): absent, "" or
+# "*" match every value; a value of only letters, digits, _, -, space, comma and | is an
+# exact name or a list split on | or ,; anything else is an unanchored JavaScript regex.
+# True only when group grp certainly runs for every value a template group with matcher
+# `wired` (None: every value) runs for. It errs toward False. Only names joined by |
+# count: read as exact names or as a regex, they cover those names (a list with a space
+# or comma is not counted, in case a supported release reads it as a regex). A regex never
+# counts (a pattern from settings could make Python's backtracking outlast this hook's
+# timeout, and Python and JavaScript read some patterns differently), nor does a null
+# matcher, nor any matcher where the template group has none: Stop ignores matchers today,
+# but it is reported anyway so the check does not depend on which events support them.
+# MIRRORED in lib/merge_settings.py; a test runs both on one table.
+def _matcher_covers(grp, wired):
+    if "matcher" not in grp:
+        return True
+    m = grp["matcher"]
+    if m in ("", "*"):
+        return True
+    if wired is None or not isinstance(m, str) or not re.fullmatch(r"[A-Za-z0-9_|-]+", m):
+        return False
+    return set(wired.split("|")) <= set(m.split("|"))
 # Environment values a project settings `env` block must not set, whatever the value:
 # each can run code before a baseline hook, redirect it, or switch it off. MIRRORED in
 # lib/merge_settings.py (install.sh and tools/baseline-status.sh report them); a test
@@ -301,6 +332,33 @@ for grp in pre if isinstance(pre, list) else []:
 soft |= {s for s in GUARD_SCRIPTS if s not in seen and s not in missing_hooks}
 if soft:
     findings.append("baseline guard hooks are not PreToolUse hooks with onFailure: block: " + ", ".join(sorted(soft)) + " - a guard that cannot start or times out would let the call through.")
+
+# (2d) Each BASELINE_WIRING row needs a group under its event whose matcher covers the
+#      template's (_matcher_covers) and that holds, as a direct entry, a command running
+#      the script with no `if` (an `if` narrows a tool event, and on any other event the
+#      hook never runs). Wired anywhere else, the hook may not run for everything the
+#      template runs it for. Which entries run a script is the loose match of (2c), which
+#      owns the launch form, narrowed to the script right after the command's first
+#      baseline path and ending where a path word ends; scripts (2) or (2b) already
+#      report are skipped. MIRRORED in lib/merge_settings.py; a test runs both on one table.
+def _wired_at(hooks, script, event, wired):
+    runs = re.compile(r"^\s*bash\s(?:(?!/\.claude/hooks/baseline/).)*/\.claude/hooks/baseline/"
+                      + re.escape(script) + r"(?![A-Za-z0-9_./-])")
+    groups = hooks.get(event) if isinstance(hooks, dict) else None
+    for grp in groups if isinstance(groups, list) else []:
+        entries = grp.get("hooks") if isinstance(grp, dict) else None
+        if not isinstance(entries, list) or not _matcher_covers(grp, wired):
+            continue
+        if any(isinstance(h, dict) and h.get("type") == "command" and "if" not in h
+               and isinstance(h.get("command"), str) and runs.search(h["command"])
+               for h in entries):
+            return True
+    return False
+skip = set(missing_hooks) | {s for s in GUARD_SCRIPTS if s not in seen}
+miswired = ["%s under %s%s" % (s, ev, " " + m if m else "") for s, ev, m in BASELINE_WIRING
+            if s not in skip and not _wired_at(hooks_obj, s, ev, m)]
+if miswired:
+    findings.append("baseline hooks are not wired as the template wires them (its event, a matcher covering its matcher, no if): " + ", ".join(miswired) + " - they may not run for everything the template runs them for.")
 
 # (2c) Every entry that runs a baseline script takes exactly the BASELINE_LAUNCH form,
 #      with keys beside it that let it run as written (_entry_runs_as_written). A plain

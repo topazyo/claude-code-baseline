@@ -479,6 +479,67 @@ variant("_t_shell.json",   rekey("post-write", shell="powershell"))
 variant("_t_async.json",   rekey("post-write", **{"async": True}))
 variant("_t_rewake.json",  rekey("config-guard", asyncRewake=True))
 variant("_t_timeout.json", rekey("post-write", timeout=1))
+# Where the template wires a hook (2d): its event, a group matcher covering the
+# template's, no `if`. First the forms that still cover the template's values, then
+# ones that do not, or that the check cannot read as covering.
+DROP = object()
+def rematch(script, matcher):
+    def change(s):
+        for grps in s["hooks"].values():
+            for grp in grps:
+                if any(script in h["command"] for h in grp["hooks"]):
+                    if matcher is DROP: grp.pop("matcher", None)
+                    else: grp["matcher"] = matcher
+    return change
+def move(script, event):   # the script's group, matcher and all, under another event
+    def change(s):
+        for grps in list(s["hooks"].values()):
+            for grp in [g for g in grps if any(script in h["command"] for h in g["hooks"])]:
+                grps.remove(grp)
+                s["hooks"].setdefault(event, []).append(grp)
+    return change
+def drop_local(s):
+    s["hooks"]["ConfigChange"] = [g for g in s["hooks"]["ConfigChange"] if g.get("matcher") != "local_settings"]
+def one_cc(s):
+    s["hooks"]["ConfigChange"] = [dict(s["hooks"]["ConfigChange"][0], matcher="project_settings|local_settings")]
+def beside(s):   # a covering group stays; a copy under a narrower matcher is extra
+    pre = s["hooks"]["PreToolUse"]
+    cg = [g for g in pre if any("command-guard" in h["command"] for h in g["hooks"])][0]
+    pre.append(dict(json.loads(json.dumps(cg)), matcher="Read"))
+def nest(s):     # post-write's entry inside another entry, where Claude Code never runs it
+    for grp in s["hooks"]["PostToolUse"]:
+        grp["hooks"] = [{"type": "command", "command": "exit 0", "timeout": 5, "x": h} for h in grp["hooks"]]
+def lower_event(s):
+    s["hooks"]["posttooluse"] = s["hooks"].pop("PostToolUse")
+for name, change in [
+        ("_t_w_star.json", rematch("command-guard", "*")),
+        ("_t_w_empty.json", rematch("command-guard", "")),
+        ("_t_w_absent.json", rematch("command-guard", DROP)),
+        ("_t_w_reorder.json", rematch("command-guard", "PowerShell|Bash")),
+        ("_t_w_wider.json", rematch("command-guard", "Bash|PowerShell|Read")),
+        ("_t_w_one_cc.json", one_cc),
+        ("_t_w_beside.json", beside),
+        ("_t_w_read.json", rematch("command-guard", "Read")),
+        ("_t_w_bash.json", rematch("command-guard", "Bash")),
+        ("_t_w_comma.json", rematch("command-guard", "Bash, PowerShell")),
+        ("_t_w_spaced.json", rematch("command-guard", "PowerShell | Bash")),
+        ("_t_w_regex.json", rematch("command-guard", "^(Bash|PowerShell)$")),
+        ("_t_w_nl.json", rematch("command-guard", "Bash|PowerShell" + chr(10))),
+        ("_t_w_tab.json", rematch("command-guard", "Bash|PowerShell" + chr(9))),
+        ("_t_w_trail.json", rematch("command-guard", "Bash|PowerShell ")),
+        ("_t_w_null.json", rematch("command-guard", None)),
+        ("_t_w_sg.json", rematch("scope-guard", "Write")),
+        ("_t_w_pw.json", rematch("post-write", "Edit")),
+        ("_t_w_stop.json", rematch("tracker-reminder", "Bash")),
+        ("_t_w_stop_null.json", rematch("tracker-reminder", None)),
+        ("_t_w_if_cg.json", rekey("command-guard", **{"if": "Bash(git status)"})),
+        ("_t_w_if_tr.json", rekey("tracker-reminder", **{"if": "Bash(git status)"})),
+        ("_t_w_pw_pre.json", move("post-write", "PreToolUse")),
+        ("_t_w_tr_ss.json", move("tracker-reminder", "SessionStart")),
+        ("_t_w_local.json", drop_local),
+        ("_t_w_nested.json", nest),
+        ("_t_w_case.json", lower_event)]:
+    variant(name, change)
 # env values that can run code before the hooks, redirect them or switch them off,
 # whatever the value; bash_env and Path check the case-insensitive match. Then values
 # that must stay allowed.
@@ -520,6 +581,29 @@ run "launch in powershell -> 2"          modules/config-guard.sh "$(ccp project_
 run "launch async -> 2"                  modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_async.json")" 2
 run "launch asyncRewake -> 2"            modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_rewake.json")" 2
 run "launch with a short timeout -> 2"   modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_timeout.json")" 2
+# (2d) where the template wires each hook. A regex, a comma or space list, and a matcher
+# on Stop (which ignores matchers) are reported even where they would cover: the check
+# counts only forms it can read for certain. Re-running install.sh restores the group.
+for spec in "star:0" "empty:0" "absent:0" "reorder:0" "wider:0" "one_cc:0" "beside:0" \
+            "read:2" "bash:2" "comma:2" "spaced:2" "regex:2" "nl:2" "tab:2" "trail:2" "null:2" "sg:2" "pw:2" "stop:2" \
+            "stop_null:2" "if_cg:2" "if_tr:2" "pw_pre:2" "tr_ss:2" "local:2" "nested:2" "case:2"; do
+  run "wiring ${spec%%:*} -> ${spec#*:}" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_w_${spec%%:*}.json")" "${spec#*:}"
+done
+# report_of <settings>: the whole report
+report_of() { printf '{"source":"project_settings","file_path":"%s"}' "$1" | bash -p "$H/modules/config-guard.sh" 2>&1; }
+rpt="$(report_of "$TDIR/_t_w_read.json")"
+for needle in "SETTINGS TAMPER DETECTED" "not wired as the template wires them" \
+              "guardrails/command-guard.sh under PreToolUse Bash|PowerShell - "; do
+  case "$rpt" in *"$needle"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard wiring report missing: $needle]" ;; esac
+done
+rpt="$(report_of "$TDIR/_t_w_local.json")"
+case "$rpt" in *"modules/config-guard.sh under ConfigChange local_settings - "*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard wiring report: local_settings group]" ;; esac
+# No double report: a guard (2b) finds under no PreToolUse group, or a script (2) finds
+# unwired, gets no wiring line.
+for spec in "_t_cg_moved.json|command-guard.sh under" "_t_nocg.json|config-guard.sh under"; do
+  rpt="$(report_of "$TDIR/${spec%%|*}")"
+  case "$rpt" in *"${spec#*|}"*) fail=$((fail + 1)); echo "  FAIL [config-guard double report in ${spec%%|*}]" ;; *) pass=$((pass + 1)) ;; esac
+done
 for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
   run "risky env value $i -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_env$i.json")" 2
 done
@@ -613,6 +697,85 @@ launch_ok = launch_ok and m and ast.literal_eval(m.group(1)) == tmpl_timeouts
 raise SystemExit(0 if deny_ok and hooks_ok and env_ok and launch_ok else 1)
 PY
 then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [coupling drift: settings.template.json vs config-guard EXPECTED_DENY / REQUIRED_HOOK_CMDS / BASELINE_LAUNCH / BASELINE_TIMEOUTS, or config-guard vs merge_settings RISKY_ENV_* / BASELINE_LAUNCH]"; fi
+# Wiring coupling: config-guard's BASELINE_WIRING is the template's wiring as
+# lib/merge_settings.py reads it (from the raw template too, whose hooks hold a _comment
+# string), every template matcher is names joined by | (so its names are defined), and
+# the two copies of _matcher_covers, and of _wired_at, give the same answers on one table.
+if "$PY" - "$SRC" <<'PY'
+import ast, json, re, sys
+src = sys.argv[1]
+sys.dont_write_bytecode = True   # importing lib/merge_settings.py must not write into the tree
+sys.path.insert(0, src + "/lib")
+import merge_settings as ms
+guard = open(src + "/hooks/modules/config-guard.sh", encoding="utf-8").read()
+m = re.search(r"BASELINE_WIRING = (\[.*?\n\])", guard, re.S)
+key = lambda r: (r[0], r[1], r[2] or "")
+cg_rows = sorted(ast.literal_eval(m.group(1)), key=key) if m else None
+tmpl = json.load(open(src + "/settings.template.json", encoding="utf-8"))
+rows = ms.baseline_wiring(tmpl)
+rows_ok = len(rows) == 6 and rows == cg_rows == ms.baseline_wiring(ms.strip_comments(tmpl))
+exact_ok = all(w is None or re.fullmatch(r"[A-Za-z0-9_|-]+", w) for _, _, w in rows)
+ns = {"re": re}
+for fn in ("_matcher_covers(grp, wired)", "_wired_at(hooks, script, event, wired)"):
+    f = re.search(r"^def " + re.escape(fn) + r":\n(?:    .*\n)+", guard, re.M)
+    if f:
+        exec(f.group(0), ns)
+cg_covers, cg_wired_at = ns.get("_matcher_covers"), ns.get("_wired_at")
+def g(*m): return {"matcher": m[0]} if m else {}
+BP, CC = "Bash|PowerShell", "local_settings"
+TABLE = [(g(), BP, True), (g(""), BP, True), (g("*"), BP, True), (g(BP), BP, True),
+         (g("PowerShell|Bash"), BP, True), (g("Bash, PowerShell"), BP, False),
+         (g("Bash | PowerShell"), BP, False), (g("Bash,PowerShell"), BP, False),
+         (g("Bash|PowerShell|Read"), BP, True), (g("Bash|PowerShell|Read "), BP, False),
+         (g("Bash||PowerShell"), BP, True), (g("Bash"), BP, False), (g("Read"), BP, False),
+         (g("BashPowerShell"), BP, False), (g("Bash PowerShell"), BP, False),
+         (g("bash|powershell"), BP, False), (g(BP + " "), BP, False), (g(" " + BP), BP, False),
+         (g(BP + chr(10)), BP, False), (g(BP + chr(9)), BP, False), (g("Bash" + chr(0xA0) + "|PowerShell"), BP, False),
+         (g("   "), BP, False), (g("^(Bash|PowerShell)$"), BP, False), (g(".*"), BP, False),
+         (g("Bash|PowerShell|.*"), BP, False), (g(None), BP, False), (g([BP]), BP, False),
+         (g(1), BP, False), (g(True), BP, False), (g({}), BP, False),
+         (g(), None, True), (g(""), None, True), (g("*"), None, True), (g("Bash"), None, False),
+         (g(None), None, False), (g(".*"), None, False),
+         (g("project_settings|local_settings"), CC, True), (g("project_settings"), CC, False),
+         (g("Write|Edit"), "Write|Edit", True), (g("Edit"), "Write|Edit", False)]
+bad = [(gr, w) for gr, w, want in TABLE
+       if cg_covers is None or (cg_covers(gr, w), ms._matcher_covers(gr, w)) != (want, want)]
+for gr, w in bad:
+    print("  _matcher_covers disagrees with the table:", ascii(gr), ascii(w))
+# _wired_at: a direct command entry running the script (its name ending there), no `if`,
+# under the exact event, in a covering group; odd shapes are not wired and do not crash.
+B = "${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/"
+CGS, TRS = "guardrails/command-guard.sh", "modules/tracker-reminder.sh"
+def e(cmd, **k): return dict({"type": "command", "command": cmd}, **k)
+def run_(script): return e('bash -p "' + B + script + '"')
+def H(*entries, matcher=BP, event="PreToolUse"): return {event: [{"matcher": matcher, "hooks": list(entries)}]}
+WTABLE = [(H(run_(CGS)), CGS, "PreToolUse", BP, True),
+          (H(e("bash -p " + B + CGS)), CGS, "PreToolUse", BP, True),
+          (H(e('bash -p "' + B + CGS + '" || true')), CGS, "PreToolUse", BP, True),   # launch form: (2c)
+          (H(dict(run_(CGS), **{"if": "Bash(git status)"})), CGS, "PreToolUse", BP, False),
+          (H(dict(run_(CGS), **{"if": None})), CGS, "PreToolUse", BP, False),
+          (H(dict(run_(CGS), type="http")), CGS, "PreToolUse", BP, False),
+          (H(e("exit 0", x=run_(CGS))), CGS, "PreToolUse", BP, False),
+          (H(run_(CGS), event="pretooluse"), CGS, "PreToolUse", BP, False),
+          (H(run_(CGS), matcher="Read"), CGS, "PreToolUse", BP, False),
+          (H(run_(CGS + ".sh")), CGS, "PreToolUse", BP, False),
+          (H(run_(CGS + "/../x.sh")), CGS, "PreToolUse", BP, False),
+          (H(run_("x/.claude/hooks/baseline/" + CGS)), CGS, "PreToolUse", BP, False),
+          (H(run_("x/../" + CGS)), CGS, "PreToolUse", BP, False),
+          ({"PreToolUse": [{"matcher": "Read", "hooks": [run_(CGS)]},
+                           {"matcher": BP, "hooks": [run_(CGS + ".sh")]}]}, CGS, "PreToolUse", BP, False),
+          ({"Stop": [{"hooks": [run_(TRS)]}]}, TRS, "Stop", None, True),
+          ({"Stop": [{"matcher": "x", "hooks": [run_(TRS)]}]}, TRS, "Stop", None, False),
+          (["x"], CGS, "PreToolUse", BP, False), ({"PreToolUse": "x"}, CGS, "PreToolUse", BP, False),
+          ({"PreToolUse": [None, {"hooks": "x"}, {"matcher": BP, "hooks": [None, 1, e(5)]}]},
+           CGS, "PreToolUse", BP, False)]
+wbad = [(h, s) for h, s, ev, w, want in WTABLE
+        if cg_wired_at is None or (cg_wired_at(h, s, ev, w), ms._wired_at(h, s, ev, w)) != (want, want)]
+for h, s in wbad:
+    print("  _wired_at disagrees with the table:", ascii(h)[:160], s)
+raise SystemExit(0 if rows_ok and exact_ok and not bad and not wbad else 1)
+PY
+then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [wiring coupling: config-guard BASELINE_WIRING vs settings.template.json / merge_settings, or _matcher_covers / _wired_at copies]"; fi
 resetcfg
 
 echo "== baseline version stamp + config-keep contract (Q3) =="
