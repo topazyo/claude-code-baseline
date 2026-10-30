@@ -716,7 +716,8 @@ rows = ms.baseline_wiring(tmpl)
 rows_ok = len(rows) == 6 and rows == cg_rows == ms.baseline_wiring(ms.strip_comments(tmpl))
 exact_ok = all(w is None or re.fullmatch(r"[A-Za-z0-9_|-]+", w) for _, _, w in rows)
 ns = {"re": re}
-for fn in ("_matcher_covers(grp, wired)", "_wired_at(hooks, script, event, wired)"):
+for fn in ("_matcher_covers(grp, wired)", "_wired_at(hooks, script, event, wired)",
+           "_guard_entries(hooks, guards)"):
     f = re.search(r"^def " + re.escape(fn) + r":\n(?:    .*\n)+", guard, re.M)
     if f:
         exec(f.group(0), ns)
@@ -773,9 +774,34 @@ wbad = [(h, s) for h, s, ev, w, want in WTABLE
         if cg_wired_at is None or (cg_wired_at(h, s, ev, w), ms._wired_at(h, s, ev, w)) != (want, want)]
 for h, s in wbad:
     print("  _wired_at disagrees with the table:", ascii(h)[:160], s)
-raise SystemExit(0 if rows_ok and exact_ok and not bad and not wbad else 1)
+# _guard_entries (2b): config-guard's GUARD_SCRIPTS are the template's onFailure-block
+# entries, and both copies give (seen, soft) alike: direct PreToolUse entries only, the
+# loose match of (2), onFailure other than "block" soft.
+m = re.search(r"GUARD_SCRIPTS = (\(.*?\))", guard)
+cg_guards = ast.literal_eval(m.group(1)) if m else ()
+guards_ok = bool(cg_guards) and set(cg_guards) == ms.baseline_blocking(tmpl)
+cg_guard_entries = ns.get("_guard_entries")
+SGS = "modules/scope-guard.sh"
+GS = (CGS, SGS)
+def blk(script, of="block"): return dict(run_(script), onFailure=of)
+GTABLE = [(H(blk(CGS)), {CGS}, set()), (H(run_(CGS)), {CGS}, {CGS}),
+          (H(blk(CGS, "continue")), {CGS}, {CGS}), (H(blk(CGS, None)), {CGS}, {CGS}),
+          (H(blk(CGS), run_(SGS)), {CGS, SGS}, {SGS}), (H(blk(CGS), run_(CGS)), {CGS}, {CGS}),
+          (H(dict(run_(CGS), type="http")), {CGS}, {CGS}), (H(run_(CGS + ".sh")), {CGS}, {CGS}),
+          (H(dict(e('bash "' + B + CGS + '" || true'), onFailure="block")), {CGS}, set()),
+          (H(e("bash" + chr(0x85) + B + CGS)), {CGS}, {CGS}),
+          (H(e("exit 0", x=run_(CGS))), set(), set()), (H(run_(CGS), event="SessionStart"), set(), set()),
+          (H(run_(CGS), event="pretooluse"), set(), set()), (H(blk("modules/tracker-reminder.sh", None)), set(), set()),
+          (["x"], set(), set()), ({"PreToolUse": "x"}, set(), set()),
+          ({"PreToolUse": [None, {"hooks": "x"}, {"hooks": [None, 1, e(5)]}]}, set(), set())]
+gbad = [h for h, seen, soft in GTABLE
+        if cg_guard_entries is None
+        or (cg_guard_entries(h, GS), ms._guard_entries(h, GS)) != ((seen, soft), (seen, soft))]
+for h in gbad:
+    print("  _guard_entries disagrees with the table:", ascii(h)[:160])
+raise SystemExit(0 if rows_ok and exact_ok and not bad and not wbad and guards_ok and not gbad else 1)
 PY
-then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [wiring coupling: config-guard BASELINE_WIRING vs settings.template.json / merge_settings, or _matcher_covers / _wired_at copies]"; fi
+then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [wiring coupling: config-guard BASELINE_WIRING / GUARD_SCRIPTS vs settings.template.json / merge_settings, or _matcher_covers / _wired_at / _guard_entries copies]"; fi
 resetcfg
 
 echo "== baseline version stamp + config-keep contract (Q3) =="

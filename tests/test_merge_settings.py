@@ -9,7 +9,10 @@ Run:  python tests/test_merge_settings.py   (exits non-zero on any failure)
 """
 import json
 import os
+import random
+import re
 import sys
+import time
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "lib"))
@@ -112,6 +115,45 @@ def lookalike(old, new):
         hooks["PreToolUse"].append({"matcher": "Read", "hooks": [dict(real)]})
         real["command"] = real["command"].replace(old, new)
     return change
+
+
+# The PreToolUse guards and their onFailure, as config-guard (2b) reads them.
+GUARDS = ms.baseline_blocking({"hooks": TEMPLATE})
+
+
+def soft(change):
+    """The soft guards of a fresh install with change(hooks) applied."""
+    s = json.loads(json.dumps(INSTALLED))
+    change(s["hooks"])
+    return ms.baseline_soft_guards(s, GUARDS)
+
+
+# How a launch problem is named: the scan _named_script replaced, kept as the oracle.
+M = ms.BASELINE_MARKER
+OLD_SCAN = re.compile(re.escape(M) + r"(\S+?\.sh)")
+
+
+def old_name(cmd):
+    m = OLD_SCAN.search(cmd)
+    return m.group(1) if m else None
+
+
+def scan_corpus():
+    rng = random.Random(20261030)
+    tokens = [M, M[:-1], M + "a.sh", "a", ".sh", "a.sh", " ", "\t", "\n", "/", ".", "x", ".s", "h",
+              chr(0x0B), chr(0x1C), chr(0x85), chr(0xA0), chr(0x2028), chr(0x3000)]
+    cmds = [CG_P, CG, OLD, "echo " + M + " ; " + CG_P, M, M + ".sh", M + "a.sh.sh", M + "a b.sh",
+            M + M + "a.sh", "x" + M + "y" + M + "z.sh", M[:-1] + M + "a.sh"]
+    return cmds + ["".join(rng.choice(tokens) for _ in range(rng.randint(1, 9))) for _ in range(3000)]
+
+
+def scan_is_prompt():
+    """A long command naming no script is reported promptly, by its command."""
+    cmd = "bash " + ("x" + M) * 16000 + " x"
+    t = time.perf_counter()
+    named = ms._named_script(cmd)
+    problems = ms.baseline_launch_problems({"hooks": {"Stop": [{"hooks": [ours(cmd)]}]}})
+    return named is None and problems == [cmd.strip()] and time.perf_counter() - t < 2
 
 
 def merge_env_run():
@@ -235,6 +277,20 @@ checks = [
     ("wiring: a path that holds the baseline path again does not count",
      rewired(lookalike("baseline/guardrails/", "baseline/x/.claude/hooks/baseline/guardrails/"))
      == [("guardrails/command-guard.sh", "PreToolUse", "Bash|PowerShell")]),
+    # the guards' onFailure, as config-guard (2b) checks it
+    ("template guards: the entries launched with onFailure block",
+     GUARDS == {"guardrails/command-guard.sh", "modules/scope-guard.sh"}),
+    ("soft guards: none on a fresh install; a guard entry with onFailure continue or none reported",
+     soft(lambda h: None) == []
+     and soft(set_entry_key("PreToolUse", 0, onFailure="continue")) == ["guardrails/command-guard.sh"]
+     and soft(lambda h: h["PreToolUse"][1]["hooks"][0].pop("onFailure")) == ["modules/scope-guard.sh"]),
+    ("soft guards: only direct PreToolUse entries, as config-guard (2b); other scripts not checked",
+     soft(lambda h: h.setdefault("SessionStart", []).append(
+         {"hooks": [launch("guardrails/command-guard.sh", timeout=10)]})) == []
+     and soft(set_entry_key("PostToolUse", 0, onFailure="continue")) == []),
+    ("launch problems: the script named is the one the old scan named",
+     all(ms._named_script(c) == old_name(c) for c in scan_corpus())),
+    ("launch problems: a long command naming no script reported promptly", scan_is_prompt()),
     ("wiring: no hooks object, or a wrong-typed one, reports every row, no crash",
      ms.baseline_wiring_problems({}, WIRING) == WIRING
      and ms.baseline_wiring_problems({"hooks": ["x"]}, WIRING) == WIRING

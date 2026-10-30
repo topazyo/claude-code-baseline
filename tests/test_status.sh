@@ -138,6 +138,13 @@ rewire 's["hooks"]["PreToolUse"] = s["hooks"]["PreToolUse"][:1]'
 got="$(findings)"
 [ "$got" = "[] ['modules/scope-guard.sh']" ] && ok || no "unwired script not reported once: $got"
 cp "$TMP/settings.saved" "$A/.claude/settings.json"
+# A PreToolUse guard entry without onFailure "block" is reported, as config-guard reports
+# it, and fails --strict.
+rewire 's["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"] = "continue"'
+got="$(findings)"
+[ "$got" = "[] ['guardrails/command-guard.sh without onFailure block']" ] && ok || no "guard without onFailure block not reported: $got"
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on a guard without onFailure block"; else ok; fi
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
 got="$(findings)"
 [ "$got" = "[] []" ] && ok || no "restored settings should have no settings finding: $got"
 
