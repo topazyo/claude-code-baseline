@@ -22,11 +22,16 @@
 # block) made every hook return from this file with no bcl_ helper defined, so each
 # guard failed instead of checking. The unset drops such an inherited value, export
 # included, before the array takes its name.
-# This covers environment VARIABLES only. Code that runs before this file — a BASH_ENV
-# startup file, an exported function, SHELLOPTS — can still interfere; that is outside
-# what any check in this file can stop.
+# This covers environment VARIABLES only. Code that runs before this file is stopped
+# by the launch instead: every baseline hook, and every child the dispatcher starts,
+# runs as `bash -p`, which does not read a BASH_ENV startup file, import exported
+# functions (BASH_FUNC_*), or apply SHELLOPTS/BASHOPTS. A -p shell still EXPORTS
+# BASH_ENV and passes exported functions on, so a bash started without -p from a hook
+# would act on them (see the unset below). The shell Claude Code itself uses to run the
+# hook command string is outside any hook's reach; config-guard, install.sh and
+# tools/baseline-status.sh report such values in the settings files.
 # Subshells inherit the array, so they still skip a second source; child processes
-# (the dispatcher runs each module with `bash`) inherit nothing and load fresh.
+# (the dispatcher runs each module with `bash -p`) inherit nothing and load fresh.
 [[ -n "${_BCL_SOURCED[1]:-}" ]] && return 0
 unset -v _BCL_SOURCED
 _BCL_SOURCED=([1]=1)
@@ -54,6 +59,18 @@ for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@}; do unset -v "$_bcl_
 # _BCL_PY must stay UNSET, not empty: bcl_python tests ${_BCL_PY+x}, and an empty
 # value would be cached as "no interpreter".
 unset -v _BCL_PY BCL_READ_ERROR _BCL_LOOKUP _BCL_STDIN_TIMEOUT _BCL_STDIN_MAX _bcl_v
+
+# Inherited values that `bash -p` does not neutralise for us. FUNCNEST still applies
+# under -p and caps function nesting, so a hook could not complete its checks.
+# POSIXLY_CORRECT (unsetting it leaves posix mode), BASH_COMPAT, EXECIGNORE, CDPATH
+# and GLOBIGNORE change how bash parses, resolves commands, paths and globs (bash
+# 3.2's -p keeps the last two). BASH_ENV a -p shell ignores but
+# still exports, so a plain-bash program a hook starts (bats, the sh git or npm spawn)
+# would run the file it names. Every hook sources this file at top level before its
+# first function call, so this lands in time. Exported functions cannot be dropped this
+# way (their names are not identifiers); only a -p child ignores them, which is why the
+# dispatcher starts its children with -p.
+unset -v FUNCNEST POSIXLY_CORRECT BASH_COMPAT EXECIGNORE CDPATH GLOBIGNORE BASH_ENV
 
 # Primed state. Declared unconditionally so `set -u` is safe and so an inherited
 # scalar of the same name cannot masquerade as one of these arrays.
@@ -863,7 +880,7 @@ bcl_read_payload() {
 # launcher in the baseline therefore checks its children itself and routes a
 # failure through bcl_failclosed_exit.
 #
-# We test readability, not the execute bit: children are launched as `bash <path>`,
+# We test readability, not the execute bit: children are launched as `bash -p <path>`,
 # so `chmod -x` cannot disarm them — but truncation (`printf '' > hook.sh`) can,
 # which is why a zero-byte file counts as unusable.
 bcl_child_unusable() {

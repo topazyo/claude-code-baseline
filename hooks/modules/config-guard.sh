@@ -164,6 +164,68 @@ REQUIRED_HOOK_CMDS = [
     "modules/tracker-reminder.sh",
     "modules/config-guard.sh",
 ]
+# Environment values a project settings `env` block must not set, whatever the value:
+# each can run code before a baseline hook, redirect it, or switch it off. MIRRORED in
+# lib/merge_settings.py (install.sh and tools/baseline-status.sh report them); a test
+# asserts the two agree. Names are compared upper-cased (Windows names are not
+# case-sensitive).
+#   BASH_ENV SHELLOPTS BASHOPTS POSIXLY_CORRECT BASH_COMPAT, BASH_FUNC_ anywhere in a
+#       name: bash startup. The hooks run as `bash -p`, which ignores the first three
+#       and exported functions, but the shell Claude Code runs the hook command string
+#       in comes first (bash by default per the hooks docs; its exact argv is not
+#       documented), and no hook can protect it. Function-export encodings vary, hence
+#       "anywhere".
+#   FUNCNEST EXECIGNORE CDPATH GLOBIGNORE   honoured even under -p (bash 3.2's -p keeps
+#                              the last two). common.sh drops them; an install from
+#                              before that does not.
+#   CLAUDE_CODE_SHELL_PREFIX   wraps every hook command; CLAUDE_CODE_GIT_BASH_PATH picks
+#                              the Windows shell that runs it (set it outside the repo).
+#   PATH                       which bash / python / git / timeout run (even empty: then
+#                              the hook command finds no bash at all).
+#   LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT DYLD_*   code loaded into every process.
+#   CLAUDE_PROJECT_DIR         which scripts the hook commands run and which config they read.
+#   GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
+#   GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_CONFIG_*   what the git calls in fix-tags,
+#                              auto-stage and tracker-reminder see.
+#   BCL_* _BCL_*               the baseline's own names: posture comes from the config only.
+# Not listed: PYTHON*. The baseline's own interpreter runs -I -S, which ignores them; the
+# repo's own test runs (run-tests) are meant to see them. ENV: only an interactive POSIX
+# shell reads it, none runs here, and it is a common application variable.
+RISKY_ENV_NAMES = ["BASH_ENV", "SHELLOPTS", "BASHOPTS", "POSIXLY_CORRECT", "BASH_COMPAT",
+                   "FUNCNEST", "EXECIGNORE", "CDPATH", "GLOBIGNORE",
+                   "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_GIT_BASH_PATH", "PATH",
+                   "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "CLAUDE_PROJECT_DIR",
+                   "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                   "GIT_CEILING_DIRECTORIES", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF"]
+RISKY_ENV_PREFIXES = ["DYLD_", "BCL_", "_BCL_", "GIT_CONFIG_"]
+RISKY_ENV_SUBSTRINGS = ["BASH_FUNC_"]
+def _risky_env(name):
+    n = name.upper()
+    return (n in RISKY_ENV_NAMES or any(n.startswith(p) for p in RISKY_ENV_PREFIXES)
+            or any(s in n for s in RISKY_ENV_SUBSTRINGS))
+# The one form a baseline hook command may take: `bash -p` and a script under the
+# project's baseline directory, nothing else on the line (a trailing `|| true`, an
+# earlier `-c :` or a later `+p` would discard the verdict, skip the script or undo -p).
+# Group 2 is the script. Only space and tab separate words here, and \Z ends the line:
+# the shell splits on nothing else, so a VT, NBSP or newline where a space should be
+# makes a different command. STALE_LAUNCH is the same without -p, the form installs
+# wrote before -p. MIRRORS lib/merge_settings.py; a test asserts the two agree.
+BASELINE_LAUNCH = r'^[ \t]*bash[ \t]+-p[ \t]+("?)(?:\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR)/\.claude/hooks/baseline/([A-Za-z0-9_./-]+\.sh)\1[ \t]*\Z'
+STALE_LAUNCH = r'^[ \t]*bash[ \t]+("?)(?:\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR)/\.claude/hooks/baseline/([A-Za-z0-9_./-]+\.sh)\1[ \t]*\Z'
+# The keys beside such a command can still stop it running as written: `args` (exec
+# form: `command` becomes an executable name), a `shell` other than bash, `async` or
+# `asyncRewake` (the verdict is not waited for), or a `timeout` below the template's
+# (the hook is killed before its checks end). Minimum timeouts, MIRRORING
+# settings.template.json; a test asserts the two agree.
+BASELINE_TIMEOUTS = {"guardrails/command-guard.sh": 10, "modules/scope-guard.sh": 10,
+                     "dispatcher/post-write.sh": 90, "modules/tracker-reminder.sh": 5,
+                     "modules/config-guard.sh": 10}
+def _entry_runs_as_written(h, script):
+    t = h.get("timeout")
+    return ("args" not in h and h.get("shell") in (None, "bash")
+            and not h.get("async") and not h.get("asyncRewake")
+            and isinstance(t, (int, float)) and not isinstance(t, bool)
+            and t >= BASELINE_TIMEOUTS.get(script, 0))
 
 try:
     with open(settings_file, encoding="utf-8") as fh:
@@ -198,18 +260,19 @@ if dah not in (False, 0, None, "", "false", "False", "0", "no", "off"):
 #     hooks tree, collect command strings from real {type:"command"} entries only, and
 #     require each script to be *invoked* (the command must `bash` the baseline path,
 #     not merely contain it — an echo / commented-out line does not count).
-def _commands(obj, acc):
+def _entries(obj, acc):
     if isinstance(obj, dict):
         if obj.get("type") == "command" and isinstance(obj.get("command"), str):
-            acc.append(obj["command"])
+            acc.append(obj)
         for v in obj.values():
-            _commands(v, acc)
+            _entries(v, acc)
     elif isinstance(obj, list):
         for item in obj:
-            _commands(item, acc)
+            _entries(item, acc)
 
-cmds = []
-_commands(data.get("hooks", {}), cmds)
+ents = []
+_entries(data.get("hooks", {}), ents)
+cmds = [h["command"] for h in ents]
 def _invoked(script):
     pat = re.compile(r"^\s*bash\s.*?/\.claude/hooks/baseline/" + re.escape(script))
     return any(pat.search(c) for c in cmds)
@@ -239,6 +302,30 @@ soft |= {s for s in GUARD_SCRIPTS if s not in seen and s not in missing_hooks}
 if soft:
     findings.append("baseline guard hooks are not PreToolUse hooks with onFailure: block: " + ", ".join(sorted(soft)) + " - a guard that cannot start or times out would let the call through.")
 
+# (2c) Every entry that runs a baseline script takes exactly the BASELINE_LAUNCH form,
+#      with keys beside it that let it run as written (_entry_runs_as_written). A plain
+#      `bash` runs an inherited BASH_ENV file, imports exported functions and applies
+#      SHELLOPTS/BASHOPTS before the hook's first line, and anything else on the line
+#      can discard the verdict or undo -p. Which entries run a script is matched
+#      loosely (\s, any trailing text), so every variant reaches the exact check. The
+#      old plain form is reported as STALE (an install from before -p), not as tamper.
+stale, weak = set(), set()
+for s in REQUIRED_HOOK_CMDS:
+    runs = re.compile(r"^\s*bash\s.*?/\.claude/hooks/baseline/" + re.escape(s))
+    for h in ents:
+        if not runs.search(h["command"]):
+            continue
+        as_written = _entry_runs_as_written(h, s)
+        m = re.match(BASELINE_LAUNCH, h["command"])
+        if m and m.group(2) == s and as_written:
+            continue
+        m = re.match(STALE_LAUNCH, h["command"])
+        (stale if m and m.group(2) == s and as_written else weak).add(s)
+if weak:
+    findings.append("baseline hooks are not launched exactly as bash -p <script> with the template's keys: " + ", ".join(sorted(weak)) + " - anything else on the line, or args, a non-bash shell, async or a short timeout beside it, can discard the hook's verdict, skip the script or undo -p.")
+if stale:
+    findings.append("STALE baseline hooks are launched without bash -p: " + ", ".join(sorted(stale)) + " - an inherited BASH_ENV file, exported function or SHELLOPTS would run before them. Installs made before this check wire them this way; re-run install.sh.")
+
 # (3) The baseline-managed deny-list (secrets + self-protection) must still be present.
 perms = data.get("permissions")
 deny = []
@@ -247,6 +334,17 @@ if isinstance(perms, dict) and isinstance(perms.get("deny"), list):
 missing = [d for d in EXPECTED_DENY if d not in deny]
 if missing:
     findings.append("baseline deny-list entries removed from permissions.deny: " + ", ".join(missing))
+
+# (4) No environment value that runs code before the hooks, redirects them or switches
+#     them off (RISKY_ENV_* above), whatever its value: an empty PATH or
+#     CLAUDE_PROJECT_DIR breaks the hook command as surely as a hostile one.
+#     Reported as ENVRISK, under its own heading: a deliberate PATH belongs in the user
+#     environment or ~/.claude/settings.json, but it is not tamper. Names are printed
+#     ascii()-escaped, so a control character or non-ASCII name cannot break the report.
+env = data.get("env")
+risky = [k for k in (env if isinstance(env, dict) else {}) if _risky_env(k)]
+if risky:
+    findings.append("ENVRISK settings env sets " + ", ".join(sorted(ascii(k)[1:-1] for k in risky)) + " - such values can run code before the baseline hooks, redirect them, or switch them off. Set what you need in your user environment or ~/.claude/settings.json instead.")
 
 for f in findings:
     print(f)
@@ -271,10 +369,27 @@ if [[ "$OUT" == "__UNREADABLE__"* ]]; then
 fi
 
 if [[ -n "${OUT//[[:space:]]/}" ]]; then
+  # The heading follows the worst finding: any untagged one is tamper; else an ENVRISK
+  # one is a risky environment value; else only STALE ones (an install from before
+  # `bash -p`) are out of date. Every one of them still exits through the posture.
+  tamper=0; envrisk=0
+  while IFS= read -r f; do
+    [[ -z "${f//[[:space:]]/}" ]] && continue
+    case "$f" in STALE\ *) ;; ENVRISK\ *) envrisk=1 ;; *) tamper=1 ;; esac
+  done <<< "$OUT"
   {
     echo ""
-    echo "[config-guard] SETTINGS TAMPER DETECTED — .claude/settings.json was changed in a way that weakens the baseline:"
-    while IFS= read -r f; do [[ -n "${f//[[:space:]]/}" ]] && echo "   ❌ $f"; done <<< "$OUT"
+    if [[ $tamper -eq 1 ]]; then
+      echo "[config-guard] SETTINGS TAMPER DETECTED — .claude/settings.json was changed in a way that weakens the baseline:"
+    elif [[ $envrisk -eq 1 ]]; then
+      echo "[config-guard] RISKY ENVIRONMENT VALUE — .claude/settings.json sets values that can run code before the baseline hooks or switch them off:"
+    else
+      echo "[config-guard] BASELINE OUT OF DATE — .claude/settings.json launches the baseline hooks the old way:"
+    fi
+    while IFS= read -r f; do
+      [[ -z "${f//[[:space:]]/}" ]] && continue
+      f="${f#STALE }"; echo "   ❌ ${f#ENVRISK }"
+    done <<< "$OUT"
     echo ""
     echo "   File: $SETTINGS_FILE"
     echo "   Re-run install.sh to restore the baseline wiring + deny-list, or revert the change."
