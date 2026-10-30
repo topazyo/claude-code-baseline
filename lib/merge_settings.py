@@ -46,7 +46,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Iterable, NoReturn
 
 BASELINE_MARKER = "/.claude/hooks/baseline/"
 
@@ -350,9 +350,67 @@ def baseline_launch_problems(settings: dict, min_timeouts: dict | None = None) -
     for e in hook_entries(settings.get("hooks")):
         if BASELINE_MARKER not in e["command"] or _launched_script(e, mins):
             continue
-        script = re.search(re.escape(BASELINE_MARKER) + r"(\S+?\.sh)", e["command"])
-        found.add(script.group(1) if script else e["command"].strip())
+        found.add(_named_script(e["command"]) or e["command"].strip())
     return sorted(found)
+
+
+_SCRIPT_AFTER_MARKER = re.compile(r"\S+?\.sh")
+_SPACE = re.compile(r"\s")
+
+
+def _named_script(command: str) -> str | None:
+    """The script named right after a BASELINE_MARKER in command, the first that is: the
+    result of re.search(re.escape(BASELINE_MARKER) + r"(\\S+?\\.sh)", command), found in
+    one pass. When no script follows one marker, none follows a later marker before the
+    next whitespace either (the scan from the first already covered that stretch), so
+    the search resumes after it."""
+    i = command.find(BASELINE_MARKER)
+    while i != -1:
+        start = i + len(BASELINE_MARKER)
+        m = _SCRIPT_AFTER_MARKER.match(command, start)
+        if m:
+            return m.group(0)
+        gap = _SPACE.search(command, start)
+        if gap is None:
+            return None
+        i = command.find(BASELINE_MARKER, gap.end())
+    return None
+
+
+def baseline_blocking(template: dict) -> set[str]:
+    """The baseline scripts the template launches under PreToolUse with onFailure:
+    "block" (its guards)."""
+    hooks = template.get("hooks")
+    pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    return {m.group(2) for e in hook_entries(pre)
+            for m in [re.match(BASELINE_LAUNCH, e["command"])]
+            if m and e.get("onFailure") == "block"}
+
+
+def _guard_entries(hooks: Any, guards: Iterable[str]) -> tuple[set, set]:
+    """(seen, soft): the guards some direct PreToolUse entry of hooks runs, and those of
+    them some such entry runs without onFailure: "block". MIRRORS _guard_entries in
+    hooks/modules/config-guard.sh (check 2b); a test runs both on one table."""
+    pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    seen, soft = set(), set()
+    for grp in pre if isinstance(pre, list) else []:
+        entries = grp.get("hooks") if isinstance(grp, dict) else None
+        for h in entries if isinstance(entries, list) else []:
+            if not isinstance(h, dict) or not isinstance(h.get("command"), str):
+                continue
+            for s in guards:
+                if re.search(r"^\s*bash\s.*?" + re.escape(BASELINE_MARKER + s), h["command"]):
+                    seen.add(s)
+                    if h.get("onFailure") != "block":
+                        soft.add(s)
+    return seen, soft
+
+
+def baseline_soft_guards(settings: dict, guards: Iterable[str]) -> list[str]:
+    """The guards (baseline_blocking) that some direct PreToolUse entry of settings runs
+    without onFailure: "block", sorted. Whether a guard is wired there at all is
+    baseline_wiring_problems' to report."""
+    return sorted(_guard_entries(settings.get("hooks"), guards)[1])
 
 
 def _matcher_covers(grp: dict, wired: str | None) -> bool:

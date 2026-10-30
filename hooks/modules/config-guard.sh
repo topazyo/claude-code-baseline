@@ -314,20 +314,27 @@ if missing_hooks:
 # (2b) The PreToolUse guards must keep onFailure:"block" (Claude Code 2.1.295+), or a
 #      guard that cannot start or times out lets the call through. Setting it to
 #      "continue", or dropping it, is a one-key disarm of that fail-closed path.
+#      (seen, soft): the guards some direct PreToolUse entry runs, and those of them some
+#      such entry runs without onFailure "block". GUARD_SCRIPTS are the template's
+#      PreToolUse entries with onFailure "block". MIRRORED in lib/merge_settings.py (baseline-status
+#      reports soft guards too); a test runs both on one table.
 GUARD_SCRIPTS = ("guardrails/command-guard.sh", "modules/scope-guard.sh")
 hooks_obj = data.get("hooks")
-pre = hooks_obj.get("PreToolUse") if isinstance(hooks_obj, dict) else None
-soft, seen = set(), set()
-for grp in pre if isinstance(pre, list) else []:
-    entries = grp.get("hooks") if isinstance(grp, dict) else None
-    for h in entries if isinstance(entries, list) else []:
-        if not isinstance(h, dict) or not isinstance(h.get("command"), str):
-            continue
-        for s in GUARD_SCRIPTS:
-            if re.search(r"^\s*bash\s.*?/\.claude/hooks/baseline/" + re.escape(s), h["command"]):
-                seen.add(s)
-                if h.get("onFailure") != "block":
-                    soft.add(s)
+def _guard_entries(hooks, guards):
+    pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    seen, soft = set(), set()
+    for grp in pre if isinstance(pre, list) else []:
+        entries = grp.get("hooks") if isinstance(grp, dict) else None
+        for h in entries if isinstance(entries, list) else []:
+            if not isinstance(h, dict) or not isinstance(h.get("command"), str):
+                continue
+            for s in guards:
+                if re.search(r"^\s*bash\s.*?/\.claude/hooks/baseline/" + re.escape(s), h["command"]):
+                    seen.add(s)
+                    if h.get("onFailure") != "block":
+                        soft.add(s)
+    return seen, soft
+seen, soft = _guard_entries(hooks_obj, GUARD_SCRIPTS)
 # A guard wired under some OTHER event satisfies check (2) but guards nothing.
 soft |= {s for s in GUARD_SCRIPTS if s not in seen and s not in missing_hooks}
 if soft:
