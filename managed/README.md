@@ -16,7 +16,9 @@
 > **no telemetry** — these are config files and local scripts; nothing phones home.
 >
 > All facts below were verified against the official Claude Code docs, most recently
-> on 2026-08-12 (see Sources). Re-confirm per release via
+> on 2026-10-30 for the managed-source ranking and drop-ins, `/status`, the WSL path,
+> and the sandbox (path forms, wildcard limits, the `Read`-rule merge, the unsandboxed
+> retry and auto-allow), and on 2026-08-12 for the rest (see Sources). Re-confirm per release via
 > [`../RELEASING.md`](../RELEASING.md). Several statements in the 2026-05-31 revision
 > of this file were **wrong in the direction of over-claiming**; each is called out
 > inline where it was, rather than quietly deleted, because an operator who read the
@@ -78,25 +80,80 @@ OS-specific path:
 | Linux / WSL | `/etc/claude-code/managed-settings.json` |
 | Windows | `C:\Program Files\ClaudeCode\managed-settings.json` |
 
-> Windows note: the legacy `C:\ProgramData\ClaudeCode\managed-settings.json` path
-> was **deprecated as of v2.1.75** — use `C:\Program Files\ClaudeCode\`.
+> Windows note: Claude Code does not read the legacy
+> `C:\ProgramData\ClaudeCode\managed-settings.json` path (deprecated in v2.1.75) — use
+> `C:\Program Files\ClaudeCode\`.
 
 **Precedence (high → low):** managed settings → CLI args (`--settings`) → local
 project (`.claude/settings.local.json`) → project (`.claude/settings.json`) → user
 (`~/.claude/settings.json`). The managed tier wins outright — that is the property
 the floor depends on, and it is the core verified fact here.
 
-> *Additional detail — re-confirm against the settings docs for your release; these
-> were NOT part of the core adversarially-verified fact set:* a file-based **drop-in
-> directory** `managed-settings.d/*.json` is supported in the same system directory
-> (merge order typically alphabetical, applied on top of `managed-settings.json`);
-> and within the managed tier, server-managed (Teams/Enterprise admin console) and
-> OS-policy delivery (e.g. Windows `HKLM\SOFTWARE\Policies\ClaudeCode`) are reported
-> to rank above plain file-based, with the user-writable `HKCU\…` lowest. Treat these
-> as orientation, not load-bearing.
+> **⚠️ Within the managed tier only one source applies by default, and that can drop
+> this whole floor.** Claude Code checks the managed sources in this order, highest
+> first: remote settings (server-managed, from the claude.ai admin console or a
+> gateway); an MDM or OS policy (a macOS plist, or Windows
+> `HKLM\SOFTWARE\Policies\ClaudeCode`); the file-based `managed-settings.json`, with
+> every `managed-settings.d/*.json` merged after it in alphabetical order; and last the
+> user-writable `HKCU\SOFTWARE\Policies\ClaudeCode`. Under the default
+> `managedSourcesBehavior: "first-wins"`, the highest-ranked source that delivers any
+> policy key is used and the others are **ignored, with no warning** — apart from a
+> short list of keys read from every admin source (sandbox locks, MCP server lists,
+> `env`, `sandbox.network.strictAllowlist` and a few more; `permissions` and `hooks`
+> are not among them). So an organization that already delivers an MDM/HKLM policy
+> never applies this file: not its deny-list, not its hooks. Remote settings count only
+> in a session that authenticates to Anthropic's API directly with an eligible
+> credential, signs in to a Claude apps gateway with `/login`, or runs in Claude
+> Desktop's Code tab behind a gateway that serves settings; otherwise (another provider,
+> or `ANTHROPIC_BASE_URL` pointing elsewhere) the check starts at the next source, so
+> one machine can apply this file in one session and skip it in another. A shadowed
+> [allowlist profile](#allowlist-primary-profile-r7) still contributes its cross-source
+> `strictAllowlist: true`, but none of its `allowedDomains` unless an admin source turns
+> on `allowManagedDomainsOnly`.
+>
+> - After deploying, run `/status` and read **Setting sources** (the source in use) and
+>   **Skipped sources** (v2.1.242+, within the 2.1.295 pin), which names a source that
+>   a higher one overrode.
+> - To combine sources, set `managedSourcesBehavior: "merge"` (v2.1.242+) in the
+>   highest-ranked source you deploy — not in this file: `managed-settings.json` is the
+>   lowest-ranked admin source, so `"merge"` set there has nothing below it to combine
+>   with, and a machine that never receives server-managed settings needs the key in its
+>   MDM profile too. Lists such as `permissions` rules and `hooks` then combine from
+>   every admin source, lower ones included, so turn it on only when every source below
+>   the highest is under an administrator's control. `permissions.defaultMode` is still
+>   read only from the highest-ranked source that carries a policy key, even when that
+>   source sets no mode, so the allowlist profile's `dontAsk` applies only from that
+>   source. Otherwise deliver this file's contents through the source you already use.
+> - **Drop-ins can override the floor.** `managed-settings.d/*.json` files merge after
+>   `managed-settings.json`; lists such as `permissions.deny` and `hooks` combine, but
+>   for a single value the later file wins, so a drop-in can set `disableAllHooks: true`
+>   or turn the strict profile's `allowManagedHooksOnly` /
+>   `allowManagedPermissionRulesOnly` back off. Sorting last protects only the single
+>   values a file sets (for this floor, the strict profile's two locks), so audit every
+>   other drop-in for `disableAllHooks: true` whatever its name, and give the floor a
+>   name that sorts after every other drop-in. Drop-ins are also the way to deploy the
+>   allowlist profile next to this floor.
+>
+> *(Verified against the managed-settings and settings-reference docs on 2026-10-30.)*
 
 Because these directories are root/admin-owned, a normal developer cannot edit the
-floor — distribute the file via MDM, a golden image, or config management.
+floor — distribute the file via MDM, a golden image, or config management. **Except on
+WSL:** there `/etc/claude-code` is user-writable, so a floor deployed only there can be
+edited by the developer. Deploy the floor itself through the Windows policy chain
+instead — in `HKLM\SOFTWARE\Policies\ClaudeCode` or in `C:\Program Files\ClaudeCode\`
+(`managed-settings.json` or a drop-in there) — together with
+`wslInheritsWindowsSettings: true` (v2.1.282+, within the pin). WSL sessions then read
+the Windows policy, and `/etc/claude-code` only when no Windows admin document is
+present. A Windows source that holds only that key is not a policy source, so
+`/etc/claude-code` would still supply the policy. One more catch, unverified because
+the docs say nothing about translating hook paths for a Windows-sourced policy in WSL:
+the floor's hook commands use one absolute `<BASELINE_PREFIX>`, and the same document
+then serves both Windows and WSL sessions. No path resolves in both (`C:/…` in Git
+Bash, `/mnt/c/…` in WSL), so with `onFailure: "block"` one of them may refuse every
+shell command. On such machines, deploy the config-only floor (no `hooks` block)
+through the Windows chain, or run floor steps 0 and 3 in both a Windows and a WSL
+session before rollout, and in each confirm that a harmless command such as `ls` runs
+(a guard that cannot start refuses every command, so step 3 alone passes either way).
 
 ---
 
@@ -232,13 +289,30 @@ permissions docs.) The supported allowlist-primary mechanism is instead:
   `grep`). What it does not cover is a subprocess that opens the file itself — see the
   secrets-read boundary below.
 - **`sandbox`** (filesystem + network) — OS-level isolation on **macOS, Linux, and
-  WSL2** (native Windows is **not** supported — run inside WSL2). `filesystem.denyRead`
-  is enforced by the OS against **every child process**, which is what makes it, and not
-  the permission rules, the answer to the subprocess-read case. The example denies the
-  repo's own `./.env`, `./.env.*` and `./secrets` alongside the credential dirs
-  (`~/.aws`, `~/.ssh`, `~/.gnupg`, …), and **allowlists outbound network domains** — the
-  control that limits *exfiltration* of whatever the agent manages to read, provided you
-  read the scope caveat on `strictAllowlist` below.
+  WSL2** (native Windows is **not** supported — run inside WSL2). The sandbox is enforced
+  by the OS against **every sandboxed command and its child processes**, which is what
+  makes it, and not the permission checks, the answer to the subprocess-read case. Its
+  read block comes from two places, which Claude Code merges into one sandbox
+  configuration: `filesystem.denyRead`, and the `Read` deny rules. The example's
+  `denyRead` holds the credential dirs only (`~/.aws`, `~/.ssh`, `~/.gnupg`, …),
+  because the file is meant for managed settings, where a project-relative `./` path
+  has no documented meaning. The repo's secrets are meant to be covered by its
+  `Read(.env*)` and `Read(**/secrets/**)` denies: a bare-filename rule matches at any
+  depth at or under the working directory. The docs do not spell out how such a rule
+  becomes a sandbox path, so the allowlist profile's Verify step 3 checks it (for
+  `.env`; check a `secrets/` file the same way). To list them explicitly as well, use
+  `./.env`, `./.env.*` and `./secrets` in a repo's `.claude/settings.json` (`./` is
+  relative to the project root there), and in managed settings home-anchored patterns
+  such as `~/**/.env`, `~/**/.env.*` (this one also blocks `.env.example`) and
+  `~/**/secrets`. These cover checkouts under the home directory only; add one entry
+  per other top-level directory you check out into (for example `/srv/**/.env`). They
+  work on Linux and WSL2 as well, because the wildcard comes after the first directory
+  name of the full path. The example sets `allowUnsandboxedCommands: false`,
+  `failIfUnavailable: true` and `autoAllowBashIfSandboxed: false` (see the boundary
+  note below), and also
+  **allowlists outbound network domains** — the control that limits *exfiltration* of
+  whatever the agent manages to read, provided you read the scope caveat on
+  `strictAllowlist` below.
 
 > **⚠️ Secrets-read boundary — this section was wrong until 2026-08-12.** It previously
 > read *"no permission or sandbox setting reliably stops a Bash subprocess from reading a
@@ -251,13 +325,47 @@ permissions docs.) The supported allowlist-primary mechanism is instead:
 >    `dontAsk`, where read-only Bash otherwise runs without an `allow` entry.
 > 2. **The real gap is an arbitrary subprocess**, which Claude Code cannot inspect ahead of
 >    time: `python -c "print(open('.env').read())"`, `node -e …`, an interpreter invoked
->    from a build script. No permission rule reaches those.
-> 3. **`sandbox.filesystem.denyRead` closes that gap** — it blocks subprocess access at the
->    **OS level, for every child process**, and (for project settings) it accepts a
->    project-relative `./.env`. This is why `allowlist.example.json` now lists `./.env`,
->    `./.env.*` and `./secrets` under `denyRead` as well as in `permissions.deny`. The
->    earlier claim that `./` was unsupported came from importing the permission-rule `//`
->    convention into the sandbox section, where it does not belong.
+>    from a build script. No permission check sees inside those before they run.
+> 3. **The sandbox closes that gap, in strict sandbox mode.** The OS blocks the read for
+>    every child process of a sandboxed command, on the paths in `filesystem.denyRead`
+>    and on those of the `Read` deny rules, which Claude Code merges into the sandbox
+>    configuration (see the sandbox bullet above for the path forms per deployment).
+>    Limits, and what the example does about them:
+>    - A command the sandbox blocked can be **retried outside it**. An `allow` rule that
+>      matches the command approves that retry with no prompt in any mode, and
+>      `bypassPermissions` approves any retry; `dontAsk` denies only a retry that no
+>      allow rule matches. So the example sets `sandbox.allowUnsandboxedCommands: false`
+>      (strict sandbox mode): Claude Code ignores the `dangerouslyDisableSandbox`
+>      parameter, so a retry runs inside the sandbox again. Set in managed settings, it
+>      also makes the sandbox admin-required. Keep it if you adapt the profile: without
+>      it, the allow-listed `npm test`, `npm run` and `pytest` could read the file on a
+>      retry.
+>    - Commands that match an `excludedCommands` entry run outside the sandbox. Under
+>      this admin-required sandbox Claude Code ignores a repository's entries, but
+>      entries in managed settings, `--settings` and the developer's
+>      `~/.claude/settings.json` still apply, and no managed-only lock covers the list.
+>      The example sets none; a user-level entry such as `npm *` would take the
+>      allow-listed builds out of the sandbox.
+>    - A machine where the sandbox cannot start (a missing dependency, an unsupported
+>      platform) runs commands **unsandboxed** unless `failIfUnavailable` is on. The
+>      example sets `sandbox.failIfUnavailable: true`: Claude Code then exits at startup
+>      there, and if the sandbox fails later it refuses each sandboxed command. It does
+>      not start at all on native Windows with this profile, so deploy it to macOS,
+>      Linux and WSL2 machines only. On a Windows machine, WSL gets a policy the user
+>      can't edit only through the Windows chain, which native-Windows sessions read
+>      too; with this profile there, native-Windows Claude Code does not start.
+>      Deployed to `/etc/claude-code` alone, the profile is user-editable (see "Where
+>      managed settings live").
+>    - With the sandbox on, `autoAllowBashIfSandboxed` (default `true`) runs sandboxed
+>      Bash without a prompt in every permission mode except plan mode and a few
+>      auto-mode cases. The example sets it to `false`, so sandboxed commands still go
+>      through `permissions.allow` and `dontAsk`.
+>    - On Linux and WSL2, a wildcard in a sandbox read path works only after the first
+>      directory name of the full path: `~/**/.env` works, `/**/.env` covers nothing.
+>
+>    (The 2026-08-12 revision of this section said the example lists `./.env`,
+>    `./.env.*` and `./secrets` under `denyRead`. It does not, because it targets
+>    managed settings; corrected 2026-10-30.)
 >
 > Two things that were right and stay right:
 > - **Don't keep real secrets on disk in agent-accessible repos** — use env-var injection
@@ -286,11 +394,12 @@ permissions docs.) The supported allowlist-primary mechanism is instead:
 >   — the whole point of allowlist-primary. Treat as edge cases to design around, not
 >   confirmed Anthropic behavior; the file-path Read-tool `deny` is the reliable part.
 > - **Sandbox path syntax:** absolute (`/tmp/build`), home-relative (`~/`), or — for
->   project settings — project-relative `./` or no prefix at all. The `//` root-relative
->   form belongs to *permission rules*; a previous revision of this file imported it here
->   and concluded that a repo-local `.env` could not be added to `denyRead`. It can, and
->   it now is. The working directory is writable by default; `allowWrite` adds dirs
->   beyond it.
+>   project settings — project-relative `./` or no prefix at all (in user settings `./`
+>   is relative to `~/.claude`; for managed settings the docs define no meaning). The
+>   `//` root-relative form belongs to *permission rules*, although the sandbox accepts it
+>   for absolute paths too. So a repo-local `.env` can go in a repo's own `denyRead`;
+>   the managed example uses absolute and `~/` paths only. The working directory is
+>   writable by default; `allowWrite` adds dirs beyond it.
 > - The example grants broad repo-file access (`Read/Edit/Write(./**)`) for usability and
 >   relies on the file-path deny; narrow it to specific dirs for a high-assurance repo to
 >   better practice "grant narrow."
@@ -305,7 +414,12 @@ the R6 guardrail hooks alongside.
 > `sandbox.network.strictAllowlist` is ignored in a repository's own `settings.json`, so
 > the per-repo deployment gives you a *prompting* network allowlist while the managed
 > deployment gives you a *blocking* one. Pick per-repo for the permission-rule benefits;
-> don't pick it and then describe egress as controlled.
+> don't pick it and then describe egress as controlled. The sandbox keys this profile
+> sets may not hold per-repo either: the docs say a `false` from user,
+> `--settings` or managed settings holds over a project's `true`, but promise nothing
+> of the kind for a repo's own file, and `/sandbox` writes its Mode and Overrides
+> choices to `.claude/settings.local.json`, which outranks it. So per-repo, a developer
+> may be able to turn auto-allow or the retry back on, or `failIfUnavailable` off.
 
 **Verify (acceptance):** with the profile active —
 1. **Read tool blocked:** ask the agent to read a repo `.env` *with the Read tool* — it
@@ -315,19 +429,31 @@ the R6 guardrail hooks alongside.
    applies even though read-only Bash otherwise runs freely under `dontAsk`. *(If this
    returns the file contents, stop and re-check the deny rule: an earlier revision of this
    document told operators to expect exactly that, and it was wrong.)*
-3. **Script-based read blocked by the sandbox, not by the deny:** ask it to run
-   `python -c "print(open('.env').read())"`. A permission rule cannot see inside that, so
-   this is the case `sandbox.filesystem.denyRead` exists for — it must fail on a **read
-   error from the OS**, not on a permission refusal. Then, to prove which control fired,
-   remove `./.env` from `denyRead`, re-run, and confirm it now succeeds. That contrast is
-   the whole point of the sandbox layer.
+3. **Script-based read blocked by the sandbox, not by a permission check:** put a canary
+   in the repo's `.env` (say `CANARY=step3`), then have Claude run an allow-listed
+   command that opens the file itself — a test or `npm run` script that reads `.env`.
+   No permission check sees inside that, so this is the case the sandbox exists for.
+   **Pass** only if the canary appears in no output, including on any retry, which
+   strict sandbox mode runs inside the sandbox again. Positive control: the same
+   command reading `README.md` prints it. **Fail** if the canary appears: if it appeared
+   on a sandboxed run, add the repo's `.env` to `denyRead` (see the sandbox bullet for
+   the path form) and re-run; if it appeared on a run outside the sandbox, check that
+   the deployed profile still sets `sandbox.allowUnsandboxedCommands: false` and is the
+   managed source in use (`/status`, as in floor step 0), and that no `excludedCommands`
+   entry matches the command (check `~/.claude/settings.json` too). Under managed
+   settings `/sandbox` prints "Sandbox settings are overridden by a higher-priority
+   configuration" instead of opening, which confirms that a higher level sets at least
+   one of the sandbox keys. If the canary still appears, do not rely on the profile for
+   subprocess reads.
 4. **Egress — distinguish prompt from block.** Ask it to send a file to a domain **not** in
    `allowedDomains`. With `strictAllowlist: true` honored (managed / user / `--settings`
    scope) the connection must be **blocked**. Deployed as a repo `settings.json`, expect a
    **prompt** instead — that is the documented scope limit, not a misconfiguration, and it
    is the result you should record rather than explain away.
 5. **Unlisted action auto-declined:** ask it to run a *mutating* Bash command not in `allow`
-   — under `dontAsk` it must be **auto-declined**, not run.
+   — under `dontAsk` it must be **auto-declined**, not run. This holds because the
+   example sets `autoAllowBashIfSandboxed: false`; with auto-allow on, a sandboxed
+   command would run without a prompt.
 
 ---
 
@@ -342,8 +468,11 @@ the R6 guardrail hooks alongside.
 | `permissions.defaultMode: "dontAsk"` (R7 allowlist) | confirm against the permission-modes docs for your release |
 | `sandbox` (filesystem/network) — R7 | **macOS / Linux / WSL2 only** (native Windows unsupported); confirm schema against the sandboxing docs for your release |
 | `sandbox.network.strictAllowlist` — R7 | honored from **user / managed / `--settings`** scope only; no effect in a repo's own `settings.json` (documented as of v2.1.219+). Confirm before claiming egress is blocked. |
+| `wslInheritsWindowsSettings` (WSL reads the Windows policy chain) | **v2.1.282+** (within the 2.1.295 pin). |
+| `managedSourcesBehavior: "merge"`, `/status` **Skipped sources** | **v2.1.242+** (within the 2.1.295 pin). Under the default `"first-wins"` only the highest-ranked managed source applies; see "Where managed settings live". |
 
-Windows `C:\Program Files\ClaudeCode\` path requires **v2.1.75+** (`ProgramData` deprecated).
+Windows `C:\Program Files\ClaudeCode\` path requires **v2.1.75+**; Claude Code does not
+read the legacy `ProgramData` path.
 
 ---
 
@@ -351,12 +480,16 @@ Windows `C:\Program Files\ClaudeCode\` path requires **v2.1.75+** (`ProgramData`
 
 Run these on a machine after deploying, to prove the floor is non-overridable:
 
-0. **No leftover placeholder.** Confirm the deployed file has **no** `<BASELINE_PREFIX>`
-   token remaining (e.g. `grep -L '<BASELINE_PREFIX>' managed-settings.json` should list
-   the file as clean). An unsubstituted placeholder makes the guardrail hook commands fail
-   to launch. On v2.1.295+ command-guard's `onFailure: "block"` then refuses every shell
-   command; below it the deny-list still works, so the floor *looks* deployed while
-   silently losing its hooks.
+0. **No leftover placeholder, and this file is the source in use.** Confirm the deployed
+   file has **no** `<BASELINE_PREFIX>` token remaining (e.g. `grep -L '<BASELINE_PREFIX>'
+   managed-settings.json` should list the file as clean). An unsubstituted placeholder
+   makes the guardrail hook commands fail to launch. On v2.1.295+ command-guard's
+   `onFailure: "block"` then refuses every shell command; below it the deny-list still
+   works, so the floor *looks* deployed while silently losing its hooks. Then run
+   `/status` in a session that uses the fleet's real credential and provider: **Setting
+   sources** must show `(file)`, `(drop-ins)`, `(file + drop-ins)` or a `, merged` list
+   that includes `file` or `drop-ins`, and **Skipped sources** must not list this file. Otherwise a
+   higher-ranked managed source shadows it (see "Where managed settings live").
 1. **Managed deny survives skip-permissions.** In any repo, ask Claude Code (with
    `--dangerously-skip-permissions`) to read a `.env` file. It must be **blocked** by
    the managed deny — bypass mode does not override a managed deny rule.
@@ -393,13 +526,19 @@ Run these on a machine after deploying, to prove the floor is non-overridable:
    first-class flow that edits `.claude/settings.json` breaks, narrow that deny entry at the
    managed level.
 
-If step 1 or 3 does **not** block, the managed file is not at the right path / not
-being read — re-check the per-OS path and that the deploying user had write access
-to that root-owned directory.
+If step 1 or 3 does **not** block, the managed file is not being applied. First run
+`/status`: if **Setting sources** names a remote, plist or HKLM source and **Skipped
+sources** lists this file, a higher-ranked managed source shadows it under the default
+`"first-wins"`. Otherwise the file is not at the right path or not being read —
+re-check the per-OS path and that the deploying user had write access to that
+root-owned directory.
 
 ---
 
-## Sources (last verified 2026-08-12)
+## Sources (last verified 2026-08-12; entries marked *(2026-10-30)* re-verified then)
+
+- https://code.claude.com/docs/en/managed-settings — *(2026-10-30)* managed-source ranking (remote, MDM/OS policy, file + `managed-settings.d/`, HKCU); `managedSourcesBehavior` `"first-wins"` (default, skipped sources ignored with no warning) vs `"merge"`; keys read from every admin source; `/status` Setting sources / Skipped sources; drop-in merge order and rules; `/etc/claude-code` is user-writable on WSL.
+- https://code.claude.com/docs/en/settings-reference — *(2026-10-30)* sandbox path prefixes (`./` defined for project and user settings only) and where wildcards work on Linux/WSL2; `managedSourcesBehavior` placement (not in `managed-settings.json`); `wslInheritsWindowsSettings`; `sandbox.allowUnsandboxedCommands`, `sandbox.failIfUnavailable` and `sandbox.autoAllowBashIfSandboxed`.
 
 - https://code.claude.com/docs/en/settings — settings precedence, managed paths, the `allowManaged*` / `strictPluginOnlyCustomization` keys (surfaces: `skills`/`agents`/`hooks`/`mcp`; unrecognized names silently ignored).
 - https://code.claude.com/docs/en/server-managed-settings — managed delivery, "all settings.json settings supported except OS-level-only", `enabledPlugins`.
@@ -407,5 +546,5 @@ to that root-owned directory.
 - https://code.claude.com/docs/en/hooks#powershell — match `Bash|PowerShell` in hooks that inspect shell commands; on Windows without Git Bash the Bash tool is not registered at all.
 - https://code.claude.com/docs/en/permission-modes — "deny rule … blocked, even in bypassPermissions mode."
 - https://code.claude.com/docs/en/hooks — managed hooks; `disableAllHooks` cannot disable managed hooks from below.
-- https://code.claude.com/docs/en/permission-modes — `defaultMode` values incl. `dontAsk` (auto-denies unlisted actions). *(R7)*
-- https://code.claude.com/docs/en/sandboxing — `sandbox.filesystem`/`network` schema; `denyRead`/`denyWrite` block **subprocess** access at the OS level; `./` or no prefix is project-root-relative for project settings; `network.strictAllowlist` is required to block (not prompt) and is honored only from user/managed/`--settings` scope; macOS/Linux/WSL2. *(R7)*
+- https://code.claude.com/docs/en/permission-modes — `defaultMode` values incl. `dontAsk` (auto-denies unlisted actions). *(2026-10-30)* an allow rule or `bypassPermissions` mode can approve an unsandboxed retry with no prompt. *(R7)*
+- https://code.claude.com/docs/en/sandboxing — `sandbox.filesystem`/`network` schema; `denyRead`/`denyWrite` block **subprocess** access at the OS level; `./` or no prefix is project-root-relative for project settings; `network.strictAllowlist` is required to block (not prompt) and is honored only from user/managed/`--settings` scope; macOS/Linux/WSL2. *(2026-10-30)* paths from `Read`/`Edit` permission rules are merged into the sandbox configuration; the unsandboxed retry (approved without a prompt by a matching allow rule in any mode and by `bypassPermissions`; denied under `dontAsk` only when no allow rule matches); strict sandbox mode; auto-allow works independently of the permission mode, except plan mode and some auto-mode cases. *(R7)*

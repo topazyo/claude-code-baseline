@@ -103,6 +103,14 @@ a fixture in `tests/` before bumping the pin.
       `managed/`; run its README "acceptance verification" on a real deploy.)*
 - [ ] **Managed hooks survive `disableAllHooks` from below** — *"disableAllHooks set in
       user/project/local cannot disable managed hooks."* *(R6 managed hooks rely on this.)*
+- [ ] **Managed-source ranking** — remote > MDM/OS policy > `managed-settings.json` (+
+      `managed-settings.d/`) > HKCU; the default `managedSourcesBehavior: "first-wins"`
+      still ignores every lower source without a warning, `permissions` and `hooks` are
+      still not among the keys read from every admin source, `"merge"` still has to sit
+      in the highest-ranked source, `/status` still reports Setting sources / Skipped
+      sources, and `/etc/claude-code` is still user-writable on WSL
+      (`wslInheritsWindowsSettings`). *(R6: under first-wins a higher source drops the
+      whole floor; `managed/README.md` "Where managed settings live".)*
 - [ ] **`deny` is categorical and beats `allow`** — a catch-all `deny(**)` overrides a narrow
       `allow`. *(R7: the secrets deny stays a reliable backstop; the naive allowlist is invalid.)*
 - [ ] **`defaultMode: "dontAsk"` auto-DENIES unlisted actions** (only `allow` matches +
@@ -110,9 +118,18 @@ a fixture in `tests/` before bumping the pin.
 - [ ] **`sandbox.filesystem` schema** (`allowWrite`/`denyWrite`/`denyRead`) — that
       `denyRead`/`denyWrite` still **block subprocess access at the OS level for every
       child process** (this is what closes the `python -c "open('.env')"` case that no
-      permission rule can reach), and that a `./`-prefixed or bare path is still
-      resolved **relative to the project root for project settings**. macOS/Linux/WSL2
-      only. *(R7 sandbox layer.)*
+      permission rule can reach, in strict sandbox mode with the sandbox running), that a
+      `./`-prefixed or bare path is still
+      resolved **relative to the project root for project settings** (and still has no
+      documented meaning in managed settings), that `Read` deny rules are still merged
+      into the sandbox configuration, and where wildcards work on Linux/WSL2. Also that a
+      matching `allow` rule still approves the unsandboxed retry, that
+      `allowUnsandboxedCommands: false` still makes a retry run sandboxed, that
+      `failIfUnavailable: true` still stops Claude Code from running commands unsandboxed
+      where the sandbox cannot start, and that `autoAllowBashIfSandboxed: false` still
+      sends sandboxed Bash through the permission flow (the allowlist profile sets all
+      three, and `test_managed.sh` asserts them). macOS/Linux/WSL2 only. *(R7 sandbox
+      layer.)*
 - [ ] **`sandbox.network.strictAllowlist`** still turns `allowedDomains` from a
       pre-approval list into an actual block — and is still honored **only** from user
       settings, managed settings, or a `--settings` file, never from a repository's own
@@ -210,6 +227,9 @@ it, and when we last re-confirmed it against live docs.
 | PreToolUse hook `"allow"` no longer bypasses `deny` | v2.1.77 | 2026-08-12 | The documented `deny`-bypass fix. Corrected 2026-08-12: this was previously recorded as a broader "`allow` rule" fix in v2.1.80, which no changelog entry supports. The pin stayed 2.1.80 as a *verified* floor above it until 2026-10-28, when it moved to 2.1.295 (the `onFailure` row below), which still covers this fix. |
 | `onFailure: "block"` makes a guard that can't start, times out, or exits other than 0/2 block the call | v2.1.295 | 2026-10-28 (on 2.1.312) | The current pin. Real `claude -p` runs on a throwaway install: `command-guard.sh` deleted → Bash `ls` blocked ("blocking because onFailure is "block"" plus the hook's "No such file or directory"); `onFailure: "continue"` (negative control) → the same `ls` ran; `scope-guard.sh` deleted → Write blocked, no file created. Only this row was re-verified for the bump; the full checklist was not re-walked. Below v2.1.295 the key's handling is unverified. Not set on the `ConfigChange` config-guard by design. |
 | `strictPluginOnlyCustomization` available | not documented | 2026-08-12 | Present in the settings docs and the official JSON schema; no changelog section introduces it, so no version is claimed. Same treatment as `allowManaged*Only`. Surfaces are `skills`/`agents`/`hooks`/`mcp` — an unrecognized name is silently ignored. |
+| Managed sources: `"first-wins"` by default, `managedSourcesBehavior: "merge"` opt-in; `/status` Skipped sources | v2.1.242 (merge, Skipped sources) | 2026-10-30 | Docs only (managed-settings, settings-reference); not re-run on a real deploy. Under first-wins the highest-ranked source with a policy key applies and the rest are ignored without warning; `permissions` and `hooks` are not read from lower sources. `"merge"` has no effect in `managed-settings.json`, the lowest admin source. |
+| `Read` deny rules merged into the sandbox configuration; `./` sandbox paths defined for project and user settings only | (longstanding) | 2026-10-30 | Docs only (sandboxing, settings-reference). Why `allowlist.example.json`, deployed as managed settings, lists no `./` path; its `Read(.env*)` deny is expected to cover the repo's `.env` for sandboxed commands (unverified; the allowlist profile's Verify step 3 in `managed/README.md` checks it). |
+| Unsandboxed retry approved by a matching `allow` rule; `allowUnsandboxedCommands: false`, `failIfUnavailable: true`, `autoAllowBashIfSandboxed: false` | not documented | 2026-10-30 | Docs only (sandboxing, settings-reference, permission-modes). Without `allowUnsandboxedCommands: false` an allow-listed command can be retried outside the sandbox with no prompt; without `failIfUnavailable: true` a machine where the sandbox cannot start runs commands unsandboxed; with auto-allow on, sandboxed Bash runs without a prompt in every mode but plan mode and some auto-mode cases. `allowlist.example.json` sets all three; `test_managed.sh` asserts them. |
 | `Read`/`Edit` deny covers recognized Bash file commands | (longstanding) | 2026-08-12 | `cat`/`head`/`tail`/`sed`/`grep` are covered; arbitrary subprocesses are not. Corrected 2026-08-12 — the repo previously documented the opposite. |
 | `sandbox.filesystem.denyRead` blocks subprocess reads (OS level) | (longstanding) | 2026-08-12 | Corrected 2026-08-12; `./` paths are project-root-relative for project settings. |
 | `sandbox.network.strictAllowlist` required to block egress | (longstanding) | 2026-08-12 | `allowedDomains` alone prompts. Not honored from a repo's own `settings.json`. |

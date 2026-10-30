@@ -115,14 +115,26 @@ if allowlist is not None:
             m = re.match(r"Bash\(\s*([A-Za-z0-9_./-]+)", entry)
             if m and m.group(1).rsplit("/", 1)[-1] in READ_VERBS:
                 fails.append(f"allowlist: allow grants file-reading Bash '{entry}' alongside a secrets deny — it would leak .env via subprocess; drop it (see managed/README.md R7 limits)")
-    # sandbox filesystem paths must NOT use project-relative './' (verified: absolute / ~ / //)
+    # sandbox filesystem paths must NOT use project-relative './': the docs define it only for
+    # project and user settings, and this profile is deployed as managed settings (absolute,
+    # ~/ and // are defined everywhere). managed/README.md says what to add per deployment.
+    # Bare relative paths (no prefix) have the same problem and are not rejected yet.
     fsb = (allowlist.get("sandbox") or {}).get("filesystem") or {}
     for key in ("allowWrite", "denyWrite", "denyRead"):
         for p in (fsb.get(key) or []):
             if isinstance(p, str) and (p.startswith("./") or p == "."):
-                fails.append(f"allowlist: sandbox.filesystem.{key} entry '{p}' uses unsupported project-relative './' syntax (use absolute / ~ / //)")
+                fails.append(f"allowlist: sandbox.filesystem.{key} entry '{p}' uses project-relative './', which has no documented meaning in managed settings (use absolute / ~ / //)")
     if "sandbox" in allowlist and allowlist["sandbox"].get("enabled") is not True:
         fails.append("allowlist: sandbox present but sandbox.enabled is not true")
+    # The sandbox's read block holds only while commands actually run sandboxed: not on a
+    # retry outside it (an allow rule that matches a command approves the retry), not on a
+    # machine where the sandbox cannot start; and dontAsk decides sandboxed Bash only while
+    # auto-allow is off (managed/README.md, R7).
+    if "sandbox" in allowlist:
+        for key, want in (("allowUnsandboxedCommands", False), ("autoAllowBashIfSandboxed", False),
+                          ("failIfUnavailable", True)):
+            if allowlist["sandbox"].get(key) is not want:
+                fails.append(f"allowlist: sandbox.{key} must be {str(want).lower()} (see managed/README.md R7)")
 
 # D2: a PreToolUse guard that cannot start or times out must BLOCK the call, not let
 # it through -- onFailure:"block" (Claude Code 2.1.295+) on every guard hook.
