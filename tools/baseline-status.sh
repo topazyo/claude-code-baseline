@@ -22,8 +22,8 @@
 #     --drift           (default view) report version drift + posture per repo.
 #     --strict          exit non-zero if ANY installed repo has drifted from the
 #                       source version, or has a settings finding (a risky env value,
-#                       or a baseline hook not run as the template wires it). An
-#                       un-installed repo does NOT trip this.
+#                       or a baseline hook not run, or not wired, as the template
+#                       wires it). An un-installed repo does NOT trip this.
 #     --json <outfile>  ALSO write the full per-repo report as JSON to <outfile>
 #                       (the only filesystem write this tool ever performs).
 #
@@ -76,7 +76,9 @@ SRC_MIN="$(read_src_key minClaudeCodeVersion)"
 # env: keys of the repo's settings.json / settings.local.json `env` that can run code
 # before the baseline hooks, redirect them or switch them off. launch: baseline scripts
 # the template wires that settings.json does not run exactly as `bash -p <script>`
-# with the template's keys, and a disableAllHooks in either file. Same rules as the
+# with the template's keys, or does not wire under the template's event in a group
+# whose matcher covers the template's, with no `if` ("<script> not under <event>
+# [<matcher>]"), and a disableAllHooks in either file. Same rules as the
 # installer (lib/merge_settings.py). This tool runs outside Claude Code, so unlike
 # config-guard it is not started by the shell those values reach.
 settings_check() {
@@ -98,8 +100,9 @@ def name(text):
     # ascii()-escaped, commas too: a key name cannot shift the report's fields.
     return ascii(text)[1:-1].replace(",", "\\x2c")
 
-mins = ms.baseline_timeouts(ms.strip_comments(read(os.path.join(src, "settings.template.json")) or {}))
-if not mins:   # no template to compare with: the check could not run
+template = ms.strip_comments(read(os.path.join(src, "settings.template.json")) or {})
+mins, wiring = ms.baseline_timeouts(template), ms.baseline_wiring(template)
+if not mins or not wiring:   # no template to compare with: the check could not run
     sys.exit("settings.template.json unreadable or wires no baseline hook")
 env, launch = [], set()
 for fname in ("settings.json", "settings.local.json"):
@@ -119,7 +122,11 @@ for fname in ("settings.json", "settings.local.json"):
         launch.add(fname + " disableAllHooks")   # same reading as config-guard (1)
     if fname == "settings.json":
         launch |= {name(s) for s in ms.baseline_launch_problems(data, mins)}
-        launch |= set(mins) - ms.baseline_launches(data, mins)
+        unlaunched = set(mins) - ms.baseline_launches(data, mins)
+        launch |= unlaunched
+        # where the template wires it; a script not launched at all is reported once, above
+        launch |= {name("%s not under %s%s" % (s, ev, " " + m if m else ""))
+                   for s, ev, m in ms.baseline_wiring_problems(data, wiring) if s not in unlaunched}
 print(",".join(env) + "\x1f" + ",".join(sorted(launch)))
 PY
 }
@@ -227,7 +234,7 @@ if [[ $STRICT -eq 1 && $any_drift -eq 1 ]]; then
   exit 1
 fi
 if [[ $STRICT -eq 1 && $any_settings -eq 1 ]]; then
-  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, no disableAllHooks)" >&2
+  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, its event and matcher, no disableAllHooks)" >&2
   exit 1
 fi
 exit 0
