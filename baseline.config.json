@@ -6,7 +6,7 @@
   "_minClaudeCodeVersionRationale": "Floor for behavior this baseline depends on. v2.1.295 added onFailure:block, which the PreToolUse guards set so that a guard that cannot start or times out blocks the call instead of letting it through; older releases do not support the key (how they treat it is unverified), and there a guard that cannot start most likely fails open. It also covers v2.1.77, where a PreToolUse hook returning 'allow' could no longer bypass a 'deny' rule, which the tamper-protection deny-list (Edit(.claude/settings.json) etc.) relies on. install.sh compares the detected 'claude --version' against this and warns (advisory, never blocks) if older. Re-confirm per release via RELEASING.md.",
   "minClaudeCodeVersion": "2.1.295",
   "_baselineVersionRationale": "Revision stamp for THIS baseline template (distinct from the schema 'version' integer above). install.sh copies it verbatim onto a NEW install (create path only - an existing config is never rewritten), and the same value ships in hooks/VERSION, which install.sh recopies into every repo on each run. tools/baseline-status.sh --drift compares a repo's installed .claude/hooks/baseline/VERSION against this value to surface repos on an old baseline. Bump this AND hooks/VERSION together on release (see RELEASING.md); tests/run.sh asserts the two match.",
-  "baselineVersion": "2026-10-30",
+  "baselineVersion": "2026-10-30.1",
   "enforcement": "block",
   "failClosed": true,
 
