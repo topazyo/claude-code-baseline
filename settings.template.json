@@ -51,7 +51,7 @@
         ]
       }
     ],
-    "_comment_configchange": "Two ConfigChange groups, not one: the documented matcher values are the config SOURCE (user_settings, project_settings, local_settings, policy_settings, skills), and .claude/settings.local.json - which overrides .claude/settings.json and is the file the README tells people not to commit - arrives as local_settings. Watching project_settings alone left the higher-precedence file unobserved, so a disableAllHooks written there was neither denied nor detected. config-guard.sh must handle the local_settings source; until it does, this group is wired but inert.",
+    "_comment_configchange": "Two ConfigChange groups, not one: the documented matcher values are the config SOURCE (user_settings, project_settings, local_settings, policy_settings, skills), and .claude/settings.local.json - which overrides .claude/settings.json and is the file the README tells people not to commit - arrives as local_settings. Watching project_settings alone left the higher-precedence file unobserved, so a disableAllHooks written there was neither denied nor detected. config-guard.sh checks that file for disableAllHooks, the risky environment values it reports in settings.json, and any hook entry naming a baseline script, which the installer never writes there.",
     "ConfigChange": [
       {
         "matcher": "project_settings",

@@ -291,6 +291,16 @@ checks = [
     ("launch problems: the script named is the one the old scan named",
      all(ms._named_script(c) == old_name(c) for c in scan_corpus())),
     ("launch problems: a long command naming no script reported promptly", scan_is_prompt()),
+    # settings.local.json: every command hook entry naming the baseline path, whatever its keys
+    ("baseline hook names: an entry naming a baseline script is listed by the script",
+     ms.baseline_hook_names({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+         dict(ours(CG_P), statusMessage="x"), USER]}]}}) == ["guardrails/command-guard.sh"]),
+    ("baseline hook names: one naming no script is listed by its command; none on other shapes",
+     ms.baseline_hook_names({"hooks": {"Stop": [{"hooks": [ours(" echo " + M + " ")]}]}}) == ["echo " + M]
+     and ms.baseline_hook_names({"hooks": {"Stop": [{"hooks": [USER]}]}}) == []
+     and ms.baseline_hook_names({}) == [] and ms.baseline_hook_names({"hooks": ["x"]}) == []),
+    ("baseline hook names: a script named in args counts",
+     ms.baseline_hook_names({"hooks": {"Stop": [{"hooks": [dict(ours("bash"), args=["-p", B + "x.sh"])]}]}}) == ["x.sh"]),
     ("wiring: no hooks object, or a wrong-typed one, reports every row, no crash",
      ms.baseline_wiring_problems({}, WIRING) == WIRING
      and ms.baseline_wiring_problems({"hooks": ["x"]}, WIRING) == WIRING

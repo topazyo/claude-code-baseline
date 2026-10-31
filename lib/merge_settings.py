@@ -406,6 +406,23 @@ def _guard_entries(hooks: Any, guards: Iterable[str]) -> tuple[set, set]:
     return seen, soft
 
 
+def _entry_text(entry: dict) -> str:
+    """A command hook entry's command and its string args, joined by spaces."""
+    args = entry.get("args") if isinstance(entry.get("args"), list) else []
+    return " ".join([entry["command"]] + [a for a in args if isinstance(a, str)])
+
+
+def baseline_hook_names(settings: dict) -> list[str]:
+    """Every baseline script a command hook entry anywhere in settings names in its
+    command or args (the script after BASELINE_MARKER, or the stripped text when none
+    follows), sorted. For settings.local.json, where the installer never writes one.
+    MIRRORS _baseline_named in hooks/modules/config-guard.sh (check 5); a test runs both
+    on one table."""
+    return sorted({_named_script(t) or t.strip()
+                   for t in map(_entry_text, hook_entries(settings.get("hooks")))
+                   if BASELINE_MARKER in t})
+
+
 def baseline_soft_guards(settings: dict, guards: Iterable[str]) -> list[str]:
     """The guards (baseline_blocking) that some direct PreToolUse entry of settings runs
     without onFailure: "block", sorted. Whether a guard is wired there at all is

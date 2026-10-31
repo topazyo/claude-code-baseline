@@ -13,8 +13,10 @@
 # skills) — NOT arbitrary files, so it does NOT fire for .claude/baseline.config.json
 # or .claude/hooks/baseline/** (those stay protected against the agent by the
 # permissions deny-list; non-overridable human/external coverage is R6's managed
-# settings). user_settings/local_settings are per-developer/out-of-repo and are
-# left to R6 as well.
+# settings). It also watches `local_settings` (.claude/settings.local.json), an
+# overlay that outranks settings.json: there it reports disableAllHooks, a risky env
+# value and any hook entry that names a baseline script, since the installer never
+# writes one there. user_settings is per-developer and is left to R6.
 #
 # Config (baseline.config.json):
 #   "modules": { "configGuard": { "enabled": true } }
@@ -81,30 +83,36 @@ fi
 
 SOURCE="$(bcl_extract_value "$PAYLOAD" source)"
 case "$SOURCE" in
-  project_settings) : ;;
+  project_settings|local_settings) : ;;
   "")
     # Parseable payload with no 'source' — we cannot tell what changed.
     echo "[config-guard] CONTROL COULD NOT RUN — ConfigChange payload had no 'source'; the change was NOT integrity-checked." >&2
     bcl_failclosed_exit; exit $?
     ;;
   *)
-    # A settings source the baseline does not manage (user/local/policy/skills).
+    # A settings source the baseline does not manage (user/policy/skills).
     exit 0
     ;;
 esac
 
+if [[ "$SOURCE" == local_settings ]]; then
+  LABEL=".claude/settings.local.json"; FIX="Remove the reported entries from .claude/settings.local.json, or revert the change."
+else
+  LABEL=".claude/settings.json"; FIX="Re-run install.sh to restore the baseline wiring + deny-list, or revert the change."
+fi
 FILE_PATH="$(bcl_extract_value "$PAYLOAD" file_path)"
 if [[ -n "$FILE_PATH" ]]; then
   SETTINGS_FILE="$FILE_PATH"
 else
-  SETTINGS_FILE="$(bcl_repo_root)/.claude/settings.json"
+  SETTINGS_FILE="$(bcl_repo_root)/$LABEL"
 fi
 case "$SETTINGS_FILE" in /*|?:*) : ;; *) SETTINGS_FILE="$(bcl_repo_root)/$SETTINGS_FILE" ;; esac
 
-OUT="$("$PY" -I -S -X utf8 - "$SETTINGS_FILE" <<'PY'
-import json, re, sys
+OUT="$("$PY" -I -S -X utf8 - "$SETTINGS_FILE" "$SOURCE" <<'PY'
+import json, os, re, sys
 
-settings_file = sys.argv[1]
+settings_file, source = sys.argv[1], sys.argv[2]
+which = "local" if source == "local_settings" else "project"
 
 # Baseline-managed permissions.deny entries. These MIRROR settings.template.json;
 # a change there must change this list too (a test asserts the two agree, and
@@ -262,16 +270,22 @@ try:
     with open(settings_file, encoding="utf-8") as fh:
         data = json.load(fh)
 except FileNotFoundError:
+    if which == "local" and os.path.isdir(os.path.dirname(settings_file)):
+        print("__ABSENT__")   # settings.local.json is optional: removing it removes nothing of ours
+        raise SystemExit(0)
+    if which == "local":
+        print("__UNREADABLE__ local settings file not found, nor its folder: " + settings_file)
+        raise SystemExit(0)
     print("__UNREADABLE__ project settings file not found: " + settings_file)
     raise SystemExit(0)
 except Exception as exc:
-    print("__UNREADABLE__ project settings file is not valid JSON: %s" % exc)
+    print("__UNREADABLE__ %s settings file is not valid JSON: %s" % (which, exc))
     raise SystemExit(0)
 
 # Valid JSON that is not an object means Claude Code sees no hooks/permissions at
 # all — maximum tamper. Treat as unreadable (fail closed), never "validated".
 if not isinstance(data, dict):
-    print("__UNREADABLE__ project settings is not a JSON object (top-level %s)" % type(data).__name__)
+    print("__UNREADABLE__ %s settings is not a JSON object (top-level %s)" % (which, type(data).__name__))
     raise SystemExit(0)
 
 findings = []
@@ -285,7 +299,70 @@ findings = []
 #     like 1 or "true" are a tamper signal even if Claude Code only honors real true).
 dah = data.get("disableAllHooks", False)
 if dah not in (False, 0, None, "", "false", "False", "0", "no", "off"):
-    findings.append("settings sets disableAllHooks=%r - this disables ALL hooks, including the baseline guardrails." % (dah,))
+    shown_dah = ascii(dah)
+    shown_dah = shown_dah if len(shown_dah) <= 200 else shown_dah[:200] + "..."
+    findings.append("settings sets disableAllHooks=%s - this disables ALL hooks, including the baseline guardrails." % shown_dah)
+
+# (4) No environment value that runs code before the hooks, redirects them or switches
+#     them off (RISKY_ENV_* above), whatever its value: an empty PATH or
+#     CLAUDE_PROJECT_DIR breaks the hook command as surely as a hostile one.
+#     Reported as ENVRISK, under its own heading: a deliberate PATH belongs in the user
+#     environment or ~/.claude/settings.json, but it is not tamper. Names are printed
+#     ascii()-escaped, so a control character or non-ASCII name cannot break the report.
+def _env_findings(data):
+    env = data.get("env")
+    risky = [k for k in (env if isinstance(env, dict) else {}) if _risky_env(k)]
+    if not risky:
+        return []
+    return ["ENVRISK settings env sets " + ", ".join(sorted(ascii(k)[1:-1] for k in risky)) + " - such values can run code before the baseline hooks, redirect them, or switch them off. Set what you need in your user environment or ~/.claude/settings.json instead."]
+
+# (5) settings.local.json (source local_settings): no hook entry may name a baseline
+#     script in its command or args. The installer never writes one there, so one there
+#     is reported. Each is named by the script after the baseline path, else by its
+#     text; the scan is one pass. MIRRORED in lib/merge_settings.py
+#     (baseline_hook_names); a test runs both on one table. That file is an overlay:
+#     the wiring and deny-list checks (2)-(3) are settings.json's, so a local_settings
+#     change ends here.
+_SCRIPT_AFTER_MARKER = re.compile(r"\S+?\.sh")
+_SPACE = re.compile(r"\s")
+def _named_script(command):
+    i = command.find("/.claude/hooks/baseline/")
+    while i != -1:
+        start = i + len("/.claude/hooks/baseline/")
+        m = _SCRIPT_AFTER_MARKER.match(command, start)
+        if m:
+            return m.group(0)
+        gap = _SPACE.search(command, start)
+        if gap is None:
+            return None
+        i = command.find("/.claude/hooks/baseline/", gap.end())
+    return None
+def _command_entries(obj):
+    if isinstance(obj, dict):
+        if obj.get("type") == "command" and isinstance(obj.get("command"), str):
+            yield obj
+        for v in obj.values():
+            yield from _command_entries(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _command_entries(item)
+def _entry_text(e):
+    args = e.get("args") if isinstance(e.get("args"), list) else []
+    return " ".join([e["command"]] + [a for a in args if isinstance(a, str)])
+def _baseline_named(hooks):
+    return sorted({_named_script(t) or t.strip()
+                   for t in map(_entry_text, _command_entries(hooks)) if "/.claude/hooks/baseline/" in t})
+if which == "local":
+    named = _baseline_named(data.get("hooks"))
+    if named:
+        shown = [ascii(n)[1:-1] if len(n) <= 200 else ascii(n[:200])[1:-1] + "..." for n in named[:20]]
+        if len(named) > 20:
+            shown.append("and %d more" % (len(named) - 20))
+        findings.append("settings.local.json has hook entries naming baseline scripts: " + ", ".join(shown) + " - the installer never writes baseline hooks there; remove them or revert the change.")
+    findings += _env_findings(data)
+    for f in findings:
+        print(f)
+    raise SystemExit(0)
 
 # (2) Every baseline script must still be wired as an actual command hook. Walk the
 #     hooks tree, collect command strings from real {type:"command"} entries only, and
@@ -400,16 +477,8 @@ missing = [d for d in EXPECTED_DENY if d not in deny]
 if missing:
     findings.append("baseline deny-list entries removed from permissions.deny: " + ", ".join(missing))
 
-# (4) No environment value that runs code before the hooks, redirects them or switches
-#     them off (RISKY_ENV_* above), whatever its value: an empty PATH or
-#     CLAUDE_PROJECT_DIR breaks the hook command as surely as a hostile one.
-#     Reported as ENVRISK, under its own heading: a deliberate PATH belongs in the user
-#     environment or ~/.claude/settings.json, but it is not tamper. Names are printed
-#     ascii()-escaped, so a control character or non-ASCII name cannot break the report.
-env = data.get("env")
-risky = [k for k in (env if isinstance(env, dict) else {}) if _risky_env(k)]
-if risky:
-    findings.append("ENVRISK settings env sets " + ", ".join(sorted(ascii(k)[1:-1] for k in risky)) + " - such values can run code before the baseline hooks, redirect them, or switch them off. Set what you need in your user environment or ~/.claude/settings.json instead.")
+# (4) (defined above, before the local_settings exit) environment values.
+findings += _env_findings(data)
 
 for f in findings:
     print(f)
@@ -424,11 +493,20 @@ fi
 
 # NOTE: filter $OUT with bash string ops, never grep — the finding messages contain
 # UTF-8 (em-dashes), and grep declares such stdin "binary" and drops the lines.
+if [[ "$OUT" == "__ABSENT__" ]]; then
+  echo "[config-guard] $LABEL removed — nothing in it to check."
+  exit 0
+fi
 if [[ "$OUT" == "__UNREADABLE__"* ]]; then
   {
     echo "[config-guard] CONTROL COULD NOT RUN — ${OUT#__UNREADABLE__ }"
-    echo "   The project settings.json just changed but cannot be read/parsed — treat as tampered."
-    echo "   Restore a valid .claude/settings.json (re-run install.sh), or set failClosed:false to warn only."
+    if [[ "$SOURCE" == local_settings ]]; then
+      echo "   $LABEL just changed but cannot be read/parsed — treat as tampered."
+      echo "   Fix or remove $LABEL, or set failClosed:false to warn only."
+    else
+      echo "   The project settings.json just changed but cannot be read/parsed — treat as tampered."
+      echo "   Restore a valid $LABEL (re-run install.sh), or set failClosed:false to warn only."
+    fi
   } >&2
   bcl_failclosed_exit; exit $?
 fi
@@ -445,11 +523,11 @@ if [[ -n "${OUT//[[:space:]]/}" ]]; then
   {
     echo ""
     if [[ $tamper -eq 1 ]]; then
-      echo "[config-guard] SETTINGS TAMPER DETECTED — .claude/settings.json was changed in a way that weakens the baseline:"
+      echo "[config-guard] SETTINGS TAMPER DETECTED — $LABEL was changed in a way that weakens the baseline:"
     elif [[ $envrisk -eq 1 ]]; then
-      echo "[config-guard] RISKY ENVIRONMENT VALUE — .claude/settings.json sets values that can run code before the baseline hooks or switch them off:"
+      echo "[config-guard] RISKY ENVIRONMENT VALUE — $LABEL sets values that can run code before the baseline hooks or switch them off:"
     else
-      echo "[config-guard] BASELINE OUT OF DATE — .claude/settings.json launches the baseline hooks the old way:"
+      echo "[config-guard] BASELINE OUT OF DATE — $LABEL launches the baseline hooks the old way:"
     fi
     while IFS= read -r f; do
       [[ -z "${f//[[:space:]]/}" ]] && continue
@@ -457,10 +535,14 @@ if [[ -n "${OUT//[[:space:]]/}" ]]; then
     done <<< "$OUT"
     echo ""
     echo "   File: $SETTINGS_FILE"
-    echo "   Re-run install.sh to restore the baseline wiring + deny-list, or revert the change."
+    echo "   $FIX"
   } >&2
   bcl_violation_exit; exit $?
 fi
 
-echo "[config-guard] project settings change validated — baseline hooks + deny-list intact."
+if [[ "$SOURCE" == local_settings ]]; then
+  echo "[config-guard] local settings change validated — no baseline hook, disableAllHooks or risky env value."
+else
+  echo "[config-guard] project settings change validated — baseline hooks + deny-list intact."
+fi
 exit 0

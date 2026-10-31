@@ -87,7 +87,7 @@
         "configGuard": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ConfigChange tamper-detection. When enabled, watches in-session changes to the settings files the baseline wires it to - .claude/settings.json (source project_settings) and .claude/settings.local.json (source local_settings, which overrides it) - and blocks/warns if the baseline hook wiring or deny-list is stripped, or disableAllHooks is set. Detection after the fact, in-session only: it sees a change Claude Code reports, not an edit made while no session is running, and it does not watch baseline.config.json or the hook scripts themselves.",
+          "description": "ConfigChange tamper-detection. When enabled, watches in-session changes to the settings files the baseline wires it to - .claude/settings.json (source project_settings) and .claude/settings.local.json (source local_settings, which overrides it) - and blocks/warns if, in settings.json, the baseline hook wiring or deny-list is stripped, or, in either file, disableAllHooks or a risky environment value is set, or, in settings.local.json, a hook entry names a baseline script. Detection after the fact, in-session only: it sees a change Claude Code reports, not an edit made while no session is running, and it does not watch baseline.config.json or the hook scripts themselves.",
           "properties": { "enabled": { "type": "boolean", "default": false } }
         },
         "runTests": {

@@ -115,7 +115,7 @@ Two limits, stated plainly:
 | `securityDefaults` | PostToolUse | Verify immutable infra defaults haven't drifted, from a **declarative rules file** (see below). Reports to Claude after the write; cannot undo it. |
 | `fixTags` | PostToolUse | Require a traceability tag (e.g. `# FIX: TICKET-123`) on every added line. Configurable marker, file types, and an optional env gate. Reports to Claude after the write; cannot undo it. |
 | `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. |
-| `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` — baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, or `disableAllHooks` set. **Off by default; detection after the change, not prevention; in-session only; watches `.claude/settings.json` only** — never `baseline.config.json` and never the hook scripts. A `local_settings` group for `.claude/settings.local.json` is wired in the template, but the handler is not implemented yet, so that source is currently inert. |
+| `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` (baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, `disableAllHooks` or a risky environment value set) and of `.claude/settings.local.json` (`disableAllHooks`, a risky environment value, or a hook entry naming a baseline script, which the installer never writes there). **Off by default; detection after the change, not prevention; in-session only; watches those two files only** — never `baseline.config.json` and never the hook scripts. A deleted `settings.local.json` is normal; an unreadable one is treated as tampered. |
 | `runTests` | PostToolUse | Run the right test/lint per file type (pytest, shellcheck/bats, yamllint/actionlint). Missing tools are skipped. Reports to Claude after the write; cannot undo it. |
 | `trackerReminder` | Stop | Remind to update a tracking doc when matching commits exist this session. Never blocks. |
 | `autoStage` | PostToolUse | `git add` changed files after all gates pass. Never blocks. |
@@ -184,8 +184,9 @@ limit — not a bug. Read it before you rely on any of the above.
   invocation is not documented), so it may act on such values on any platform, and
   `PATH`, `LD_PRELOAD`/`DYLD_*` or `CLAUDE_CODE_SHELL_PREFIX` affect it too. A settings
   file's `env` block can set any of them. config-guard (opt-in) reports one in an
-  in-session change to `.claude/settings.json`, `install.sh` warns about one in the
-  file it merges, and `tools/baseline-status.sh` reports one in `settings.json` or
+  in-session change to `.claude/settings.json` or `.claude/settings.local.json`,
+  `install.sh` warns about one in the file it merges, and
+  `tools/baseline-status.sh` reports one in `settings.json` or
   `settings.local.json` from outside Claude Code. None of them removes the value, and
   `~/.claude/settings.json` and the environment Claude Code is launched with are not
   checked: set values you need, such as `CLAUDE_CODE_GIT_BASH_PATH`, there.
@@ -200,7 +201,7 @@ limit — not a bug. Read it before you rely on any of the above.
   settings edit that repairs it mid-session.
 - **Config tampering by a human or an external process is largely uncovered.**
   `configGuard` is off by default, and even enabled it sees only in-session
-  `.claude/settings.json` changes, after they land.
+  `.claude/settings.json` and `.claude/settings.local.json` changes, after they land.
 - **Nothing here addresses prompt injection itself.** This baseline constrains
   which *actions* are permitted. It does not make the model resistant to
   malicious instructions arriving in a file, a web page, or an MCP response.
