@@ -138,6 +138,16 @@ rewire 's["hooks"]["PreToolUse"] = s["hooks"]["PreToolUse"][:1]'
 got="$(findings)"
 [ "$got" = "[] ['modules/scope-guard.sh']" ] && ok || no "unwired script not reported once: $got"
 cp "$TMP/settings.saved" "$A/.claude/settings.json"
+# A hook entry in settings.local.json that names a baseline script is reported (the
+# installer never writes one there) and fails --strict; without it, nothing is.
+printf '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash -p \\"${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/guardrails/command-guard.sh\\"", "statusMessage": "x"}]}]}}\n' > "$A/.claude/settings.local.json"
+got="$(findings)"
+[ "$got" = "[] ['settings.local.json runs guardrails/command-guard.sh']" ] && ok || no "baseline hook in settings.local.json not reported: $got"
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on a baseline hook in settings.local.json"; else ok; fi
+printf '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash ./scripts/team-lint.sh"}]}]}}\n' > "$A/.claude/settings.local.json"
+got="$(findings)"
+[ "$got" = "[] []" ] && ok || no "a repo's own hook in settings.local.json should not be reported: $got"
+rm -f "$A/.claude/settings.local.json"
 # A PreToolUse guard entry without onFailure "block" is reported, as config-guard reports
 # it, and fails --strict.
 rewire 's["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"] = "continue"'

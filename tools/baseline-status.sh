@@ -79,7 +79,9 @@ SRC_MIN="$(read_src_key minClaudeCodeVersion)"
 # with the template's keys, a guard a PreToolUse entry runs without onFailure "block"
 # ("<script> without onFailure block"), or a script it does not wire under the
 # template's event in a group whose matcher covers the template's, with no `if`
-# ("<script> not under <event> [<matcher>]"), and a disableAllHooks in either file.
+# ("<script> not under <event> [<matcher>]"), a hook entry in settings.local.json that
+# names a baseline script in its command or args ("settings.local.json runs <script>";
+# the installer never writes one there), and a disableAllHooks in either file.
 # The env list is the installer's; the launch rules follow config-guard's, applied to
 # every entry naming a baseline path (both through lib/merge_settings.py). This tool
 # runs outside Claude Code, so unlike config-guard it is not started by the shell
@@ -100,8 +102,9 @@ def read(path):
             return None
 
 def name(text):
-    # ascii()-escaped, commas too: a key name cannot shift the report's fields.
-    return ascii(text)[1:-1].replace(",", "\\x2c")
+    # ascii()-escaped, commas too: a key name cannot shift the report's fields. Capped.
+    t = ascii(text)[1:-1].replace(",", "\\x2c")
+    return t if len(t) <= 200 else t[:200] + "..."
 
 template = ms.strip_comments(read(os.path.join(src, "settings.template.json")) or {})
 mins, wiring = ms.baseline_timeouts(template), ms.baseline_wiring(template)
@@ -132,6 +135,8 @@ for fname in ("settings.json", "settings.local.json"):
         # where the template wires it; a script not launched at all is reported once, above
         launch |= {name("%s not under %s%s" % (s, ev, " " + m if m else ""))
                    for s, ev, m in ms.baseline_wiring_problems(data, wiring) if s not in unlaunched}
+    else:   # the installer never writes a baseline hook here: config-guard (5)
+        launch |= {name(fname + " runs " + s) for s in ms.baseline_hook_names(data)}
 print(",".join(env) + "\x1f" + ",".join(sorted(launch)))
 PY
 }

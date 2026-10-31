@@ -540,6 +540,28 @@ for name, change in [
         ("_t_w_nested.json", nest),
         ("_t_w_case.json", lower_event)]:
     variant(name, change)
+# settings.local.json (source local_settings): an overlay the installer never writes hooks
+# into. A hook entry that names a baseline script is reported, whatever its keys, as are
+# disableAllHooks and a risky env value; a repo's own hook, an empty file and a removed
+# file are not.
+real = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))
+cg_entry = [h for grp in real["hooks"]["PreToolUse"] for h in grp["hooks"] if "command-guard" in h["command"]][0]
+w("_l_copy.json",  {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [dict(cg_entry)]}]}})
+w("_l_keys.json",  {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [dict(cg_entry, statusMessage="x")]}]}})
+w("_l_many.json",  {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "bash /.claude/hooks/baseline/s%02d.sh" % i}
+                                                for i in range(25)]}]}})
+w("_l_long.json",  {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo /.claude/hooks/baseline/" + "a" * 500}]}]}})
+w("_l_stop.json",  {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo /.claude/hooks/baseline/"}]}]}})
+w("_l_dah.json",   {"disableAllHooks": True})
+w("_l_env.json",   {"env": {"BASH_ENV": "/tmp/x.sh"}})
+w("_l_own.json",   {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash ./scripts/team-lint.sh"}]}]},
+                    "permissions": {"allow": ["Bash(cat .claude/hooks/baseline/VERSION)"]}})
+w("_l_esc.json",   {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "bash /.claude/hooks/baseline/x" + chr(27) + "[2J" + chr(10) + "y.sh"}]}]}})
+w("_l_args.json",  {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash",
+                    "args": ["-p", "${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/guardrails/command-guard.sh"]}]}]}})
+w("_l_empty.json", {})
+w("_l_list.json",  [1])
+with open(os.path.join(d, "_l_bad.json"), "w", encoding="utf-8") as f: f.write("{ not json")
 # env values that can run code before the hooks, redirect them or switch them off,
 # whatever the value; bash_env and Path check the case-insensitive match. Then values
 # that must stay allowed.
@@ -604,6 +626,48 @@ for spec in "_t_cg_moved.json|command-guard.sh under" "_t_nocg.json|config-guard
   rpt="$(report_of "$TDIR/${spec%%|*}")"
   case "$rpt" in *"${spec#*|}"*) fail=$((fail + 1)); echo "  FAIL [config-guard double report in ${spec%%|*}]" ;; *) pass=$((pass + 1)) ;; esac
 done
+# local_settings: .claude/settings.local.json. A removed file and the repo's own content
+# validate; a hook entry naming a baseline script, disableAllHooks and a risky env value
+# are reported; an unreadable file fails closed, as for settings.json.
+for spec in "copy:2" "keys:2" "long:2" "many:2" "stop:2" "esc:2" "args:2" "dah:2" "env:2" "own:0" "empty:0" "nope:0" "bad:2" "list:2"; do
+  run "local_settings ${spec%%:*} -> ${spec#*:}" modules/config-guard.sh "$(ccp local_settings "$TDIR/_l_${spec%%:*}.json")" "${spec#*:}"
+done
+run "local_settings, no file_path, no local file -> 0" modules/config-guard.sh '{"source":"local_settings"}' 0
+run "local_settings, file in a missing folder -> 2" modules/config-guard.sh "$(ccp local_settings "$TDIR/no-such-dir/settings.local.json")" 2
+cp "$TDIR/_l_copy.json" "$WT/.claude/settings.local.json"
+run "local_settings, no file_path, the repo's local file -> 2" modules/config-guard.sh '{"source":"local_settings"}' 2
+rm -f "$WT/.claude/settings.local.json"
+run "policy_settings source -> 0" modules/config-guard.sh "$(ccp policy_settings "$TDIR/_l_copy.json")" 0
+run "skills source -> 0"          modules/config-guard.sh "$(ccp skills "$TDIR/_l_copy.json")" 0
+local_report() { printf '{"source":"local_settings","file_path":"%s"}' "$1" | bash -p "$H/modules/config-guard.sh" 2>&1; }
+rpt="$(local_report "$TDIR/_l_keys.json")"
+for needle in "SETTINGS TAMPER DETECTED" ".claude/settings.local.json was changed" \
+              "settings.local.json has hook entries naming baseline scripts: guardrails/command-guard.sh - " \
+              "Remove the reported entries from .claude/settings.local.json"; do
+  case "$rpt" in *"$needle"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard local report missing: $needle]" ;; esac
+done
+rpt="$(local_report "$TDIR/_l_env.json")"
+case "$rpt" in *"RISKY ENVIRONMENT VALUE"*".claude/settings.local.json sets"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard local env heading]" ;; esac
+# a name holding control characters is printed escaped, on one finding line
+rpt="$(local_report "$TDIR/_l_esc.json")"
+case "$rpt" in *$'\e'*) fail=$((fail + 1)); echo "  FAIL [config-guard local report printed a raw escape]" ;;
+  *'x\x1b[2J\ny.sh'*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard local report: escaped name missing]" ;; esac
+# a long name is cut at 200 characters, so the finding stays one bounded line
+rpt="$(local_report "$TDIR/_l_long.json")"
+line="$(printf '%s\n' "$rpt" | awk '/naming baseline scripts/ { print; exit }')"
+if [[ "$line" == *"aaa... - the installer"* ]] && [ "${#line}" -lt 450 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [config-guard local report: long name not capped (${#line} chars)]"; fi
+# many names: the first 20, then a count
+rpt="$(local_report "$TDIR/_l_many.json")"
+case "$rpt" in *"s19.sh, and 5 more - the installer"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard local report: names not capped at 20]" ;; esac
+rpt="$(local_report "$TDIR/_l_args.json")"
+case "$rpt" in *"naming baseline scripts: guardrails/command-guard.sh - "*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard local report: args not named]" ;; esac
+rpt="$(local_report "$TDIR/_l_own.json")"
+case "$rpt" in *"local settings change validated"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [config-guard local validated line]" ;; esac
+setcfg "c['enforcement']='warn'"
+run "local_settings tamper + warn -> 0" modules/config-guard.sh "$(ccp local_settings "$TDIR/_l_keys.json")" 0
+resetcfg
+run "local_settings, module disabled -> 0" modules/config-guard.sh "$(ccp local_settings "$TDIR/_l_keys.json")" 0
+setcfg "c['modules']['configGuard']['enabled']=True"
 for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
   run "risky env value $i -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_env$i.json")" 2
 done
@@ -804,6 +868,45 @@ for h in gbad:
 raise SystemExit(0 if rows_ok and exact_ok and not bad and not wbad and guards_ok and not gbad else 1)
 PY
 then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [wiring coupling: config-guard BASELINE_WIRING / GUARD_SCRIPTS vs settings.template.json / merge_settings, or _matcher_covers / _wired_at / _guard_entries copies]"; fi
+# Local-settings coupling: config-guard's (5) names baseline hook entries exactly as
+# lib/merge_settings.py's baseline_hook_names does (the script after the baseline path,
+# else the command), on one table of shapes.
+if "$PY" - "$SRC" <<'PY'
+import re, sys
+src = sys.argv[1]
+sys.dont_write_bytecode = True
+sys.path.insert(0, src + "/lib")
+import merge_settings as ms
+guard = open(src + "/hooks/modules/config-guard.sh", encoding="utf-8").read()
+ns = {"re": re}
+for const in ("_SCRIPT_AFTER_MARKER", "_SPACE"):
+    m = re.search(r"^" + const + r" = .*$", guard, re.M)
+    if m:
+        exec(m.group(0), ns)
+for fn in ("_named_script(command)", "_command_entries(obj)", "_entry_text(e)", "_baseline_named(hooks)"):
+    m = re.search(r"^def " + re.escape(fn) + r":\n(?:    .*\n)+", guard, re.M)
+    if m:
+        exec(m.group(0), ns)
+named = ns.get("_baseline_named")
+M = "/.claude/hooks/baseline/"
+CG = 'bash -p "${CLAUDE_PROJECT_DIR}' + M + 'guardrails/command-guard.sh"'
+def e(cmd, **k): return dict({"type": "command", "command": cmd}, **k)
+TABLE = [({"PreToolUse": [{"matcher": "Bash", "hooks": [e(CG, statusMessage="x")]}]}, ["guardrails/command-guard.sh"]),
+         ({"Stop": [{"hooks": [e("echo " + M)]}]}, ["echo " + M]),
+         ({"X": [{"hooks": [e("exit 0", x=e("bash " + M + "a.sh"))]}]}, ["a.sh"]),
+         ({"PreToolUse": [{"hooks": [e(CG), e("bash " + M + "x/" + M + "b.sh")]}]},
+          ["guardrails/command-guard.sh", "x/" + M + "b.sh"]),
+         ({"PreToolUse": [{"hooks": [e("bash ./scripts/own.sh"), {"type": "http", "command": CG}, e(5)]}]}, []),
+         ({"PreToolUse": [{"hooks": [e("bash", args=["-p", M + "c.sh"]), e("bash", args=[1, None])]}]}, ["c.sh"]),
+         ({"PreToolUse": [{"hooks": [e("bash", args="-p " + M + "d.sh")]}]}, []),
+         (None, []), ([], []), ("x", []), ({"PreToolUse": "x"}, [])]
+bad = [h for h, want in TABLE
+       if named is None or (named(h), ms.baseline_hook_names({"hooks": h})) != (want, want)]
+for h in bad:
+    print("  baseline hook naming disagrees with the table:", ascii(h)[:160])
+raise SystemExit(0 if named is not None and not bad else 1)
+PY
+then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [local-settings coupling: config-guard _baseline_named vs merge_settings baseline_hook_names]"; fi
 resetcfg
 
 echo "== baseline version stamp + config-keep contract (Q3) =="
