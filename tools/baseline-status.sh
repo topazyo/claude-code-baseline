@@ -81,7 +81,10 @@ SRC_MIN="$(read_src_key minClaudeCodeVersion)"
 # template's event in a group whose matcher covers the template's, with no `if`
 # ("<script> not under <event> [<matcher>]"), a hook entry in settings.local.json that
 # names a baseline script in its command or args ("settings.local.json runs <script>";
-# the installer never writes one there), and a disableAllHooks in either file.
+# the installer never writes one there), a file under .claude/agents/ or .claude/skills/
+# that names the baseline hook directory ("<path> names the baseline hook directory",
+# or "<path> unreadable"; scope-guard refuses writing one), and a disableAllHooks in
+# either file.
 # The env list is the installer's; the launch rules follow config-guard's, applied to
 # every entry naming a baseline path (both through lib/merge_settings.py). This tool
 # runs outside Claude Code, so unlike config-guard it is not started by the shell
@@ -137,6 +140,53 @@ for fname in ("settings.json", "settings.local.json"):
                    for s, ev, m in ms.baseline_wiring_problems(data, wiring) if s not in unlaunched}
     else:   # the installer never writes a baseline hook here: config-guard (5)
         launch |= {name(fname + " runs " + s) for s in ms.baseline_hook_names(data)}
+# subagent and skill definitions in the repo (.claude/agents/, .claude/skills/) that
+# name the baseline hook directory, which scope-guard refuses to write. Regular files
+# only (a FIFO would block the read); each is read in full, in chunks. A file or
+# folder that cannot be read is reported, not skipped. Symlinked folders are followed,
+# each real folder once; each of the two folders is scanned up to 5000 files and 256 MiB,
+# beyond which it is reported as not fully scanned.
+import stat
+marker = ms.BASELINE_MARKER.encode()
+def names_marker(path):
+    tail = b""
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                return False
+            if marker in tail + chunk:
+                return True
+            tail = chunk[-(len(marker) - 1):]
+def rel(path):
+    return os.path.relpath(path, repo).replace(os.sep, "/")
+for sub in ("agents", "skills"):
+    walk_errors, seen_dirs = [], set()
+    files_left, bytes_left = 5000, 256 << 20
+    for dirpath, dirs, files in os.walk(os.path.join(repo, ".claude", sub), onerror=walk_errors.append,
+                                        followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in seen_dirs:
+            dirs[:] = []
+            continue
+        seen_dirs.add(real)
+        if files_left <= 0 or bytes_left <= 0:
+            launch.add(name(".claude/" + sub + " scan incomplete"))
+            break
+        for fn in files:
+            path = os.path.join(dirpath, fn)
+            try:
+                st = os.stat(path)
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                files_left, bytes_left = files_left - 1, bytes_left - st.st_size
+                if names_marker(path):
+                    launch.add(name(rel(path) + " names the baseline hook directory"))
+            except OSError:
+                launch.add(name(rel(path) + " unreadable"))
+    for err in walk_errors:
+        if getattr(err, "filename", None) and os.path.exists(err.filename):
+            launch.add(name(rel(err.filename) + " unreadable"))
 print(",".join(env) + "\x1f" + ",".join(sorted(launch)))
 PY
 }
@@ -244,7 +294,7 @@ if [[ $STRICT -eq 1 && $any_drift -eq 1 ]]; then
   exit 1
 fi
 if [[ $STRICT -eq 1 && $any_settings -eq 1 ]]; then
-  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks)" >&2
+  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks), or keep a subagent or skill definition naming the baseline hook directory" >&2
   exit 1
 fi
 exit 0

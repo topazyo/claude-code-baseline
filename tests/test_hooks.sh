@@ -117,6 +117,40 @@ run "out-of-scope -> 2"      modules/scope-guard.sh "$(write_payload "$WT/src/ot
 run "in-scope -> 0"          modules/scope-guard.sh "$(write_payload "src/in-scope.py")" 0
 run "unparseable -> 2"       modules/scope-guard.sh '{ not json' 2
 resetcfg
+# Subagent and skill definitions: a Write or Edit whose new text names the baseline hook
+# directory is refused there, with scopeGuard off (the default) or on; elsewhere, or
+# without that text, it is not. def_payload <tool> <file_path> <text key> <text>
+def_payload() { printf '{"tool_name":"%s","tool_input":{"file_path":"%s","%s":"%s"}}' "$1" "$2" "$3" "$4"; }
+DEFTXT="See /.claude/hooks/baseline/README for the baseline hooks."
+run "agent file naming the hook dir -> 2"        modules/scope-guard.sh "$(def_payload Write "$WT/.claude/agents/helper.md" content "$DEFTXT")" 2
+run "agent file, other text -> 0"                modules/scope-guard.sh "$(def_payload Write "$WT/.claude/agents/helper.md" content "A helper agent.")" 0
+run "skill file via Edit new_string -> 2"        modules/scope-guard.sh "$(def_payload Edit "$WT/.claude/skills/x/SKILL.md" new_string "$DEFTXT")" 2
+run "skill file, only old_string names it -> 0"  modules/scope-guard.sh "$(def_payload Edit "$WT/.claude/skills/x/SKILL.md" old_string "$DEFTXT")" 0
+run "windows path, mixed case -> 2"              modules/scope-guard.sh "$(def_payload Write 'C:\\repo\\.Claude\\Agents\\h.md' content "$DEFTXT")" 2
+run "relative agent path -> 2"                   modules/scope-guard.sh "$(def_payload Write ".claude/agents/h.md" content "$DEFTXT")" 2
+run "same text in a source file -> 0"            modules/scope-guard.sh "$(def_payload Write "$WT/src/app.py" content "$DEFTXT")" 0
+run "agent path with ./ -> 2"                    modules/scope-guard.sh "$(def_payload Write ".claude/./agents/h.md" content "$DEFTXT")" 2
+run "agent path with // -> 2"                    modules/scope-guard.sh "$(def_payload Write ".claude//agents/h.md" content "$DEFTXT")" 2
+run "agent path with ../ -> 2"                   modules/scope-guard.sh "$(def_payload Write ".claude/x/../agents/h.md" content "$DEFTXT")" 2
+run "Edit with old and new text naming it -> 2"  modules/scope-guard.sh "$(printf '{"tool_name":"Edit","tool_input":{"file_path":".claude/agents/h.md","old_string":"%s","new_string":"%s"}}' "$DEFTXT" "$DEFTXT")" 2
+run "unparseable payload naming it -> 2"         modules/scope-guard.sh '{"tool_name":"Write","tool_input":{"file_path":".claude/agents/h.md","content":"/.claude/hooks/baseline/x' 2
+run "unparseable payload, module off -> 0"       modules/scope-guard.sh '{ not json' 0
+run "payload the prime cannot encode, naming it -> 2" modules/scope-guard.sh "$(printf '{"tool_name":"Write","tool_input":{"file_path":".claude/agents/h.md","content":"/.claude/hooks/baseline/x \\%s"}}' ud800)" 2
+setcfg "c['failClosed']=False"
+run "unparseable payload naming it, failClosed false -> 0" modules/scope-guard.sh '{"tool_name":"Write","tool_input":{"file_path":".claude/agents/h.md","content":"/.claude/hooks/baseline/x' 0
+resetcfg
+run "an agents folder elsewhere -> 0"            modules/scope-guard.sh "$(def_payload Write "$WT/docs/agents/h.md" content "$DEFTXT")" 0
+run "agents/ deeper below .claude/ -> 0"         modules/scope-guard.sh "$(def_payload Write "$WT/.claude/worktrees/w/src/agents/a.py" content "$DEFTXT")" 0
+setcfg "c['modules']['scopeGuard']['enabled']=True"
+out="$(def_payload Write "$WT/.claude/agents/helper.md" content "$DEFTXT" | bash "$H/modules/scope-guard.sh" 2>&1)"; rc=$?
+case "$rc:$out" in 2:*"[scope-guard] REFUSED"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [scope-guard definition check, module on: rc=$rc]" ;; esac
+setcfg "c['enforcement']='warn'"
+run "agent file naming the hook dir, warn -> 0"  modules/scope-guard.sh "$(def_payload Write "$WT/.claude/agents/helper.md" content "$DEFTXT")" 0
+out="$(def_payload Write "$WT/.claude/agents/helper.md" content "$DEFTXT" | bash "$H/modules/scope-guard.sh" 2>&1)"
+case "$out" in *"[scope-guard] REFUSED"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [scope-guard definition check silent under warn]" ;; esac
+# ...and under warn the scope check after it still runs (the file is outside the scope)
+case "$out" in *"NOT in declared scope"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [scope-guard scope warning lost after the definition check under warn]" ;; esac
+resetcfg
 
 echo "== fix-tags (PostToolUse) =="
 printf 'x = 1\n' > "$WT/app.py"; git add app.py; git commit -qm add </dev/null
@@ -337,6 +371,10 @@ for d in "$BROKEN" "$NOSITE" "$NOSTDLIB"; do
     guardrails/command-guard.sh "$(bash_payload 'rm -rf /')" 2 "CONTROL COULD NOT RUN"
   run_env "post-write, interpreter that does not run ($(basename "$d"))" "PATH=$d:$PATH" \
     dispatcher/post-write.sh "$(write_payload "$WT/docker-compose.yml")" 2 "Python unavailable"
+  run_env "scope-guard definition check, interpreter that does not run ($(basename "$d"))" "PATH=$d:$PATH" \
+    modules/scope-guard.sh "$(def_payload Write ".claude/agents/h.md" content "$DEFTXT")" 2 "CONTROL COULD NOT RUN"
+  def_payload Write "$WT/src/x.py" content "x = 1" | env "PATH=$d:$PATH" bash "$H/modules/scope-guard.sh" >/dev/null 2>&1; rc=$?
+  if [ "$rc" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [scope-guard, ordinary write, interpreter that does not run ($(basename "$d"))] rc=$rc"; fi
 done
 # ...but a WORKING interpreter whose prime script fails (here on a lone-surrogate escape
 # it cannot re-encode) is a prime failure, not a missing interpreter: the per-call checks
