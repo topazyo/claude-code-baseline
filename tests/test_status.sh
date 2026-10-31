@@ -148,6 +148,39 @@ printf '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "comman
 got="$(findings)"
 [ "$got" = "[] []" ] && ok || no "a repo's own hook in settings.local.json should not be reported: $got"
 rm -f "$A/.claude/settings.local.json"
+# A subagent or skill definition that names the baseline hook directory is reported and
+# fails --strict; once removed, nothing is.
+mkdir -p "$A/.claude/agents"
+printf -- '---\nname: helper\ndescription: A helper.\n---\nSee /.claude/hooks/baseline/README.\n' > "$A/.claude/agents/helper.md"
+got="$(findings)"
+[ "$got" = "[] ['.claude/agents/helper.md names the baseline hook directory']" ] && ok || no "agent file naming the hook directory not reported: $got"
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on an agent file naming the hook directory"; else ok; fi
+printf -- '---\nname: helper\ndescription: A helper.\n---\nHelps.\n' > "$A/.claude/agents/helper.md"
+got="$(findings)"
+[ "$got" = "[] []" ] && ok || no "an ordinary agent file should not be reported: $got"
+mkdir -p "$A/.claude/skills/x"
+printf -- '---\nname: x\ndescription: A skill.\n---\nSee /.claude/hooks/baseline/README.\n' > "$A/.claude/skills/x/SKILL.md"
+got="$(findings)"
+[ "$got" = "[] ['.claude/skills/x/SKILL.md names the baseline hook directory']" ] && ok || no "skill file naming the hook directory not reported: $got"
+rm -rf "$A/.claude/skills"
+# a symlinked skill folder is followed, and a link back up is not walked twice (only where
+# ln -s makes a real symlink: Linux and macOS)
+case "$(uname -s)" in Linux|Darwin)
+  mkdir -p "$TMP/shared-skill" "$A/.claude/skills"
+  printf -- '---\nname: s\ndescription: A skill.\n---\nSee /.claude/hooks/baseline/README.\n' > "$TMP/shared-skill/SKILL.md"
+  ln -s "$TMP/shared-skill" "$A/.claude/skills/shared"
+  ln -s .. "$A/.claude/skills/loop"
+  got="$(findings)"
+  [ "$got" = "[] ['.claude/skills/shared/SKILL.md names the baseline hook directory']" ] && ok || no "symlinked skill folder not followed once: $got"
+  rm -rf "$A/.claude/skills" "$TMP/shared-skill" ;;
+esac
+# a FIFO is not read (it would block). Exercised on Linux and macOS: Git Bash's mkfifo
+# makes a file native Python sees as a regular .lnk file, so there it is only listed.
+if mkfifo "$A/.claude/agents/pipe" 2>/dev/null; then
+  got="$(findings)"
+  [ "$got" = "[] []" ] && ok || no "a FIFO in .claude/agents should be skipped: $got"
+fi
+rm -rf "$A/.claude/agents"
 # A PreToolUse guard entry without onFailure "block" is reported, as config-guard reports
 # it, and fails --strict.
 rewire 's["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"] = "continue"'

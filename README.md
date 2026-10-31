@@ -114,7 +114,7 @@ Two limits, stated plainly:
 |--------|------|---------|
 | `securityDefaults` | PostToolUse | Verify immutable infra defaults haven't drifted, from a **declarative rules file** (see below). Reports to Claude after the write; cannot undo it. |
 | `fixTags` | PostToolUse | Require a traceability tag (e.g. `# FIX: TICKET-123`) on every added line. Configurable marker, file types, and an optional env gate. Reports to Claude after the write; cannot undo it. |
-| `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. |
+| `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. Whether or not `scopeGuard` is enabled, `scope-guard.sh` also refuses a Write or Edit that puts the baseline hook directory's path (`/.claude/hooks/baseline/`) into a subagent or skill definition under `.claude/agents/` or `.claude/skills/`; that check has no switch and follows `enforcement`. |
 | `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` (baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, `disableAllHooks` or a risky environment value set) and of `.claude/settings.local.json` (`disableAllHooks`, a risky environment value, or a hook entry naming a baseline script, which the installer never writes there). **Off by default; detection after the change, not prevention; in-session only; watches those two files only** — never `baseline.config.json` and never the hook scripts. A deleted `settings.local.json` is normal; an unreadable one is treated as tampered. |
 | `runTests` | PostToolUse | Run the right test/lint per file type (pytest, shellcheck/bats, yamllint/actionlint). Missing tools are skipped. Reports to Claude after the write; cannot undo it. |
 | `trackerReminder` | Stop | Remind to update a tracking doc when matching commits exist this session. Never blocks. |
@@ -172,7 +172,9 @@ limit — not a bug. Read it before you rely on any of the above.
   (pyenv, asdf, mise) picks from a project file such as `.python-version` is only
   as trustworthy as that directory. One that is found but does not run makes
   command-guard and the post-write checks fail closed; the opt-in scope-guard and
-  config-guard go inert, as they do with no Python at all. The opt-in `autoFormat`
+  config-guard go inert, as they do with no Python at all, except that scope-guard
+  still refuses a Write or Edit whose payload names the baseline hook
+  directory. The opt-in `autoFormat`
   and `runTests` deliberately run the repo's own formatter and tests without this
   isolation.
 - **The hook environment is trusted up to the shell that runs the hook.** Every

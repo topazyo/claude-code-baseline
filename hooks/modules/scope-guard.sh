@@ -11,6 +11,10 @@
 #
 # Posture: under "block", an out-of-scope edit exits 2 (blocks the tool);
 # under "warn", it prints guidance and exits 0.
+#
+# Whether or not scopeGuard is enabled, it also refuses a Write or Edit that puts the
+# baseline hook directory's path into a subagent or skill definition (.claude/agents/,
+# .claude/skills/); see below.
 
 set -uo pipefail
 
@@ -31,6 +35,39 @@ bcl_read_payload PAYLOAD || read_rc=1
 
 # ONE interpreter for the config, the payload state and the extracted file_path.
 bcl_prime "$PAYLOAD"
+
+# Self-protection, whatever scopeGuard.enabled says: like the deny-list it has no
+# switch, and it follows the posture. A Write or Edit to a subagent or skill
+# definition (under .claude/agents/ or .claude/skills/, read without case, with \ as
+# /, and // and ./ collapsed; a ../ below .claude/ also counts) whose new text
+# (content or new_string) names the baseline hook directory is refused. It judges the
+# path as written and the edit's new text; baseline-status reads the files on disk.
+# Only a payload whose raw text names that directory is examined, and if it cannot be
+# parsed (no working Python, invalid JSON, or the payload prime failed) it fails
+# closed. A payload that cannot be read at all is empty and goes to the handling
+# below. Under warn, the scope check below still runs.
+if [[ $read_rc -eq 0 && "$PAYLOAD" == *"/.claude/hooks/baseline/"* ]]; then
+  if [[ "${_BCL_PRIME_STATE:-}" != ok ]] || bcl_payload_unparseable "$PAYLOAD"; then
+    echo "[scope-guard] CONTROL COULD NOT RUN — the edit names the baseline hook directory, but its payload could not be parsed (no working Python, invalid JSON, or the payload check failed); it was NOT checked." >&2
+    bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc
+  else
+    DEF_TARGET="$(bcl_extract_value "$PAYLOAD" file_path)"
+    def_path="/${DEF_TARGET//\\//}"
+    while [[ "$def_path" == *//* ]]; do def_path="${def_path//\/\///}"; done
+    while [[ "$def_path" == */./* ]]; do def_path="${def_path//\/.\///}"; done
+    def_hit=0
+    shopt -s nocasematch   # bash 3.1+; ${x,,} needs bash 4
+    case "$def_path" in */.claude/agents/*|*/.claude/skills/*|*/.claude/*/../*) def_hit=1 ;; esac
+    shopt -u nocasematch
+    if [[ $def_hit -eq 1 ]]; then
+      DEF_TEXT="$(bcl_extract_value "$PAYLOAD" content)$(bcl_extract_value "$PAYLOAD" new_string)"
+      if [[ "$DEF_TEXT" == *"/.claude/hooks/baseline/"* ]]; then
+        echo "[scope-guard] REFUSED — $DEF_TARGET is a subagent or skill definition, and the edit puts the baseline hook directory's path in it." >&2
+        bcl_violation_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc
+      fi
+    fi
+  fi
+fi
 
 bcl_module_enabled scopeGuard || exit 0
 
