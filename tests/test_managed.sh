@@ -41,6 +41,19 @@ EXPECTED_HOOKS = {
     "PreToolUse":  ("Bash|PowerShell", "guardrails/command-guard.sh"),
     "PostToolUse": ("Write|Edit", "dispatcher/post-write.sh"),
 }
+# ...and each is wired as settings.template.json wires that script (lib/merge_settings.py
+# reads the template's rows), so a template matcher or event change fails here until the
+# managed profiles follow it.
+sys.dont_write_bytecode = True   # importing lib/merge_settings.py must not write into the tree
+sys.path.insert(0, str(src / "lib"))
+import merge_settings as ms
+tmpl_rows = set(ms.baseline_wiring(tmpl)) if tmpl else set()
+want_rows = {(script, event, matcher) for event, (matcher, script) in EXPECTED_HOOKS.items()}
+for script in sorted({r[0] for r in want_rows}):
+    got = {r for r in tmpl_rows if r[0] == script}
+    if got != {r for r in want_rows if r[0] == script}:
+        fails.append(f"managed wiring of {script} is not how settings.template.json wires it: template {sorted(got, key=str)}")
+mins = ms.baseline_timeouts(tmpl) if tmpl else {}
 
 # Each repo profile is a TEMPLATE: it must still carry the literal placeholder so a
 # future edit that hardcodes a path (and would ship a machine-specific file) is caught.
@@ -69,16 +82,25 @@ for name, prof in [("balanced", bal), ("strict", strict)]:
         # `|| true` would discard the verdict). -p: a plain bash runs an inherited
         # BASH_ENV file and imports exported functions before the hook.
         launches = re.compile(r'\Abash -p "' + re.escape("<BASELINE_PREFIX>/" + want_script) + r'"\Z')
+        # ...with the keys beside it that config-guard requires: no args, a bash shell, not
+        # async, at least the template's timeout (2c), and no `if` (2d).
+        want_timeout = mins.get(want_script)
+        if not ms._is_number(want_timeout):
+            fails.append(f"{name}: settings.template.json gives {want_script} no numeric timeout to compare with")
+            continue
         for g in groups:
             if not isinstance(g, dict) or g.get("matcher") != want_matcher:
                 continue
             for h in (g.get("hooks") or []):
+                t = h.get("timeout") if isinstance(h, dict) else None
                 if (isinstance(h, dict) and h.get("type") == "command"
                         and isinstance(h.get("command"), str) and launches.search(h["command"])
-                        and isinstance(h.get("timeout"), int)):
+                        and "args" not in h and h.get("shell") in (None, "bash")
+                        and not h.get("async") and not h.get("asyncRewake") and "if" not in h
+                        and ms._is_number(t) and t >= want_timeout):
                     ok = True
         if not ok:
-            fails.append(f"{name}: hooks.{event} has no {{type:command,timeout}} entry with matcher '{want_matcher}' invoking {want_script}")
+            fails.append(f"{name}: hooks.{event} has no entry with matcher '{want_matcher}' running {want_script} as the template does (type command, bash -p, a bash shell, no args/async/if, timeout >= {want_timeout})")
 
 # strict profile must carry the lockdown floor
 if strict is not None:
