@@ -460,7 +460,8 @@ def _wired_at(hooks: dict, script: str, event: str, wired: str | None) -> bool:
         if not isinstance(entries, list) or not _matcher_covers(grp, wired):
             continue
         if any(isinstance(h, dict) and h.get("type") == "command" and "if" not in h
-               and isinstance(h.get("command"), str) and runs.search(h["command"])
+               and isinstance(h.get("command"), str) and script in h["command"]
+               and runs.search(h["command"])
                for h in entries):
             return True
     return False
