@@ -164,12 +164,13 @@ got="$(findings)"
 [ "$got" = "[] ['.claude/skills/x/SKILL.md names the baseline hook directory']" ] && ok || no "skill file naming the hook directory not reported: $got"
 rm -rf "$A/.claude/skills"
 # a symlinked skill folder is followed, and a link back up is not walked twice (only where
-# ln -s makes a real symlink: Linux and macOS)
+# ln -s makes a real symlink: Linux and macOS). A relative target is read from the link's
+# own folder, so nest/up -> .. is .claude/skills.
 case "$(uname -s)" in Linux|Darwin)
-  mkdir -p "$TMP/shared-skill" "$A/.claude/skills"
+  mkdir -p "$TMP/shared-skill" "$A/.claude/skills/nest"
   printf -- '---\nname: s\ndescription: A skill.\n---\nSee /.claude/hooks/baseline/README.\n' > "$TMP/shared-skill/SKILL.md"
   ln -s "$TMP/shared-skill" "$A/.claude/skills/shared"
-  ln -s .. "$A/.claude/skills/loop"
+  ln -s .. "$A/.claude/skills/nest/up"
   got="$(findings)"
   [ "$got" = "[] ['.claude/skills/shared/SKILL.md names the baseline hook directory']" ] && ok || no "symlinked skill folder not followed once: $got"
   rm -rf "$A/.claude/skills" "$TMP/shared-skill" ;;
