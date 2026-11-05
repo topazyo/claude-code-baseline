@@ -152,6 +152,120 @@ case "$out" in *"[scope-guard] REFUSED"*) pass=$((pass + 1)) ;; *) fail=$((fail 
 case "$out" in *"NOT in declared scope"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [scope-guard scope warning lost after the definition check under warn]" ;; esac
 resetcfg
 
+echo "== an allowed action's hook messages are shown (warn / failClosed:false) =="
+# Claude Code shows no one the stderr of a hook that exits 0. On exit 0 the wired hooks
+# must put exactly ONE JSON object on stdout: systemMessage (the user) and
+# hookSpecificOutput.additionalContext (Claude), same text. On exit 2 stdout stays empty.
+# run_out <desc> <hook> <want-rc> [env...] < payload on stdin: sets OUT and ERR apart.
+run_out() {
+  local desc="$1" hook="$2" want="$3" got; shift 3
+  OUT="$(env "$@" bash "$H/$hook" 2>"$TMP/_err")"; got=$?
+  ERR="$(cat "$TMP/_err")"
+  if [ "$got" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] want=$want got=$got"; fi
+}
+# notice_ok <desc> <event> <python expr over m (the message)>: OUT is one JSON object.
+notice_ok() {
+  if printf '%s' "$OUT" | "$PY" -c '
+import json, sys
+d = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+h = d["hookSpecificOutput"]
+assert set(d) == {"systemMessage", "hookSpecificOutput"}, sorted(d)
+assert h["hookEventName"] == sys.argv[1], h
+assert h["additionalContext"] == d["systemMessage"]
+m = d["systemMessage"]
+assert eval(sys.argv[2]), m
+' "$2" "$3" 2>"$TMP/_nerr"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1: $(tail -1 "$TMP/_nerr") | stdout: $(printf '%s' "$OUT" | head -c 200)]"; fi
+}
+quiet_ok() { if [ -z "$OUT" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1: stdout not empty: $(printf '%s' "$OUT" | head -c 200)]"; fi; }
+err_has() { case "$ERR" in *"$2"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [$1: stderr lacks '$2']" ;; esac; }
+
+# command-guard
+setcfg "c['enforcement']='warn'"
+run_out "command-guard warn hit -> 0" guardrails/command-guard.sh 0 <<< "$(bash_payload 'rm -rf /')"
+notice_ok "command-guard warn hit is shown" PreToolUse '"Would have been blocked by Claude Code baseline command-guard" in m and "enforcement: warn" in m'
+err_has "command-guard warn hit still on stderr" "Would have been blocked by Claude Code baseline command-guard"
+run_out "command-guard warn, clean command -> 0" guardrails/command-guard.sh 0 <<< "$(bash_payload 'ls -la')"
+quiet_ok "command-guard warn, clean command prints nothing"            # regression guard
+run_out "command-guard warn, unparseable -> 0" guardrails/command-guard.sh 0 <<< '{ not json'
+notice_ok "command-guard degraded under warn is shown" PreToolUse '"CONTROL COULD NOT RUN" in m'
+resetcfg
+run_out "command-guard block hit -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'rm -rf /')"
+quiet_ok "command-guard block hit prints nothing on stdout"           # regression guard
+err_has "command-guard block reason unchanged" "Blocked by Claude Code baseline command-guard"
+setcfg "c['failClosed']=False"
+run_out "command-guard failClosed:false, unparseable -> 0" guardrails/command-guard.sh 0 <<< '{ not json'
+notice_ok "command-guard failClosed:false degraded is shown" PreToolUse '"CONTROL COULD NOT RUN" in m and "enforcement: block, failClosed: false" in m'
+resetcfg
+
+# scope-guard: the definition refusal and the scope warning land in ONE object
+setcfg "c['modules']['scopeGuard']['enabled']=True"; setcfg "c['enforcement']='warn'"
+run_out "scope-guard warn, definition + out of scope -> 0" modules/scope-guard.sh 0 <<< "$(def_payload Write "$WT/.claude/agents/helper.md" content "$DEFTXT")"
+notice_ok "scope-guard warn shows both messages" PreToolUse '"[scope-guard] REFUSED" in m and "NOT in declared scope" in m'
+# JSON encoding: the scope file's first line is printed verbatim
+printf 'ISSUE-7 "q" \\ tab\tcr\rctl\001 \327\251\327\234\327\225\327\235\nsrc/in-scope.py\n' > "$WT/.claude/active-issue-scope.txt"
+run_out "scope-guard warn, awkward issue text -> 0" modules/scope-guard.sh 0 <<< "$(write_payload "$WT/src/other.py")"
+notice_ok "awkward text round-trips through JSON" PreToolUse '"ISSUE-7 \"q\" \\ tab\tcr\rctl\x01 שלום" in m'
+# Oversized: kept under Claude Code's 10,000-character cap, still one valid object
+"$PY" -c "open(r'$WT/.claude/active-issue-scope.txt','w').write('A' * 20000 + '\nsrc/in-scope.py\n')"
+run_out "scope-guard warn, oversized message -> 0" modules/scope-guard.sh 0 <<< "$(write_payload "$WT/src/other.py")"
+notice_ok "oversized message is truncated under the cap" PreToolUse 'len(m) < 10000 and "truncated" in m'
+# Multibyte, under a C locale, at both byte parities: one of the two cuts lands inside
+# a 2-byte character, and the object must still decode as strict UTF-8 (notice_ok does).
+for pad in "" "x"; do
+  "$PY" -c "open(r'$WT/.claude/active-issue-scope.txt','w',encoding='utf-8').write('$pad' + 'ש' * 9000 + '\nsrc/in-scope.py\n')"
+  run_out "scope-guard warn, oversized multibyte (pad '$pad') -> 0" modules/scope-guard.sh 0 LC_ALL=C <<< "$(write_payload "$WT/src/other.py")"
+  notice_ok "multibyte cut (pad '$pad') stays valid UTF-8 under the cap" PreToolUse 'len(m) < 10000 and "truncated" in m and "ש" in m'
+done
+printf 'src/in-scope.py\n' > "$WT/.claude/active-issue-scope.txt"
+resetcfg; setcfg "c['modules']['scopeGuard']['enabled']=True"
+run_out "scope-guard block, out of scope -> 2" modules/scope-guard.sh 2 <<< "$(write_payload "$WT/src/other.py")"
+quiet_ok "scope-guard block prints nothing on stdout"                 # regression guard
+resetcfg
+
+# dispatcher: a child's report under warn becomes the dispatcher's ONE object
+printf 'services:\n  app:\n    user: "0:0"\n' > "$WT/docker-compose.yml"; valid_rules
+setcfg "c['modules']['securityDefaults']['enabled']=True"; setcfg "c['enforcement']='warn'"
+run_out "post-write warn, security-defaults hit -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/docker-compose.yml")"
+notice_ok "post-write warn shows the child's report" PostToolUse '"REGRESSION BLOCKER" in m and "enforcement: warn" in m'
+resetcfg; setcfg "c['modules']['securityDefaults']['enabled']=True"
+run_out "post-write block, security-defaults hit -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/docker-compose.yml")"
+quiet_ok "post-write block prints nothing on stdout"                  # regression guard
+err_has "post-write block still passes the child's report on" "REGRESSION BLOCKER"
+# block + failClosed:false keeps child stderr in a file; an exit-2 report must still
+# reach Claude through stderr, whole, with nothing on stdout.
+setcfg "c['failClosed']=False"
+run_out "post-write block+failClosed:false, security-defaults hit -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/docker-compose.yml")"
+quiet_ok "post-write block+failClosed:false hit prints nothing on stdout"
+err_has "post-write block+failClosed:false passes the child's report on" "REGRESSION BLOCKER"
+err_has "post-write block+failClosed:false passes the report on whole" "Policy source:"
+"$PY" -c "import json;json.dump({'rules':[]},open(r'$RULES','w'))"
+run_out "post-write failClosed:false, empty rules -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/docker-compose.yml")"
+notice_ok "post-write failClosed:false degraded child is shown" PostToolUse '"failClosed: false" in m and "security-defaults" in m'
+valid_rules; printf 'services:\n  app:\n    user: "1000:1000"\n' > "$WT/docker-compose.yml"
+resetcfg; setcfg "c['enforcement']='warn'"
+run_out "post-write warn, nothing to report -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/notes.txt")"
+quiet_ok "post-write warn, nothing to report prints nothing"          # regression guard
+# A grandchild a module leaves running with the child's stderr must not hold the
+# dispatcher: run-tests calls a shellcheck stub that backgrounds a long sleep on stderr.
+SCBIN="$TMP/sc-bin"; mkdir -p "$SCBIN"
+printf '#!/usr/bin/env bash\nsleep 40 >&2 &\necho "stub shellcheck: issue" >&2\nexit 1\n' > "$SCBIN/shellcheck"; chmod +x "$SCBIN/shellcheck"
+printf 'echo hi\n' > "$WT/stub.sh"
+setcfg "c['modules']['runTests']['enabled']=True"
+t0=$(date +%s)
+run_out "post-write warn, run-tests fails with a lingering grandchild -> 0" dispatcher/post-write.sh 0 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+t1=$(date +%s)
+if [ $((t1 - t0)) -lt 30 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a grandchild holding a child's stderr held the dispatcher for $((t1 - t0))s]"; fi
+notice_ok "run-tests failure under warn is shown, child stdout kept out" PostToolUse '"checks failed" in m'
+resetcfg; rm -f "$WT/stub.sh"
+
+# Inherited values cannot pre-seed a notice or aim the trap's cleanup at another file
+printf 'keep\n' > "$TMP/keepme"
+run_out "inherited notice, clean command -> 0" guardrails/command-guard.sh 0 _BCL_NOTICE=INJECTED _BCL_NOTICE_EVENT=PreToolUse <<< "$(bash_payload 'ls')"
+quiet_ok "an inherited _BCL_NOTICE is not printed"
+run_out "inherited _BCL_NOTICE_TMP, clean write -> 0" dispatcher/post-write.sh 0 "_BCL_NOTICE_TMP=$TMP/keepme" <<< "$(write_payload "$WT/notes.txt")"
+if [ -f "$TMP/keepme" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [an inherited _BCL_NOTICE_TMP made the dispatcher delete another file]"; fi
+rm -f "$TMP/keepme" "$TMP/_err" "$TMP/_nerr"
+
 echo "== fix-tags (PostToolUse) =="
 printf 'x = 1\n' > "$WT/app.py"; git add app.py; git commit -qm add </dev/null
 printf 'x = 1\ny = 2\n' > "$WT/app.py"   # untagged added line

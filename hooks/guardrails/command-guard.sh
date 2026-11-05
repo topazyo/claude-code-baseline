@@ -23,7 +23,9 @@
 # Blocking model (Claude Code PreToolUse protocol):
 #   exit 2  -> tool call is BLOCKED, stderr is fed back to the model
 #   exit 0  -> tool call proceeds
-# Under enforcement: "warn", a hit prints to stderr but still exits 0.
+# Under enforcement: "warn" (or failClosed: false for a control that could not run)
+# it exits 0 and the message is also printed as one JSON object on stdout
+# (systemMessage + additionalContext), the only channel Claude Code shows on exit 0.
 #
 # Extend the blocklist per-repo via baseline.config.json:
 #   "guardrails": { "commandGuard": { "enabled": true, "extraPatterns": ["foo", "bar"] } }
@@ -38,6 +40,8 @@ HERE="${BASH_SOURCE[0]%/*}"
 HERE="$(cd "$HERE" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
+# Before any exit, so even the earliest degraded exit 0 is shown (see common.sh).
+bcl_notice_event PreToolUse
 
 # Read stdin BEFORE the enable-gate, then prime once from what we read. The gate
 # needs the config, priming needs the payload, and each extra prime is a whole
@@ -60,7 +64,7 @@ bcl_guardrail_enabled commandGuard || exit 0
 # command ran uninspected. Distinct message from the unparseable case below so the
 # two causes stay diagnosable.
 if [[ $read_rc -ne 0 ]]; then
-  echo "[command-guard] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR; the command was NOT inspected." >&2
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR; the command was NOT inspected."
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 
@@ -74,14 +78,14 @@ fi
 # Written as an `if` so `set -e` doesn't swallow the non-zero return.
 PY="$(bcl_python)"
 if [[ -z "$PY" ]]; then
-  echo "[command-guard] CONTROL COULD NOT RUN — Python unavailable; the command was NOT inspected (blocklist + extraPatterns skipped)." >&2
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — Python unavailable; the command was NOT inspected (blocklist + extraPatterns skipped)."
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 
 # Payload present but unparseable -> we can't read the command, so we can't vet
 # it. Treat the same as no-Python: fail closed rather than allow uninspected.
 if bcl_payload_unparseable "$PAYLOAD"; then
-  echo "[command-guard] CONTROL COULD NOT RUN — tool payload unparseable; the command was NOT inspected." >&2
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — tool payload unparseable; the command was NOT inspected."
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 
@@ -93,7 +97,7 @@ fi
 # check the child ourselves before trusting its silence.
 MATCHER="$HERE/../lib/command_guard_match.py"
 if MATCHER_STATE="$(bcl_child_unusable "$MATCHER")"; then
-  echo "[command-guard] CONTROL COULD NOT RUN — matcher script $MATCHER_STATE; the command was NOT inspected." >&2
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — matcher script $MATCHER_STATE; the command was NOT inspected."
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 
@@ -112,12 +116,12 @@ match_rc=0
 REASON="$(printf '%s' "$PAYLOAD" | bcl_timeout 5 "$PY" -I -S -X utf8 "$MATCHER" "$(bcl_config_path)")" || match_rc=$?
 
 if [[ $match_rc -eq 124 ]]; then
-  echo "[command-guard] CONTROL COULD NOT RUN — matcher exceeded its 5s budget and was killed; the command was NOT fully inspected." >&2
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — matcher exceeded its 5s budget and was killed; the command was NOT fully inspected."
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 
 if [[ $match_rc -ne 0 ]]; then
-  echo "[command-guard] CONTROL COULD NOT RUN — matcher failed (rc=$match_rc); command was NOT inspected." >&2
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — matcher failed (rc=$match_rc); command was NOT inspected."
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 
@@ -129,13 +133,16 @@ fi
 REASON="${REASON//$'\r'/}"   # Windows Python print() emits CRLF; strip CR first.
 
 if [[ "$REASON" == "__MATCHER_ERROR__"* ]]; then
-  echo "[command-guard] CONTROL COULD NOT RUN — ${REASON#__MATCHER_ERROR__ }" >&2
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — ${REASON#__MATCHER_ERROR__ }"
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 
 if [[ -n "$REASON" ]]; then
-  printf 'Blocked by Claude Code baseline command-guard: %s\n' "$REASON" >&2
-  if [[ "$(bcl_posture)" == "block" ]]; then exit 2; fi
+  if [[ "$(bcl_posture)" == "block" ]]; then
+    printf 'Blocked by Claude Code baseline command-guard: %s\n' "$REASON" >&2
+    exit 2
+  fi
+  bcl_say "Would have been blocked by Claude Code baseline command-guard (enforcement: warn, so it was allowed): $REASON"
   exit 0
 fi
 

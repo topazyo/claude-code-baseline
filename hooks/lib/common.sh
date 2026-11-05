@@ -51,7 +51,7 @@ _BCL_SOURCED=([1]=1)
 # list of names, but compgen has to run inside a command substitution, and a fork
 # costs ~20ms under Git Bash on Windows — per prefix, on every one of the six
 # processes in a PostToolUse chain. This expansion forks nothing.
-for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@}; do unset -v "$_bcl_v"; done
+for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@} ${!_BCL_NOTICE@}; do unset -v "$_bcl_v"; done
 # BCL_READ_ERROR, _BCL_LOOKUP, _BCL_STDIN_TIMEOUT and _BCL_STDIN_MAX are reassigned
 # below; unsetting them first also drops the export an inherited copy carries, so it
 # is not handed on to every child process. A new global needs adding here too — but
@@ -84,6 +84,9 @@ _BCL_PL_LEN=-1          # length of the payload bcl_prime was given
 _BCL_PL_KEYS=(); _BCL_PL_VALS=(); _BCL_PL_PATHS=()
 _BCL_LOOKUP=""          # out-parameter of the two map lookups below
 BCL_READ_ERROR=""       # set by bcl_read_payload on failure
+_BCL_NOTICE=""          # lines bcl_say printed; surfaced on exit 0 (see bcl_notice_event)
+_BCL_NOTICE_EVENT=""    # hook event a wired script declared; "" = never emit
+_BCL_NOTICE_TMP=""      # dispatcher's child-stderr file; removed by the EXIT trap
 
 # --- python resolver --------------------------------------------------------
 # Git Bash on Windows often ships `python` but not `python3`; WSL ships both.
@@ -602,6 +605,103 @@ bcl_failclosed() { [[ "$(bcl_cfg failClosed true)" != "false" ]]; }
 bcl_failclosed_exit() {
   if bcl_failclosed && [[ "$(bcl_posture)" == "block" ]]; then return 2; fi
   return 0
+}
+
+# --- notices: show an ALLOWED action's hook messages ------------------------
+# Claude Code shows the stderr of a hook that exits 0 to no one: it goes to the debug
+# log. So under `enforcement: "warn"`, or `failClosed: false`, a violation or a
+# control that could not run used to be reported to nobody. On exit 0 the only
+# channel is ONE JSON object on stdout (hooks reference): `systemMessage` is shown to
+# the user, `hookSpecificOutput.additionalContext` is added to Claude's context
+# (PreToolUse and PostToolUse). ConfigChange discards both, so config-guard does not
+# opt in; its warn-mode report stays in the debug log (documented in README).
+#
+# bcl_say <line>...
+# Prints each argument as one line to stderr — byte-for-byte what `echo "$line" >&2`
+# printed, so every exit-2 path is unchanged — and remembers it. Use it for any
+# message a wired hook may print before exiting 0.
+bcl_say() {
+  local line
+  for line in "$@"; do
+    printf '%s\n' "$line" >&2
+    _BCL_NOTICE+="$line"$'\n'
+  done
+}
+
+# bcl_allows_with_message -> 0 when this config can let an action through while a hook
+# reports something: enforcement "warn", or failClosed false. Same readings as
+# bcl_posture / bcl_failclosed, but answered in this shell, with no fork, once primed:
+# the dispatcher asks on every edit, and the default posture must not pay for it.
+bcl_allows_with_message() {
+  local p=block fc=true
+  if _bcl_primed; then
+    if _bcl_cfg_lookup enforcement; then p="$_BCL_LOOKUP"; fi
+    if _bcl_cfg_lookup failClosed; then fc="$_BCL_LOOKUP"; fi
+  else
+    p="$(bcl_cfg enforcement block)"; fc="$(bcl_cfg failClosed true)"
+  fi
+  [[ "$p" == "warn" || "$fc" == "false" ]]
+}
+
+# bcl_notice_event <PreToolUse|PostToolUse>
+# Opt-in, once, by a WIRED script, straight after sourcing this file so that the
+# earliest degraded exits are covered too. Installs the EXIT trap that emits the
+# remembered lines. Dispatcher children and config-guard never call it, so they can
+# never put anything on stdout through this path.
+bcl_notice_event() {
+  _BCL_NOTICE_EVENT="$1"
+  trap _bcl_emit_notice EXIT
+}
+
+# _bcl_json_escape <text> -> _BCL_LOOKUP = <text> as JSON string contents (no quotes).
+# Pure bash: the "Python unavailable" path must be able to surface too. Replacement
+# strings are held in quoted variables so bash 5.2's patsub_replacement (`&` and `\`
+# in a replacement) cannot alter them. Bytes are passed through; invalid UTF-8 in a
+# repo-supplied message is the reader's to handle (likely replaced, possibly a parse
+# failure, which only means the debug log as before), never a different exit code.
+_bcl_json_escape() {
+  local s="$1" r ch hex
+  r='\\';  s=${s//\\/"$r"}
+  r='\"';  s=${s//\"/"$r"}
+  r='\n';  s=${s//$'\n'/"$r"}
+  r='\r';  s=${s//$'\r'/"$r"}
+  r='\t';  s=${s//$'\t'/"$r"}
+  for hex in 01 02 03 04 05 06 07 08 0b 0c 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f; do
+    printf -v ch "\\x$hex"
+    if [[ "$s" == *"$ch"* ]]; then r="\\u00$hex"; s=${s//"$ch"/"$r"}; fi
+  done
+  _BCL_LOOKUP="$s"
+}
+
+# _bcl_notice_cut <text> -> stdout: at most 8000 BYTES of <text>, never ending inside
+# a UTF-8 sequence. Claude Code caps systemMessage / additionalContext at 10,000
+# characters (longer text is moved to a file), so the cut keeps the notice inline.
+# Runs in a subshell (only for an oversized notice) so LC_ALL=C cannot leak.
+_bcl_notice_cut() {
+  local LC_ALL=C s="$1" n=0
+  s="${s:0:8000}"
+  while (( n < 3 )) && [[ "${s: -1}" == [$'\x80'-$'\xbf'] ]]; do s="${s%?}"; n=$((n + 1)); done
+  [[ "${s: -1}" == [$'\xc0'-$'\xff'] ]] && s="${s%?}"
+  printf '%s\n… (truncated; the full text is in the hook stderr, see claude --debug)' "$s"
+}
+
+# EXIT trap. Never changes the exit status: it does not call `exit`, and bash keeps the
+# status the script exited with when the trap returns. Emits only on exit 0 — on exit 2
+# Claude Code already shows the stderr, and stdout is ignored.
+_bcl_emit_notice() {
+  local rc=$?
+  set +eu
+  # The dispatcher's child-stderr file (bcl_notice_tmp); removed on every exit code.
+  if [[ -n "${_BCL_NOTICE_TMP:-}" ]]; then rm -f -- "$_BCL_NOTICE_TMP"; fi
+  (( rc == 0 )) || return 0
+  [[ -n "${_BCL_NOTICE:-}" && -n "${_BCL_NOTICE_EVENT:-}" ]] || return 0
+  local fc=true msg
+  bcl_failclosed || fc=false
+  msg="[baseline] This action was allowed (enforcement: $(bcl_posture), failClosed: $fc). Hook messages:"$'\n'"${_BCL_NOTICE%$'\n'}"
+  if (( ${#msg} > 8000 )); then msg="$(_bcl_notice_cut "$msg")"; fi
+  _bcl_json_escape "$msg"
+  printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' \
+    "$_BCL_LOOKUP" "$_BCL_NOTICE_EVENT" "$_BCL_LOOKUP"
 }
 
 # bcl_payload_unparseable <payload>
