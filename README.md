@@ -35,7 +35,16 @@ a tool call **before** the tool runs:
 | `ConfigChange` | configGuard | Detection after the fact, within the session. |
 | `Stop` | trackerReminder | Advisory text only. |
 
-`"enforcement": "warn"` downgrades every one of the above to a printed message.
+`"enforcement": "warn"` downgrades every one of the above to a warning: the action
+goes ahead, and the hook's report is shown to you and added to Claude's context.
+(Claude Code ignores what a hook writes to stderr when it exits 0, so under `warn`
+the PreToolUse hooks and the PostToolUse dispatcher also print the report as one
+JSON object on stdout — `systemMessage` for you, `additionalContext` for Claude.)
+The same applies to a control that could not run under `"failClosed": false`, and,
+in any posture, to the dispatcher's note that a formatter or auto-stage step ran out
+of time. Two exceptions: configGuard (Claude Code discards a ConfigChange hook's
+messages, so under `warn` its report reaches only the debug log, `claude --debug`)
+and trackerReminder, which is advisory in every posture.
 
 There is also `"failClosed": true`: when a control *cannot run* (no Python, an
 unparseable payload, a deleted or truncated matcher, a hook child that blew its
@@ -138,8 +147,8 @@ limit — not a bug. Read it before you rely on any of the above.
   and `.claude/baseline.config.json` are ordinary repo files. A developer — or
   the agent, through any subprocess the deny rules don't recognize — can edit or
   delete them. One config key (`commandGuard.enabled: false`, or
-  `"enforcement": "warn"`) turns every blocking control in the product into a
-  print statement for the rest of the session. **Only enterprise
+  `"enforcement": "warn"`) turns every blocking control in the product into an
+  advisory warning for the rest of the session. **Only enterprise
   [managed settings](managed/README.md) are non-overridable.**
 - **Deny rules bind tools, not the filesystem.** `Read()`/`Edit()` rules bind
   Claude's built-in file tools *and* the file commands Claude Code recognizes

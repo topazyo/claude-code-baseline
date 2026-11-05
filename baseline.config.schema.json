@@ -20,7 +20,7 @@
       "type": "string",
       "enum": ["block", "warn"],
       "default": "block",
-      "description": "Global posture. 'block': hooks fail the tool call on violation. 'warn': hooks advise but never fail. Note the event asymmetry: only PreToolUse hooks can fail a tool call. A PostToolUse hook exits after the write has already happened, so under 'block' it reports the violation to Claude rather than undoing it."
+      "description": "Global posture. 'block': hooks fail the tool call on violation. 'warn': hooks advise but never fail; the report is shown to the user (systemMessage) and to Claude (additionalContext), except configGuard's, which Claude Code discards for ConfigChange hooks. Note the event asymmetry: only PreToolUse hooks can fail a tool call. A PostToolUse hook exits after the write has already happened, so under 'block' it reports the violation to Claude rather than undoing it."
     },
     "failClosed": {
       "type": "boolean",

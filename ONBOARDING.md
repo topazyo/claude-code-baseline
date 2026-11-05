@@ -297,7 +297,9 @@ The baseline is split into two tiers, and one switch decides how strict it is:
   that fit your repo. (securityDefaults, fixTags, scopeGuard, configGuard, runTests,
   trackerReminder, autoStage.)
 - **`enforcement` posture** — one global setting: `"block"` (a violation fails the
-  action / feeds it back to Claude) or `"warn"` (advise only, never fail).
+  action / feeds it back to Claude) or `"warn"` (advise only, never fail: the
+  report is shown to you and to Claude, except configGuard's, which Claude Code
+  discards).
 
 > 💡 **Recommended ramp** (the industry "visibility-first, then enforce" pattern,
 > reconciled with our security floor): keep **both always-on guardrails on from
@@ -505,7 +507,10 @@ echo "exit=$?"     # expect: a block message on stderr, exit=2
 
 **Exercise 2 — Switch posture.** In `.claude/baseline.config.json` set
 `"enforcement": "warn"`, re-run Exercise 1, and note `exit=0` with the message
-still printed (advise, don't block). Set it back to `"block"`.
+still printed (advise, don't block). Under `warn` it also prints the message as one
+JSON object on stdout: that is how Claude Code shows it to you (`systemMessage`)
+and to Claude (`additionalContext`), since it ignores a hook's stderr on exit 0.
+Set it back to `"block"`.
 
 **Exercise 3 — Enable a module.** Turn on `trackerReminder`
 (`modules.trackerReminder.enabled = true`, set `commitGrep` to a commit-subject
