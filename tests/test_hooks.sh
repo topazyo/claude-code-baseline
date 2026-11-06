@@ -209,12 +209,20 @@ notice_ok "awkward text round-trips through JSON" PreToolUse '"ISSUE-7 \"q\" \\ 
 "$PY" -c "open(r'$WT/.claude/active-issue-scope.txt','w').write('A' * 20000 + '\nsrc/in-scope.py\n')"
 run_out "scope-guard warn, oversized message -> 0" modules/scope-guard.sh 0 <<< "$(write_payload "$WT/src/other.py")"
 notice_ok "oversized message is truncated under the cap" PreToolUse 'len(m) < 10000 and "truncated" in m'
-# Multibyte, under a C locale, at both byte parities: one of the two cuts lands inside
-# a 2-byte character, and the object must still decode as strict UTF-8 (notice_ok does).
-for pad in "" "x"; do
-  "$PY" -c "open(r'$WT/.claude/active-issue-scope.txt','w',encoding='utf-8').write('$pad' + 'ש' * 9000 + '\nsrc/in-scope.py\n')"
-  run_out "scope-guard warn, oversized multibyte (pad '$pad') -> 0" modules/scope-guard.sh 0 LC_ALL=C <<< "$(write_payload "$WT/src/other.py")"
-  notice_ok "multibyte cut (pad '$pad') stays valid UTF-8 under the cap" PreToolUse 'len(m) < 10000 and "truncated" in m and "ש" in m'
+# Multibyte, at both byte parities: one of the two cuts lands inside a 2-byte character,
+# and the object must still decode as strict UTF-8 (notice_ok does). Under a C locale
+# that proves the back-off; under a UTF-8 locale it proves _bcl_notice_cut's own
+# `local LC_ALL=C`: without it ${s:0:8000} takes 8000 CHARACTERS (~15,850 bytes here),
+# which the 10,000-character check cannot see, so the text before the suffix is measured
+# in bytes (the correct cut leaves 7998 or 7999, by parity). The UTF-8 case is only
+# meaningful if that locale exists: a missing one falls back to C and would pass anyway.
+if [ "$(env LC_ALL=C.UTF-8 bash -c 's=ש; printf %s "${#s}"' 2>/dev/null)" = 1 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [C.UTF-8 locale unavailable: the UTF-8 notice-cut case would prove nothing]"; fi
+for loc in C C.UTF-8; do
+  for pad in "" "x"; do
+    "$PY" -c "open(r'$WT/.claude/active-issue-scope.txt','w',encoding='utf-8').write('$pad' + 'ש' * 9000 + '\nsrc/in-scope.py\n')"
+    run_out "scope-guard warn, oversized multibyte ($loc, pad '$pad') -> 0" modules/scope-guard.sh 0 "LC_ALL=$loc" <<< "$(write_payload "$WT/src/other.py")"
+    notice_ok "multibyte cut ($loc, pad '$pad') stays valid UTF-8, 7990-8000 bytes before the suffix" PreToolUse 'len(m) < 10000 and "truncated" in m and "ש" in m and 7990 <= len(m.split("\n… (truncated")[0].encode("utf-8")) <= 8000'
+  done
 done
 printf 'src/in-scope.py\n' > "$WT/.claude/active-issue-scope.txt"
 resetcfg; setcfg "c['modules']['scopeGuard']['enabled']=True"
@@ -380,7 +388,7 @@ sysmsg_ok "oversized reminder is truncated under the cap" 'len(m) < 10000 and "t
 for pad in "" "x"; do
   setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-', tracker='$pad' + '\\u05e9' * 9000)"
   run_out "tracker-reminder, oversized multibyte (pad '$pad') -> 0" modules/tracker-reminder.sh 0 LC_ALL=C <<< '{}'
-  sysmsg_ok "multibyte cut (pad '$pad') stays valid UTF-8 under the cap" 'len(m) < 10000 and "truncated" in m and "ש" in m'
+  sysmsg_ok "multibyte cut (pad '$pad') stays valid UTF-8, 7990-8000 bytes before the suffix" 'len(m) < 10000 and "truncated" in m and "ש" in m and 7990 <= len(m.split("\n… (truncated")[0].encode("utf-8")) <= 8000'
 done
 # Nothing to remind about: stdout stays empty (regression guards)
 setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-NONE', tracker='CHANGELOG.md')"
