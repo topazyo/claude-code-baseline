@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 149
+FP_FLOOR = 150
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -473,10 +473,13 @@ CASES = [
     ("winpath fp trailing-backslash path then another command", 'echo "C:\\dir\\" && git status', A, ()),
     # Documented limit (module docstring): read as the shell reads it, a long run of
     # lines ending in a path's backslash is one continuation chain, too long to
-    # inspect, so it blocks. This pins where that false positive sits.
+    # inspect, so it blocks. These two rows bracket where that false positive starts.
     ("winpath limit long run of trailing-backslash path lines blocks",
      "gh pr create --title t --body \"$(cat <<'EOF'\n"
      + "- default dir is C:\\Users\\me\\proj\\\n" * 100 + "EOF\n)\"", B, ()),
+    ("winpath fp shorter run of trailing-backslash path lines",
+     "gh pr create --title t --body \"$(cat <<'EOF'\n"
+     + "- default dir is C:\\Users\\me\\proj\\\n" * 60 + "EOF\n)\"", A, ()),
 
     # --- A6: package installs past option values; more install spellings ---
     ("a6 yarn install", "yarn install", B, ()),
