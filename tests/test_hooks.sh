@@ -1298,7 +1298,7 @@ cp "$CFG" "$WT/.claude/_precontract.json"
 timeout -k 5 120 bash "$SRC/install.sh" --target "$WT" >/dev/null 2>&1 </dev/null
 if cmp -s "$CFG" "$WT/.claude/_precontract.json"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install.sh re-run clobbered an existing baseline.config.json]"; fi
 # Marker freshness: the installed VERSION equals the source hooks/VERSION after a re-run
-# (install.sh:107 cp -R recopies the hook subtree wholesale, so the marker is always truthful).
+# (install.sh replaces the whole .claude/hooks/baseline/ tree, so the marker is always truthful).
 srcver="$(tr -d '\r\n' < "$SRC/hooks/VERSION" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 instver="$(tr -d '\r\n' < "$WT/.claude/hooks/baseline/VERSION" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
 if [ -n "$srcver" ] && [ "$srcver" = "$instver" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [installed VERSION '$instver' != source '$srcver']"; fi
@@ -1408,6 +1408,112 @@ if [ "$rc" = 0 ] && printf '%s' "$evout" | grep -qF "WARNING: settings.json env 
    && [ "$evenv" = '{"BASH_ENV": "/tmp/startup.sh", "NODE_ENV": "production"}' ]; then
   pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install env warning: rc=$rc env=$evenv]"; fi
 
+echo "== installer: dry run validates, backups only on change, tree replaced (B3-B5) =="
+# inst <dir> [args...] -> IOUT (stdout+stderr), IRC
+inst() { local d="$1"; shift; IOUT="$(timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$d")" "$@" 2>&1 </dev/null)"; IRC=$?; }
+nbak() { local n=0 f; for f in "$1"/.claude/settings.json.bak.*; do [ -e "$f" ] && n=$((n + 1)); done; echo "$n"; }
+ok_if() { if eval "$2"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1]"; fi; }
+PAST='^  (copied|wrote|backed up|merged|created|refreshed|replaced|stamped|added|enabled|removing) '
+# B3: a dry run merges too, so a settings.json the real run rejects fails it, and it
+# writes nothing (no hooks, no backup, no temp file under .claude).
+IB="$TMP/inst-broken"; mkdir -p "$IB/.claude"; ( cd "$IB" && git init -q )
+printf '{"model": "x",}\n' > "$IB/.claude/settings.json"; cp "$IB/.claude/settings.json" "$TMP/inst-broken.orig"
+inst "$IB" --dry-run
+ok_if "dry run on a settings.json the merge rejects exits 1 (rc=$IRC)" '[ "$IRC" = 1 ]'
+ok_if "dry run names the real run's stop" 'printf "%s" "$IOUT" | grep -qF "DRY RUN: the real run would stop here"'
+ok_if "dry run on a broken settings.json writes nothing" 'cmp -s "$IB/.claude/settings.json" "$TMP/inst-broken.orig" && [ "$(nbak "$IB")" = 0 ] && [ ! -e "$IB/.claude/hooks" ] && [ -z "$(ls -A "$IB/.claude" | grep -v "^settings.json$")" ]'
+# ...and its env warning shows in a dry run (the merge runs), with nothing written.
+IE="$TMP/inst-env"; mkdir -p "$IE/.claude"; ( cd "$IE" && git init -q )
+printf '{"env": {"BASH_ENV": "/tmp/x.sh"}}\n' > "$IE/.claude/settings.json"; cp "$IE/.claude/settings.json" "$TMP/inst-env.orig"
+inst "$IE" --dry-run
+ok_if "dry run shows the merge's env warning, writes nothing (rc=$IRC)" '[ "$IRC" = 0 ] && printf "%s" "$IOUT" | grep -qF "WARNING: settings.json env sets BASH_ENV." && cmp -s "$IE/.claude/settings.json" "$TMP/inst-env.orig" && [ ! -e "$IE/.claude/hooks" ] && [ "$(nbak "$IE")" = 0 ]'
+ok_if "dry run on an existing settings.json speaks in the conditional" '! printf "%s\n" "$IOUT" | grep -qE "$PAST" && printf "%s" "$IOUT" | grep -qF "would back up settings.json" && printf "%s" "$IOUT" | grep -qF "would merge baseline hooks"'
+IF="$TMP/inst-fresh-dry"; mkdir -p "$IF"; ( cd "$IF" && git init -q )
+inst "$IF" --dry-run --with-openclaw-rules --enable-security-defaults
+ok_if "dry run on a fresh repo speaks in the conditional and writes nothing (rc=$IRC)" '[ "$IRC" = 0 ] && [ ! -e "$IF/.claude" ] && ! printf "%s\n" "$IOUT" | grep -qE "$PAST" && printf "%s" "$IOUT" | grep -qF "would write default .claude/baseline.config.json" && printf "%s" "$IOUT" | grep -qF "would stamp baselineVersion"'
+# B4: a re-install that changes nothing writes no backup and does not rewrite the file;
+# not even when the file is CRLF or starts with a BOM (native Windows Python writes CRLF).
+IK="$TMP/inst-keep"; mkdir -p "$IK"; ( cd "$IK" && git init -q )
+inst "$IK"; ok_if "fresh install creates settings.json without a backup (rc=$IRC)" '[ "$IRC" = 0 ] && [ -f "$IK/.claude/settings.json" ] && [ "$(nbak "$IK")" = 0 ]'
+inst "$IK"; ok_if "unchanged re-install writes no backup" '[ "$IRC" = 0 ] && [ "$(nbak "$IK")" = 0 ] && printf "%s" "$IOUT" | grep -qF "already up to date"'
+"$PY" -c "import sys;p=sys.argv[1];b=open(p,'rb').read().replace(b'\r\n',b'\n');open(p,'wb').write(b.replace(b'\n',b'\r\n'))" "$(winpath "$IK/.claude/settings.json")"
+inst "$IK"; ok_if "unchanged CRLF settings.json: no backup (rc=$IRC)" '[ "$IRC" = 0 ] && [ "$(nbak "$IK")" = 0 ] && printf "%s" "$IOUT" | grep -qF "already up to date"'
+"$PY" -c "import sys;p=sys.argv[1];b=open(p,'rb').read().replace(b'\r\n',b'\n');open(p,'wb').write(b'\xef\xbb\xbf'+b)" "$(winpath "$IK/.claude/settings.json")"
+inst "$IK"; ok_if "unchanged LF settings.json with a BOM: no backup (rc=$IRC)" '[ "$IRC" = 0 ] && [ "$(nbak "$IK")" = 0 ] && printf "%s" "$IOUT" | grep -qF "already up to date"'
+# Two changing installs in the same second keep two backups (a fixed `date` stamp), and
+# the backups are kept out of git through the local exclude, once.
+DBIN="$TMP/date-bin"; mkdir -p "$DBIN"
+printf '#!/usr/bin/env bash\necho 20260101000000\n' > "$DBIN/date"; chmod +x "$DBIN/date"
+drop_deny() { "$PY" -c "import json,sys;p=sys.argv[1];s=json.load(open(p,encoding='utf-8-sig'));s['permissions']['deny']=s['permissions']['deny'][1:];json.dump(s,open(p,'w',encoding='utf-8'))" "$(winpath "$IK/.claude/settings.json")"; }
+drop_deny; IOUT="$(PATH="$DBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$IK")" 2>&1 </dev/null)"; IRC=$?
+drop_deny; IOUT="$(PATH="$DBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$IK")" 2>&1 </dev/null)"; IRC=$?
+ok_if "two backups in the same second both kept (rc=$IRC)" '[ -f "$IK/.claude/settings.json.bak.20260101000000" ] && [ -f "$IK/.claude/settings.json.bak.20260101000000.1" ] && [ "$(nbak "$IK")" = 2 ]'
+ok_if "backups ignored by git" '( cd "$IK" && git check-ignore -q .claude/settings.json.bak.20260101000000.1 )'
+ok_if "the exclude line is added once" '[ "$(grep -cxF "/.claude/settings.json.bak.*" "$IK/.git/info/exclude")" = 1 ]'
+ok_if "backups never show as untracked" '[ -z "$(cd "$IK" && git status --porcelain --untracked-files=all -- .claude | grep "settings.json.bak")" ]'
+# Not a git work tree: a backup is still written, and the run succeeds.
+IN="$TMP/inst-nogit"; mkdir -p "$IN/.claude"; printf '{"model": "x"}\n' > "$IN/.claude/settings.json"
+# ($TMP is itself a repo: a ceiling keeps git from finding it above this target.)
+IOUT="$(GIT_CEILING_DIRECTORIES="$(winpath "$TMP")" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$IN")" 2>&1 </dev/null)"; IRC=$?
+ok_if "outside a git work tree a backup is written and the install succeeds (rc=$IRC)" '[ "$IRC" = 0 ] && [ "$(nbak "$IN")" = 1 ] && [ ! -e "$IN/.git" ] && ! grep -qF "inst-nogit" "$TMP/.git/info/exclude" 2>/dev/null'
+# B5: the whole hook tree is replaced; files the baseline does not ship are named, then gone.
+printf 'echo planted\n' > "$IK/.claude/hooks/baseline/planted.sh"; mkdir -p "$IK/.claude/hooks/baseline/stale"; printf 'x\n' > "$IK/.claude/hooks/baseline/stale/x"
+inst "$IK"
+ok_if "files the baseline does not ship are removed (rc=$IRC)" '[ "$IRC" = 0 ] && [ ! -e "$IK/.claude/hooks/baseline/planted.sh" ] && [ ! -e "$IK/.claude/hooks/baseline/stale" ] && [ -f "$IK/.claude/hooks/baseline/VERSION" ] && [ -f "$IK/.claude/hooks/baseline/lib/common.sh" ]'
+ok_if "each removed file is named first" 'printf "%s" "$IOUT" | grep -qF "removing a file the baseline does not ship: .claude/hooks/baseline/planted.sh" && printf "%s" "$IOUT" | grep -qF ".claude/hooks/baseline/stale/x"'
+# A symlinked (or, on Windows, junction) hook tree is unlinked, never followed.
+mkdir -p "$TMP/inst-outside"; printf 'keep\n' > "$TMP/inst-outside/sentinel"
+IL="$TMP/inst-link"; mkdir -p "$IL/.claude/hooks"; ( cd "$IL" && git init -q )
+ln -s "$TMP/inst-outside" "$IL/.claude/hooks/baseline" 2>/dev/null
+if [ ! -L "$IL/.claude/hooks/baseline" ] && command -v cygpath >/dev/null 2>&1; then
+  rm -rf "$IL/.claude/hooks/baseline"
+  MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$IL/.claude/hooks/baseline")" "$(cygpath -w "$TMP/inst-outside")" >/dev/null 2>&1
+fi
+if [ -L "$IL/.claude/hooks/baseline" ]; then
+  inst "$IL"
+  ok_if "a linked hook tree is replaced, its target untouched (rc=$IRC)" '[ "$IRC" = 0 ] && [ -f "$TMP/inst-outside/sentinel" ] && [ ! -L "$IL/.claude/hooks/baseline" ] && [ -f "$IL/.claude/hooks/baseline/VERSION" ]'
+else
+  echo "  note: linked-hook-tree case not run (no symlink or junction could be made here)"
+fi
+# A dry run names a planted file but deletes nothing, and leaves the git exclude as is.
+printf 'x\n' > "$IK/.claude/hooks/baseline/planted2.sh"; cp "$IK/.git/info/exclude" "$TMP/inst-excl.before"
+drop_deny; cp "$IK/.claude/settings.json" "$TMP/inst-keep.before"
+inst "$IK" --dry-run
+ok_if "dry run names a planted file and keeps it (rc=$IRC)" '[ "$IRC" = 0 ] && printf "%s" "$IOUT" | grep -qF "would remove a file the baseline does not ship: .claude/hooks/baseline/planted2.sh" && [ -f "$IK/.claude/hooks/baseline/planted2.sh" ]'
+ok_if "dry run leaves settings.json and the git exclude byte-identical" 'cmp -s "$IK/.claude/settings.json" "$TMP/inst-keep.before" && cmp -s "$IK/.git/info/exclude" "$TMP/inst-excl.before"'
+# comm must collate like the C sorts feeding it: names sorting before ./dispatcher under C
+# (.DS_Store, A.sh) made it report unsorted input and abort the install in en_US.UTF-8.
+: > "$IK/.claude/hooks/baseline/.DS_Store"; : > "$IK/.claude/hooks/baseline/A.sh"
+loc_utf8="$(locale -a 2>/dev/null | grep -i -m1 -E '^en_US\.utf-?8$' || true)"
+IOUT="$(env LC_ALL="${loc_utf8:-C}" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$IK")" 2>&1 </dev/null)"; IRC=$?
+ok_if "un-shipped files listed exactly, whatever the locale (${loc_utf8:-C}, rc=$IRC)" '[ "$IRC" = 0 ] && [ "$(printf "%s\n" "$IOUT" | grep -c "does not ship")" = 3 ] && ! printf "%s" "$IOUT" | grep -qF "does not ship: .claude/hooks/baseline/VERSION" && [ ! -e "$IK/.claude/hooks/baseline/A.sh" ]'
+[ -n "$loc_utf8" ] || echo "  note: no en_US UTF-8 locale here; the comm case ran under C only"
+# An exclude file without a final newline gets the line on a line of its own.
+IX="$TMP/inst-excl"; mkdir -p "$IX/.claude"; ( cd "$IX" && git init -q ); printf 'keep-me' > "$IX/.git/info/exclude"
+printf '{"model": "x"}\n' > "$IX/.claude/settings.json"
+inst "$IX"; ok_if "exclude line appended on its own line (rc=$IRC)" '[ "$IRC" = 0 ] && grep -qxF "keep-me" "$IX/.git/info/exclude" && grep -qxF "/.claude/settings.json.bak.*" "$IX/.git/info/exclude"'
+# A target below a repo's top level: a backup is written, the parent repo's exclude is not.
+IP="$TMP/inst-parent"; mkdir -p "$IP/sub/.claude"; ( cd "$IP" && git init -q ); cp "$IP/.git/info/exclude" "$TMP/inst-parent.excl"
+printf '{"model": "x"}\n' > "$IP/sub/.claude/settings.json"
+inst "$IP/sub"; ok_if "a sub-directory target leaves the parent repo's exclude alone (rc=$IRC)" '[ "$IRC" = 0 ] && [ "$(nbak "$IP/sub")" = 1 ] && cmp -s "$IP/.git/info/exclude" "$TMP/inst-parent.excl"'
+# A .claude that is a link is refused before anything is written.
+mkdir -p "$TMP/inst-out2"; IS="$TMP/inst-symclaude"; mkdir -p "$IS"; ( cd "$IS" && git init -q )
+ln -s "$TMP/inst-out2" "$IS/.claude" 2>/dev/null
+if [ ! -L "$IS/.claude" ] && command -v cygpath >/dev/null 2>&1; then
+  rm -rf "$IS/.claude"
+  MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$IS/.claude")" "$(cygpath -w "$TMP/inst-out2")" >/dev/null 2>&1
+fi
+if [ -L "$IS/.claude" ]; then
+  inst "$IS"; ok_if "a linked .claude is refused, nothing written through it (rc=$IRC)" '[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "is a symbolic link" && [ -z "$(ls -A "$TMP/inst-out2")" ]'
+  rm -f "$IS/.claude"
+else
+  echo "  note: linked-.claude case not run (no symlink or junction could be made here)"
+fi
+# The installer refuses to delete a baseline source vendored inside the destination.
+IV="$TMP/inst-vendored"; VS="$IV/.claude/hooks/baseline/src"; mkdir -p "$VS"; ( cd "$IV" && git init -q )
+( cd "$SRC" && tar cf - install.sh lib hooks settings.template.json baseline.config.json baseline.config.schema.json examples ) | ( cd "$VS" && tar xf - )
+IOUT="$(timeout -k 5 120 bash "$VS/install.sh" --target "$(winpath "$IV")" 2>&1 </dev/null)"; IRC=$?
+ok_if "a source inside the destination is refused, nothing removed (rc=$IRC)" '[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "is inside" && [ -f "$VS/install.sh" ] && [ ! -e "$IV/.claude/settings.json" ]'
 echo "== install.sh picks a Python that runs (B2) =="
 # On Windows `python3` is usually the Store app execution alias, which is a stub when
 # Python was not installed from the Store: it exits 9009 (49 to bash). The installer

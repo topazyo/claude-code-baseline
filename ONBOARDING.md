@@ -440,7 +440,9 @@ trust — a convenience you opt into, not a protection you get.
   collides with a repo's own `.claude/hooks/` scripts.
 - **What the installer did to `settings.json`.** It merged in the baseline hook
   wiring and the secrets deny-list, leaving your `permissions.allow`, `model`, and
-  any existing hooks untouched, and saved a `settings.json.bak.<timestamp>` first.
+  any existing hooks untouched. If that changed the file, it saved the previous one
+  as `settings.json.bak.<timestamp>` first (and kept it out of git through
+  `.git/info/exclude`); a re-install that changes nothing writes no backup.
 
 > 🧪 **Try it:** open `.claude/baseline.config.json`, set `"enforcement": "warn"`,
 > re-run the Part 0 `git push --force` test, and watch it **warn instead of block**.
@@ -618,7 +620,7 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
 - **Commit the baseline so it travels with the repo.** Commit
   `.claude/hooks/baseline/`, `.claude/baseline.config.json`, and the schema.
   **Do not commit** `.claude/settings.local.json` (per-developer overrides) or the
-  `settings.json.bak.*` backups.
+  `settings.json.bak.*` backups (the installer excludes them locally).
   > ⚠️ **What you are committing is executable content that auto-runs.** Those hook
   > scripts, and the `settings.json` wiring that launches them, execute on every
   > collaborator's machine the next time Claude Code opens the trusted repo — the

@@ -176,6 +176,47 @@ def merge_env_run():
             and "FOO" not in proc.stderr and out_env == env)
 
 
+def outside_template_runs():
+    """A baseline entry under an event the template does not use is never removed
+    (it can only have been wired by hand; the key is the repo's) and is reported by
+    main() on stderr. RETIRED_EVENTS, empty today, is the explicit opt-in sweep."""
+    import subprocess
+    import tempfile
+    hooks = {"SessionStart": [{"hooks": [ours(OLD), USER]}],
+             "SubagentStop": [{"hooks": [ours(OLD)]}],
+             "Notification": []}
+    kept = merge(hooks)
+    ok = (kept["SessionStart"] == hooks["SessionStart"]
+          and kept["SubagentStop"] == hooks["SubagentStop"] and kept["Notification"] == []
+          and ms.RETIRED_EVENTS == ()
+          and ms.baseline_outside_template(kept, TEMPLATE) == ["SessionStart", "SubagentStop"])
+    saved = ms.RETIRED_EVENTS
+    try:
+        ms.RETIRED_EVENTS = ("SessionStart", "SubagentStop", "Notification")
+        swept = merge(hooks)
+        ok = ok and (swept["SessionStart"] == [{"hooks": [USER]}]
+                     and "SubagentStop" not in swept       # we emptied it: key dropped
+                     and swept["Notification"] == []        # the repo's own empty list: kept
+                     and json.dumps(merge(swept)) == json.dumps(swept)
+                     and ms.baseline_outside_template(swept, TEMPLATE) == [])
+    finally:
+        ms.RETIRED_EVENTS = saved
+    with tempfile.TemporaryDirectory() as d:
+        existing, merged = os.path.join(d, "settings.json"), os.path.join(d, "out.json")
+        with open(existing, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": hooks}, fh)
+        proc = subprocess.run(
+            [sys.executable, "-I", os.path.join(ROOT, "lib", "merge_settings.py"), existing,
+             os.path.join(ROOT, "settings.template.json"), merged],
+            capture_output=True, text=True, timeout=60)
+        with open(merged, encoding="utf-8") as fh:
+            out_hooks = json.load(fh)["hooks"]
+    return (ok and proc.returncode == 0
+            and "NOTE: settings.json wires baseline scripts under SessionStart, SubagentStop" in proc.stderr
+            and out_hooks["SessionStart"] == hooks["SessionStart"]
+            and out_hooks["SubagentStop"] == hooks["SubagentStop"])
+
+
 before = json.dumps(EXISTING), json.dumps(TEMPLATE)
 out = ms.merge_hooks(EXISTING, TEMPLATE)        # the real objects: neither may be mutated
 after = json.dumps(EXISTING), json.dumps(TEMPLATE)
@@ -195,6 +236,8 @@ checks = [
     ("template groups appended after the repo's",
      pre[4:] == TEMPLATE["PreToolUse"] and out["Stop"][1:] == TEMPLATE["Stop"]),
     ("event outside the template untouched", out["SessionStart"] == [{"hooks": [USER]}]),
+    ("baseline entries outside the template kept and reported; RETIRED_EVENTS swept",
+     outside_template_runs()),
     ("idempotent: merging the result again changes nothing",
      json.dumps(merge(out)) == json.dumps(out)),
     ("existing hooks and template not mutated", before == after),
