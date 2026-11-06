@@ -54,7 +54,11 @@ the turn going.
 There is also `"failClosed": true`: when a control *cannot run* (no Python, an
 unparseable payload, a deleted or truncated matcher, a hook child that blew its
 time budget), the hook says so loudly and — under `block` — refuses the call
-rather than waving it through as clean.
+rather than waving it through as clean. A `.claude/baseline.config.json` that
+exists but cannot be read (invalid JSON, or not a JSON object) is one of these:
+its own `enforcement` and `failClosed` are unknown, so every guard refuses every
+call it watches until a human fixes or deletes the file (Claude cannot edit it),
+and tracker-reminder reports it. A byte order mark or UTF-16 text is read normally.
 
 ### Guardrails
 

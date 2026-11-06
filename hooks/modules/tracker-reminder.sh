@@ -42,6 +42,14 @@ source "$HERE/../lib/common.sh"
 # what it always did.
 bcl_prime
 
+# A config that exists but cannot be read would read trackerReminder as off. This is a
+# Stop hook, where exit 2 keeps Claude working (and would loop), so it never blocks:
+# it shows the user that the config needs a human, and exits 0.
+if bcl_config_malformed; then
+  bcl_system_message "$(bcl_config_malformed_text tracker-reminder)"
+  exit 0
+fi
+
 bcl_module_enabled trackerReminder || exit 0
 
 COMMIT_GREP="$(bcl_cfg modules.trackerReminder.commitGrep "")"

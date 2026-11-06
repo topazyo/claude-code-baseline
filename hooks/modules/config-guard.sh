@@ -57,6 +57,18 @@ bcl_read_payload PAYLOAD || read_rc=1
 # settings integrity check below, which is the only one doing real work.
 bcl_prime "$PAYLOAD"
 
+# A config that exists but cannot be read would read configGuard as off. Whether it is
+# on is unknown, so fail closed before the enabled-gate (see _malformedConfigRationale).
+# ConfigChange never fires for baseline.config.json itself, so this never blocks the
+# repair; and this message reaches only the debug log, so say where the user sees it.
+if bcl_config_malformed; then
+  {
+    bcl_config_malformed_text config-guard
+    printf '\n%s\n' "   Settings changes are refused until then. Repairing baseline.config.json is not a settings change, so it is not blocked here; command-guard, scope-guard and tracker-reminder report this to you."
+  } >&2
+  bcl_failclosed_exit; exit $?
+fi
+
 bcl_module_enabled configGuard || exit 0
 
 # Reaching here means the module is enabled, which required Python above. Resolve it

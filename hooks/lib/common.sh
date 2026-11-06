@@ -78,6 +78,7 @@ _BCL_PRIME_STATE=""     # "" | ok | failed | nopy   (only "ok" is authoritative)
 _BCL_PRIME_DIR=""       # CLAUDE_PROJECT_DIR as it stood when we primed
 _BCL_PRIME_KEY=""       # resolved baseline.config.json path we primed from
 _BCL_CFG_STATE=""       # ok | absent | malformed
+_BCL_CFG_ERROR=""       # why a malformed config could not be read (bcl_config_malformed)
 _BCL_CFG_KEYS=(); _BCL_CFG_VALS=()
 _BCL_PL_STATE=""        # none | empty | ok | bad
 _BCL_PL_LEN=-1          # length of the payload bcl_prime was given
@@ -248,13 +249,23 @@ def render(v):
 
 cfg_state = "absent"
 cfg_data = None
+cfg_error = ""
 if os.path.isfile(CFG_PATH):
+    # Bytes, not text: json.loads detects UTF-8 (with or without a BOM) and UTF-16/32,
+    # the encodings Windows PowerShell 5.1 writes. Same reading as bcl_cfg,
+    # bcl_config_malformed and the command-guard matcher.
     try:
-        with open(CFG_PATH, encoding="utf-8") as fh:
-            cfg_data = json.load(fh)
-        cfg_state = "ok"
-    except Exception:
+        with open(CFG_PATH, "rb") as fh:
+            cfg_data = json.loads(fh.read())
+        if isinstance(cfg_data, dict):
+            cfg_state = "ok"
+        else:
+            cfg_state, cfg_error = "malformed", "the top level is not a JSON object"
+    except json.JSONDecodeError as exc:
         cfg_state = "malformed"
+        cfg_error = "line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg)
+    except Exception as exc:
+        cfg_state, cfg_error = "malformed", type(exc).__name__
 
 cfg_keys = []
 cfg_vals = []
@@ -374,6 +385,7 @@ except RecursionError:
 
 emit("_BCL_PRIME_KEY", CFG_PATH)
 emit("_BCL_CFG_STATE", cfg_state)
+emit("_BCL_CFG_ERROR", cfg_error)
 emit_arr("_BCL_CFG_KEYS", cfg_keys)
 emit_arr("_BCL_CFG_VALS", cfg_vals)
 emit("_BCL_PL_STATE", pl_state)
@@ -538,8 +550,8 @@ bcl_cfg() {
 import json, sys
 cfg, key, default = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "")
 try:
-    with open(cfg, encoding="utf-8") as fh:
-        data = json.load(fh)
+    with open(cfg, "rb") as fh:          # bytes: UTF-8 with or without BOM, UTF-16/32
+        data = json.loads(fh.read())
 except Exception:
     print(default); raise SystemExit(0)
 cur = data
@@ -568,8 +580,10 @@ bcl_posture() {
 
 # bcl_module_enabled <name>    -> 0 if modules.<name>.enabled == true
 bcl_module_enabled() { [[ "$(bcl_cfg "modules.$1.enabled" false)" == "true" ]]; }
-# bcl_guardrail_enabled <name> -> 0 if guardrails.<name>.enabled == true (default true)
-bcl_guardrail_enabled() { [[ "$(bcl_cfg "guardrails.$1.enabled" true)" == "true" ]]; }
+# bcl_guardrail_enabled <name> -> 0 unless guardrails.<name>.enabled is false (default
+# true). Only a literal false turns a default-on guardrail off: any other value, of any
+# type or case ("TRUE", 1, "", null), leaves it on, as bcl_failclosed reads failClosed.
+bcl_guardrail_enabled() { [[ "$(bcl_cfg "guardrails.$1.enabled" true)" != "false" ]]; }
 # bcl_guardrail_opted_in <name> -> 0 ONLY if guardrails.<name>.enabled is LITERALLY
 # true in a readable baseline.config.json. Unlike bcl_guardrail_enabled it defaults
 # to FALSE, so a missing key, a missing config or an unreadable config keeps the
@@ -745,26 +759,48 @@ raise SystemExit(1)' && return 0 || return 1
 }
 
 # bcl_config_malformed
-# Returns 0 (true) when baseline.config.json EXISTS but is not valid JSON — a
-# degraded state that silently disables module gating (bcl_cfg would return
-# defaults for every key). Returns 1 when there is no config (defaults apply),
-# it parses fine, or Python is unavailable (no-Python handled separately).
+# Returns 0 (true) when baseline.config.json EXISTS but cannot be read as a JSON
+# object — not JSON, not text in UTF-8/16/32, or a top level that is not an object.
+# That state would make every lookup return its default (module gating off,
+# commandGuard.extraPatterns gone), so every wired hook tests this BEFORE its
+# enabled-gate and fails closed. Sets _BCL_CFG_ERROR to the reason. Returns 1 when
+# there is no config (defaults apply), it reads fine, or Python is unavailable
+# (no-Python handled separately). Call it as `if bcl_config_malformed`, never inside
+# $( ): the reason is set in the caller's shell.
 bcl_config_malformed() {
-  local py cfg
+  local py cfg out
   # A prime that FAILED must not answer here: "we could not tell" is not "fine".
   # _bcl_primed is false in that case, so we drop through and re-check for real.
   if _bcl_primed; then
     [[ "$_BCL_CFG_STATE" == "malformed" ]] && return 0
     return 1
   fi
+  _BCL_CFG_ERROR=""
   py="$(bcl_python)"; cfg="$(bcl_config_path)"
   [[ -z "$py" || ! -f "$cfg" ]] && return 1
-  "$py" -I -S -X utf8 -c 'import json,sys
+  # "fine" only on an explicit OK line: an interpreter that crashes is not a clean read.
+  out="$("$py" -I -S -X utf8 -c 'import json,sys
 try:
-    json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    raise SystemExit(0)
-raise SystemExit(1)' "$cfg" && return 0 || return 1
+    with open(sys.argv[1], "rb") as fh:
+        data = json.loads(fh.read())
+except json.JSONDecodeError as exc:
+    print("line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg))
+except Exception as exc:
+    print(type(exc).__name__)
+else:
+    print("OK" if isinstance(data, dict) else "the top level is not a JSON object")' "$cfg" 2>/dev/null)"
+  out="${out%$'\r'}"
+  [[ "$out" == "OK" ]] && return 1
+  _BCL_CFG_ERROR="${out:-the check could not run}"
+  return 0
+}
+
+# bcl_config_malformed_text <hook label>
+# The message every hook gives for a config bcl_config_malformed refused (it must have
+# just returned 0, so _BCL_CFG_ERROR holds the reason).
+bcl_config_malformed_text() {
+  printf '[%s] CONTROL COULD NOT RUN — .claude/baseline.config.json exists but cannot be read (%s), so this hook'"'"'s settings are unknown and it fails closed. A human must fix or delete that file; Claude cannot edit it.' \
+    "$1" "${_BCL_CFG_ERROR:-unreadable}"
 }
 
 # --- payload parsing --------------------------------------------------------

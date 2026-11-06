@@ -41,7 +41,7 @@
             "extraPatterns": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Additional case-insensitive substrings that block a shell command (Bash or PowerShell). Silently dropped if this file does not parse, which is why the hooks fail closed on a malformed config."
+              "description": "Additional case-insensitive substrings that block a shell command (Bash or PowerShell). They cannot be read from a file that does not parse, which is why command-guard then fails closed instead of running without them."
             }
           }
         },

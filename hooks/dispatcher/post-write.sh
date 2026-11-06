@@ -69,7 +69,7 @@ fi
 # Config present but unparseable -> bcl_cfg silently returns defaults, which
 # disables module gating. Surface it and fail closed rather than run dark.
 if bcl_config_malformed; then
-  bcl_say "[baseline] DEGRADED: .claude/baseline.config.json exists but is not valid JSON —" \
+  bcl_say "[baseline] DEGRADED: .claude/baseline.config.json exists but cannot be read ($_BCL_CFG_ERROR) —" \
     "   module gating could not be read, so config-driven checks may be silently disabled." \
     "   Fix the JSON (or remove the file to restore defaults)."
   bcl_failclosed_exit; exit $?

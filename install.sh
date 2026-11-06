@@ -317,6 +317,23 @@ echo "› config"
 CFG_CREATED=0
 if [[ -f "$CLAUDE_DIR/baseline.config.json" ]]; then
   say "kept existing .claude/baseline.config.json (not overwritten)"
+  # The hooks read it the same way (common.sh bcl_config_malformed) and fail closed on
+  # one they cannot read, so say so now rather than at the first blocked call.
+  CFG_BAD="$("$PY" -I -S -X utf8 -c 'import json,sys
+try:
+    with open(sys.argv[1], "rb") as fh:
+        data = json.loads(fh.read())
+except json.JSONDecodeError as exc:
+    print("line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg))
+except Exception as exc:
+    print(type(exc).__name__)
+else:
+    print("" if isinstance(data, dict) else "the top level is not a JSON object")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || echo "the check could not run")"
+  CFG_BAD="${CFG_BAD%$'\r'}"
+  if [[ -n "$CFG_BAD" ]]; then
+    echo "WARNING: the existing .claude/baseline.config.json cannot be read ($CFG_BAD)." >&2
+    echo "         The baseline hooks fail closed until it is fixed or deleted." >&2
+  fi
 else
   CFG_CREATED=1
   run cp "$SRC/baseline.config.json" "$CLAUDE_DIR/baseline.config.json"

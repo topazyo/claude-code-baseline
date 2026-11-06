@@ -487,6 +487,62 @@ quiet_ok "tracker matches commit subjects, not hashes"
 resetcfg
 rm -f "$TMP/_err" "$TMP/_nerr"
 
+echo "== a baseline.config.json that cannot be read fails closed in every hook (M1/M7) =="
+# A config that exists but cannot be read as a JSON object must fail closed in every
+# wired hook, before its enabled-gate, even when its own text asks for warn and
+# failClosed:false (unreadable is unreadable). tracker-reminder (Stop) only reports.
+# Encoded fixtures are written as bytes from Python, never through setcfg.
+err_lacks() { case "$ERR" in *"$2"*) fail=$((fail + 1)); echo "  FAIL [$1: stderr has '$2']" ;; *) pass=$((pass + 1)) ;; esac; }
+resetcfg
+printf '{ "enforcement": "warn", "failClosed": false, }\n' > "$CFG"   # trailing comma
+run_out "unreadable config: command-guard, git status -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+err_has "command-guard names the file" ".claude/baseline.config.json exists but cannot be read"
+err_has "command-guard gives the parse error" "line 1 column"
+err_has "command-guard says a human must fix it" "A human must fix or delete that file"
+run_out "unreadable config: scope-guard (off by default) -> 2" modules/scope-guard.sh 2 <<< "$(write_payload "$WT/src/x.py")"
+err_has "scope-guard reports it" "[scope-guard] CONTROL COULD NOT RUN"
+run_out "unreadable config: config-guard -> 2" modules/config-guard.sh 2 <<< "$(printf '{"source":"project_settings","file_path":"%s"}' "$WT/.claude/settings.json")"
+err_has "config-guard says where the user sees it" "command-guard, scope-guard and tracker-reminder report this"
+run_out "unreadable config: dispatcher -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/notes.txt")"
+err_has "dispatcher gives the parse error" "cannot be read (line 1 column"
+run_out "unreadable config: tracker-reminder -> 0, never 2" modules/tracker-reminder.sh 0 <<< '{}'
+sysmsg_ok "tracker-reminder shows the user the unreadable config" '"[tracker-reminder] CONTROL COULD NOT RUN" in m and "baseline.config.json" in m'
+printf '[]\n' > "$CFG"   # valid JSON, not an object
+run_out "top level not an object: command-guard -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+err_has "command-guard says why" "the top level is not a JSON object"
+run_out "top level not an object: dispatcher -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/notes.txt")"
+# The matcher on its own: an unreadable config is an error, a missing one is "no patterns".
+OUT="$(printf '%s' "$(bash_payload 'git status')" | "$PY" -I "$H/lib/command_guard_match.py" "$CFG")"
+case "$OUT" in "__MATCHER_ERROR__ "*"not a JSON object"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [matcher: unreadable config -> __MATCHER_ERROR__, got: $OUT]" ;; esac
+OUT="$(printf '%s' "$(bash_payload 'git status')" | "$PY" -I "$H/lib/command_guard_match.py" "$WT/.claude/no-such-config.json")"
+if [ -z "$OUT" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [matcher: missing config -> clean verdict, got: $OUT]"; fi
+resetcfg
+# Encodings Windows PowerShell 5.1 writes are read, not refused: the extraPattern applies.
+for codec in utf-8-sig utf-16; do
+  "$PY" -c "import json,sys
+c=json.load(open(sys.argv[1], encoding='utf-8'))
+c['guardrails']['commandGuard']['extraPatterns']=['zz-repo-policy-zz']
+c['modules']['scopeGuard']['enabled']=True
+open(sys.argv[2],'wb').write(json.dumps(c).encode(sys.argv[3]))" "$WT/.claude/_pristine.json" "$CFG" "$codec"
+  run_out "$codec config: extraPattern blocks" guardrails/command-guard.sh 2 <<< "$(bash_payload 'echo zz-repo-policy-zz')"
+  err_has "$codec config: the repo pattern is the reason" "matched repo policy pattern"
+  run_out "$codec config: git status -> 0" guardrails/command-guard.sh 0 <<< "$(bash_payload 'git status')"
+  run_out "$codec config: scope-guard reads scopeGuard on" modules/scope-guard.sh 2 <<< "$(write_payload "$WT/src/other.py")"
+  err_lacks "$codec config: scope-guard is not degraded" "CONTROL COULD NOT RUN"
+  run_out "$codec config: dispatcher clean write -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/notes.txt")"
+done
+resetcfg
+# M7: only a literal false turns the default-on command-guard off.
+for v in "'TRUE'" "'True'" "1" "0" "''" "None" "'False'" "'yes'"; do
+  setcfg "c['guardrails']['commandGuard']['enabled']=$v"
+  run "commandGuard.enabled=$v keeps the guard on" guardrails/command-guard.sh "$(bash_payload 'git push --force origin main')" 2
+done
+for v in "False" "'false'"; do
+  setcfg "c['guardrails']['commandGuard']['enabled']=$v"
+  run "commandGuard.enabled=$v turns the guard off" guardrails/command-guard.sh "$(bash_payload 'git push --force origin main')" 0
+done
+resetcfg
+
 echo "== common.sh load guard ignores the environment =="
 # The library's double-source guard must not be settable from outside. An inherited
 # _BCL_SOURCED used to make every hook skip common.sh: command-guard died on its first
