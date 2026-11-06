@@ -90,7 +90,9 @@ a fixture in `tests/` before bumping the pin.
 - [ ] **Stop hook exit `2`** semantics (continue/block) unchanged. *(trackerReminder.)*
       Also: a Stop hook's `systemMessage` is still shown to the user, and Stop
       `hookSpecificOutput.additionalContext` still continues the turn (the reason
-      trackerReminder uses `systemMessage` only).
+      trackerReminder uses `systemMessage` only). And the Stop input still carries
+      `session_id`, the key of trackerReminder's per-session memory: without it the
+      module silently falls back to reminding at every stop (safe, but the feature is gone).
 - [ ] **`ConfigChange` event** still exists with the documented payload/semantics.
       *(R5 — tamper-detection hook; interim defense is the deny-list above.)*
 - [ ] **Managed-settings knobs** — `allowManagedHooksOnly`,

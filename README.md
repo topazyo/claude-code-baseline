@@ -128,7 +128,7 @@ Two limits, stated plainly:
 | `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. Whether or not `scopeGuard` is enabled, `scope-guard.sh` also refuses a Write or Edit that puts the baseline hook directory's path (`/.claude/hooks/baseline/`) into a subagent or skill definition under `.claude/agents/` or `.claude/skills/`; that check has no switch and follows `enforcement`. |
 | `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` (baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, `disableAllHooks` or a risky environment value set) and of `.claude/settings.local.json` (`disableAllHooks`, a risky environment value, or a hook entry naming a baseline script, which the installer never writes there). **Off by default; detection after the change, not prevention; in-session only; watches those two files only** — never `baseline.config.json` and never the hook scripts. A deleted `settings.local.json` is normal; an unreadable one is treated as tampered. |
 | `runTests` | PostToolUse | Run the right test/lint per file type (pytest, shellcheck/bats, yamllint/actionlint). Missing tools are skipped. Reports to Claude after the write; cannot undo it. A failing check's output is passed on verbatim but capped (the first 60 lines of a linter's report, the last 30 of pytest's, the last 20 of bats'); a passing one stays quiet. Anything a failing test prints — file contents, environment values — is therefore shown to Claude (and, under `warn`, to you). |
-| `trackerReminder` | Stop | Show you a reminder to update a tracking doc each time Claude stops, while a commit whose subject contains `commitGrep` is among the last 20 commits (not only this session's). Not passed to Claude. Never blocks. |
+| `trackerReminder` | Stop | When Claude stops and commits whose subject contains `commitGrep` are among the last 20 (not only this session's), show you a reminder to update a tracking doc — once per session, then again only for a new matching commit (an amended or rebased commit counts as new). The session memory is kept in `.git/baseline/`; without a usable `session_id` in the Stop input, or when that memory cannot be used, it reminds at every stop. Not passed to Claude. Never blocks. |
 | `autoStage` | PostToolUse | `git add` changed files after all gates pass. Never blocks. |
 
 The `PostToolUse` hooks run through one **dispatcher** in a fixed safe order
@@ -465,7 +465,8 @@ the tool does not currently verify the `settings.json` wiring. See
 - Disable everything fast: set `"enforcement": "warn"` (nothing blocks).
 - Full removal: delete `.claude/hooks/baseline/`, remove the baseline hook
   groups from `.claude/settings.json` (or restore a `settings.json.bak.*`), and
-  delete `.claude/baseline.config.json`.
+  delete `.claude/baseline.config.json`. trackerReminder's session memory, if it
+  ever ran, is in `.git/baseline/` (per worktree); delete that too.
 
 ---
 
