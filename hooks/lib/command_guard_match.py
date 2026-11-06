@@ -68,9 +68,10 @@ $HOME/${HOME} home tokens are caught), or runtime aliases. Two residual limits o
 the tokenizer itself, stated here rather than claimed away elsewhere: POSIX escape
 resolution consumes backslashes, so an *unquoted* Windows path is only recovered
 for drive-letter/UNC forms (see _slashify_windows_paths), and text holding one is
-judged both that way and as the shell reads it (see _segments) -- so a heredoc body
-of very many lines that each end in a path's backslash is refused as a continuation
-chain too long to inspect; and a command
+judged both that way and as the shell reads it (see _segments) -- so multi-line
+text (a heredoc commit or PR body, say) with a long run of lines that each end in a
+path's backslash (about 90 such lines of a typical path) is refused as a
+continuation chain too long to inspect; and a command
 substitution inside a double-quoted ARGUMENT (`echo "$(...)"`) is not inspected --
 a quoted separator stays inside its word, as in bash (see _shell_words), so a
 `sh -c` script is judged whole but a quoted sentence is not mistaken for commands. Multi-line limits: the
@@ -1186,8 +1187,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     # chain too long to inspect still blocks. PowerShell's own reading (ps_slashes)
     # turns every backslash into a separator anyway, so it has no second reading; an
     # inline `bash -c` script in it is covered by the POSIX readings of the same text
-    # (see _powershell_segments). Cost: only text with a drive or UNC path pays, at
-    # most twice per nesting level.
+    # (see _powershell_segments). Cost: only text with a drive or UNC path pays; the
+    # work doubles per nesting level of inline scripts.
     if slashed != raw and not (shell == "powershell" and ps_slashes):
         segments += _segments(raw, _depth, shell=shell, ps_slashes=ps_slashes,
                               piped=piped, lenient_on_error=True, windows_paths=False)

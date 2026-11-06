@@ -471,6 +471,12 @@ CASES = [
      'git commit -m "Handle C:\\dir\\ and D:\\x paths"', A, ()),
     ("winpath fp commit message, single-quoted path", "git commit -m 'Handle C:\\dir\\ paths'", A, ()),
     ("winpath fp trailing-backslash path then another command", 'echo "C:\\dir\\" && git status', A, ()),
+    # Documented limit (module docstring): read as the shell reads it, a long run of
+    # lines ending in a path's backslash is one continuation chain, too long to
+    # inspect, so it blocks. This pins where that false positive sits.
+    ("winpath limit long run of trailing-backslash path lines blocks",
+     "gh pr create --title t --body \"$(cat <<'EOF'\n"
+     + "- default dir is C:\\Users\\me\\proj\\\n" * 100 + "EOF\n)\"", B, ()),
 
     # --- A6: package installs past option values; more install spellings ---
     ("a6 yarn install", "yarn install", B, ()),
