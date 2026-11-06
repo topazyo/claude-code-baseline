@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # claude-code-baseline :: modules/tracker-reminder.sh
 #
-# Stop hook. When the session produced commits matching a pattern, reminds the
-# agent to update a tracking document before closing. Informational only —
+# Stop hook. While a commit matching a pattern is among the last 20 commits, shows
+# YOU a reminder to update a tracking document, each time Claude stops. It is printed
+# as a JSON `systemMessage`, the only exit-0 channel a user sees; plain stdout from an
+# exit-0 hook reaches only the debug log. It is deliberately NOT passed to Claude:
+# on Stop, additionalContext and decision:"block" both send Claude back to work, and
+# the matching commit would still be there at the next stop. Informational only —
 # never blocks (Stop hooks should not trap the user in the session).
 #
 # Config (baseline.config.json):
@@ -30,6 +34,8 @@ bcl_module_enabled trackerReminder || exit 0
 
 COMMIT_GREP="$(bcl_cfg modules.trackerReminder.commitGrep "")"
 TRACKER="$(bcl_cfg modules.trackerReminder.tracker "")"
+# The unprimed bcl_cfg fallback can keep a CR from Python's CRLF on Windows.
+COMMIT_GREP="${COMMIT_GREP%$'\r'}"; TRACKER="${TRACKER%$'\r'}"
 [[ -z "$COMMIT_GREP" || -z "$TRACKER" ]] && exit 0
 
 cd "$(bcl_repo_root)" || exit 0
@@ -40,8 +46,6 @@ cd "$(bcl_repo_root)" || exit 0
 MATCHES="$(git log --oneline -20 2>/dev/null | grep -cF -- "$COMMIT_GREP" 2>/dev/null || true)"
 [[ "${MATCHES:-0}" -eq 0 ]] && exit 0
 
-echo ""
-echo "📋 [tracker-reminder] $MATCHES recent commit(s) matched '$COMMIT_GREP'."
-echo "   Before closing: confirm $TRACKER is up to date."
-echo ""
+# The script's only stdout: one JSON object (see bcl_system_message).
+bcl_system_message "📋 [tracker-reminder] $MATCHES of the last 20 commits matched '$COMMIT_GREP'."$'\n'"Before closing: confirm $TRACKER is up to date."
 exit 0

@@ -451,7 +451,7 @@ trust — a convenience you opt into, not a protection you get.
 | `scopeGuard` | edits stay within a declared file scope | you do tightly-scoped fix tasks and maintain a scope file | needs an up-to-date scope file or it no-ops | off |
 | `configGuard` | `.claude/settings.json` keeps the baseline wiring + deny-list (and no `disableAllHooks` or risky env value); `.claude/settings.local.json` has no `disableAllHooks`, risky env value or hook entry naming a baseline script | you want in-session tamper detection — incl. **human/external** edits the deny-list can't see | watches settings.json and settings.local.json only (it's a `ConfigChange` hook); not `baseline.config.json` / hook scripts (those are deny-listed) | off |
 | `runTests` | type-appropriate tests/linters run on each edit | you have a *fast* test/lint suite | slow suites add latency to every edit; missing tools are skipped, not failed | off |
-| `trackerReminder` | nudge to update a tracking doc at `Stop` | you maintain a changelog / plan file | low; reminder only, never blocks | off |
+| `trackerReminder` | shows you a nudge to update a tracking doc at each `Stop` while a matching commit is among the last 20 | you maintain a changelog / plan file | low; reminder to you only (not to Claude), never blocks; repeats every turn until the matching commits age out | off |
 | `autoStage` | `git add`s changed files after all gates pass | you want a commit-ready working tree | low; surprises people who stage manually | off |
 
 > Each module's settings live under `modules.<name>` in `baseline.config.json`.
@@ -521,7 +521,11 @@ user.email "you@example.com"` and `git config user.name "You"`)*, then fire the
 ```bash
 echo '{}' | CLAUDE_PROJECT_DIR="$PWD" bash .claude/hooks/baseline/modules/tracker-reminder.sh
 ```
-You'll see the reminder. (Disable it again when done.)
+You'll see the reminder twice: as plain text on stderr, and on stdout as one JSON
+object, `{"systemMessage": "📋 [tracker-reminder] …"}`. In a session, that object is
+what Claude Code shows you when Claude stops; it is not passed to Claude, since
+context from a `Stop` hook would send Claude back to work. It repeats at every stop
+while a matching commit is among the last 20. (Disable it again when done.)
 
 **Exercise 4 — Author a security rule.** Create `.claude/security-defaults.json`:
 ```json

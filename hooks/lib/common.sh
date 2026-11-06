@@ -704,6 +704,23 @@ _bcl_emit_notice() {
     "$_BCL_LOOKUP" "$_BCL_NOTICE_EVENT" "$_BCL_LOOKUP"
 }
 
+# bcl_system_message <text>
+# Shows <text> to the USER only: prints ONE JSON object, {"systemMessage": <text>}, on
+# stdout (and <text> on stderr, for the debug log). For a Stop hook this is the only
+# exit-0 channel that does not send Claude back to work: Stop's
+# hookSpecificOutput.additionalContext and decision:"block" both continue the turn.
+# Same 8000-byte cut and escaping as the notices. Call it at most once, as the script's
+# only stdout, and never in a script that calls bcl_notice_event (two objects would
+# make Claude Code reject both). Empty text prints nothing.
+bcl_system_message() {
+  local msg="${1-}"
+  [[ -n "$msg" ]] || return 0
+  printf '%s\n' "$msg" >&2
+  if (( ${#msg} > 8000 )); then msg="$(_bcl_notice_cut "$msg")"; fi
+  _bcl_json_escape "$msg"
+  printf '{"systemMessage":"%s"}\n' "$_BCL_LOOKUP"
+}
+
 # bcl_payload_unparseable <payload>
 # Returns 0 (true) ONLY when the payload is NON-EMPTY but cannot be parsed as
 # JSON — a "control could not read its input" condition that must not be mistaken

@@ -33,7 +33,7 @@ a tool call **before** the tool runs:
 | `PreToolUse` | command-guard, scopeGuard | The tool call **is refused**. Nothing ran. |
 | `PostToolUse` | securityDefaults, fixTags, runTests, autoFormat, autoStage | **The write already happened.** The hook's stderr is reported back to Claude so it can correct course, and the dispatcher stops the rest of the chain — but nothing is undone or reverted. |
 | `ConfigChange` | configGuard | Detection after the fact, within the session. |
-| `Stop` | trackerReminder | Advisory text only. |
+| `Stop` | trackerReminder | A reminder shown to you. Never blocks, never sends Claude back to work. |
 
 `"enforcement": "warn"` downgrades every one of the above to a warning: the action
 goes ahead, and the hook's report is shown to you and added to Claude's context.
@@ -44,7 +44,9 @@ The same applies to a control that could not run under `"failClosed": false`, an
 in any posture, to the dispatcher's note that a formatter or auto-stage step ran out
 of time. Two exceptions: configGuard (Claude Code discards a ConfigChange hook's
 messages, so under `warn` its report reaches only the debug log, `claude --debug`)
-and trackerReminder, which is advisory in every posture.
+and trackerReminder, which is advisory in every posture: its reminder is shown to you
+(`systemMessage`) but not passed to Claude, because context from a `Stop` hook keeps
+the turn going.
 
 There is also `"failClosed": true`: when a control *cannot run* (no Python, an
 unparseable payload, a deleted or truncated matcher, a hook child that blew its
@@ -126,7 +128,7 @@ Two limits, stated plainly:
 | `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. Whether or not `scopeGuard` is enabled, `scope-guard.sh` also refuses a Write or Edit that puts the baseline hook directory's path (`/.claude/hooks/baseline/`) into a subagent or skill definition under `.claude/agents/` or `.claude/skills/`; that check has no switch and follows `enforcement`. |
 | `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` (baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, `disableAllHooks` or a risky environment value set) and of `.claude/settings.local.json` (`disableAllHooks`, a risky environment value, or a hook entry naming a baseline script, which the installer never writes there). **Off by default; detection after the change, not prevention; in-session only; watches those two files only** — never `baseline.config.json` and never the hook scripts. A deleted `settings.local.json` is normal; an unreadable one is treated as tampered. |
 | `runTests` | PostToolUse | Run the right test/lint per file type (pytest, shellcheck/bats, yamllint/actionlint). Missing tools are skipped. Reports to Claude after the write; cannot undo it. |
-| `trackerReminder` | Stop | Remind to update a tracking doc when matching commits exist this session. Never blocks. |
+| `trackerReminder` | Stop | Show you a reminder to update a tracking doc each time Claude stops, while a commit whose subject contains `commitGrep` is among the last 20 commits (not only this session's). Not passed to Claude. Never blocks. |
 | `autoStage` | PostToolUse | `git add` changed files after all gates pass. Never blocks. |
 
 The `PostToolUse` hooks run through one **dispatcher** in a fixed safe order
