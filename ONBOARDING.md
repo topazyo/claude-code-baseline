@@ -104,10 +104,11 @@ The events our baseline uses:
 | `PreToolUse` | per tool call | *before* a tool runs | command-guard (Bash, PowerShell), scope-guard (Write/Edit) | ✅ **yes** |
 | `PostToolUse` | per tool call | *after* a tool ran | auto-format, security-defaults, fix-tags, run-tests, auto-stage | ❌ no — tool already ran |
 | `Stop` | per turn | when Claude finishes responding | tracker-reminder *(opt-in — see Part 4)* | ✅ yes (keeps it going) |
-| `ConfigChange` | on settings change | a settings file is edited mid-session | config-guard *(opt-in — Part 7)* | ✅ yes (rejects the change) |
+| `ConfigChange` | on settings change | a settings file is edited mid-session | config-guard *(opt-in — Part 7)* | ✅ yes (rejects the change, silently) |
 
-> ⚠️ **Crucial, and easy to miss:** only `PreToolUse` (and `Stop`) can actually
-> *stop* an action. `PostToolUse` runs *after* the edit already happened — it
+> ⚠️ **Crucial, and easy to miss:** only `PreToolUse` (and `Stop`, and
+> `ConfigChange` for a settings change) can actually *stop* an action.
+> `PostToolUse` runs *after* the edit already happened — it
 > can't undo it, only feed the problem back to Claude so Claude fixes it on the
 > next step. (Exact rules in 1.5.) *Source: Anthropic Claude Code hooks docs.*
 
@@ -187,7 +188,7 @@ The hook's **exit code** is how it talks back — and the meaning of exit `2`
 | Exit code | Meaning |
 |-----------|---------|
 | `0` | No objection. **But for `PreToolUse`, `0` does NOT auto-approve** — the normal permission flow still runs. Silence never approves. |
-| `2` | "Stop — don't do this." stderr is fed back to Claude as actionable feedback. **What it actually does is event-dependent** (below). |
+| `2` | "Stop — don't do this." stderr is fed back to Claude as actionable feedback (not for `ConfigChange`, below). **What it actually does is event-dependent** (below). |
 | any other non-zero | The action proceeds anyway; Claude sees only a generic "hook error" notice plus the *first line* of stderr. **Unless** the hook sets `"onFailure": "block"` (Claude Code v2.1.295+), as our two `PreToolUse` guards do: then any exit other than `0` or `2` — or a hook that can't start or times out — blocks. |
 
 What exit `2` does, per event:
@@ -195,6 +196,9 @@ What exit `2` does, per event:
 - **`PreToolUse` → blocks the tool call.** This is our real enforcement point.
 - **`Stop` → prevents Claude from stopping**, continuing the conversation.
 - **`PostToolUse` → cannot block** (the tool already ran); it only shows stderr to Claude so it can react and fix.
+- **`ConfigChange` → blocks the settings change from taking effect, silently**: no
+  message to you or Claude, only a debug-log line (`claude --debug`). A
+  `policy_settings` change can't be blocked.
 
 (The "any other non-zero" exit is event-dependent too: on `PreToolUse` the action
 proceeds unless the hook sets `onFailure: "block"`; on `PostToolUse` the tool
@@ -270,13 +274,15 @@ reasons guardrails matter (use these to motivate the team):
   commands. A `PreToolUse:Bash` blocker is widely cited as the highest-value
   control against this exact class of attack.
 - **The repo's own `.claude/` is a proven attack surface — not hypothetical.**
-  Real, now-patched CVEs make it concrete:
-  - *CVE-2025-59536* — hooks defined in a repo's `.claude/settings.json`
-    auto-executed shell commands on every collaborator's machine, with **no**
-    per-command approval.
+  Real, now-patched advisories make it concrete:
+  - *GHSA-ph6w-f82w-28w6* (prompt fixed in 1.0.87) — accepting the folder-trust prompt
+    lets hooks defined in a repo's `.claude/settings.json` run shell commands on
+    every collaborator's machine with **no** per-command approval; the prompt did
+    not make that clear.
   - *CVE-2026-21852* — a malicious `ANTHROPIC_BASE_URL` in settings could
     exfiltrate your API key in plaintext *before* you even accepted the trust dialog.
-  - An MCP auto-approval bypass could start a server before the trust dialog was readable.
+  - *CVE-2025-59536* (fixed in 1.0.111) — an MCP auto-approval bypass could start a
+    project's server before the trust dialog was readable.
 
 > 💡 **Honest framing for the team:** hooks are **guardrails, not walls.**
 > Blocklists can be evaded (command padding, wrappers, aliases, or allowlisting
@@ -298,8 +304,9 @@ The baseline is split into two tiers, and one switch decides how strict it is:
   trackerReminder, autoStage.)
 - **`enforcement` posture** — one global setting: `"block"` (a violation fails the
   action / feeds it back to Claude) or `"warn"` (advise only, never fail: the
-  report is shown to you and to Claude, except configGuard's, which Claude Code
-  discards).
+  report is shown to you and to Claude). configGuard is the exception in both:
+  Claude Code shows a ConfigChange hook's report to no one, so under `block` it
+  refuses the settings change silently, and under `warn` only `claude --debug` has it.
 
 > 💡 **Recommended ramp** (the industry "visibility-first, then enforce" pattern,
 > reconciled with our security floor): keep **both always-on guardrails on from
@@ -375,7 +382,8 @@ the target repository supplies**. After it `cd`s to the repo root it prefers
 binaries — honoring repo-controlled `prettier.config.js` / `eslint.config.js` and
 their plugins, and `dotnet format` additionally *builds* the project. Cloning a repo
 and letting an agent touch one file would then be enough to run whatever that repo
-planted: the same primitive as CVE-2025-59536 above. Turn it on
+planted, with no per-command approval: the same surface as GHSA-ph6w-f82w-28w6
+above. Turn it on
 (`guardrails.autoFormat.enabled: true`) only for a repo whose toolchain you already
 trust — a convenience you opt into, not a protection you get.
 
@@ -613,8 +621,8 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
   `settings.json.bak.*` backups.
   > ⚠️ **What you are committing is executable content that auto-runs.** Those hook
   > scripts, and the `settings.json` wiring that launches them, execute on every
-  > collaborator's machine the next time Claude Code opens the repo — which is the
-  > exact shape of CVE-2025-59536 above, just with the scripts being yours. Before
+  > collaborator's machine the next time Claude Code opens the trusted repo — the
+  > GHSA-ph6w-f82w-28w6 behaviour above, just with the scripts being yours. Before
   > you commit them, put `.claude/**` (and `hooks/**` if you vendor the source) in
   > `CODEOWNERS` with a security owner, and turn on branch protection so that
   > ownership means a required review. A one-line PR to `common.sh` runs on
@@ -671,11 +679,14 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
   not a block. High friction (every action pre-approved); best for high-assurance repos.
 - **In-session settings-tamper detection.** *(Shipped — opt-in `configGuard`.)* The
   `ConfigChange` hook `modules/config-guard.sh` watches `.claude/settings.json`
-  (`source: project_settings`) and, on each change, rejects (block) or reports (warn)
-  if the baseline hooks were unwired, the deny-list was stripped, or `disableAllHooks`
-  was set. It catches **human/external** edits the deny-list can't (the deny-list only
-  governs the agent's tools). Anthropic's team-security guidance recommends this, and
-  CVE-2025-59536 is why it matters. **Scope note:** `ConfigChange` fires only for
+  (`source: project_settings`) and `.claude/settings.local.json` (`local_settings`)
+  and, on each change, rejects (block) or reports (warn) if the baseline hooks were
+  unwired, the deny-list was stripped, `disableAllHooks` was set, or a risky `env`
+  value was set. Either way Claude Code shows the report to no one; it is in
+  `claude --debug`. It catches **human/external** edits the deny-list can't (the
+  deny-list only governs the agent's tools). Anthropic's team-security guidance
+  recommends this; it matters because repo-controlled settings run once the folder
+  is trusted (GHSA-ph6w-f82w-28w6 above). **Scope note:** `ConfigChange` fires only for
   Claude Code *settings* files, so it does **not** cover `.claude/baseline.config.json`
   or the hook scripts. Those are covered against the agent by deny rules — including
   `Bash(*.claude/baseline.config.json*)` and its PowerShell/backslash variants, which

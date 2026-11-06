@@ -25,9 +25,10 @@
 #     that ship inside the checkout, so cloning a hostile repo and letting the agent
 #     touch one file is enough to run whatever was planted there.
 #
-# That is the same primitive as CVE-2025-59536 (repo-defined hooks auto-executing
-# with no per-command approval), which is part of why this baseline exists. Enable
-# auto-format only for repositories whose contents you already trust to execute.
+# That is repo-supplied code running with no per-command approval — related to what
+# accepting the folder-trust prompt allows (GHSA-ph6w-f82w-28w6) and part of why
+# this baseline exists. Enable auto-format only for repositories whose contents you
+# already trust to execute.
 #
 # Two independent gates, both default-closed:
 #   1. guardrails.autoFormat.enabled must be LITERALLY true (bcl_guardrail_opted_in —

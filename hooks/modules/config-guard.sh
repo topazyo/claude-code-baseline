@@ -4,8 +4,9 @@
 # ConfigChange module. Fires when Claude Code detects a change to a settings file
 # DURING a session. This is the in-session tamper-detection control: it catches a
 # repo-controlled .claude/settings.json being edited to strip out the baseline
-# hooks, remove the deny-list, or set disableAllHooks — the CVE-2025-59536 vector —
-# including HUMAN/external edits the agent-only deny-list cannot see.
+# hooks, remove the deny-list, or set disableAllHooks — including HUMAN/external
+# edits the agent-only deny-list cannot see. (Repo-controlled settings run on every
+# collaborator's machine once the folder is trusted: GHSA-ph6w-f82w-28w6.)
 #
 # Scope (deliberate): it watches `project_settings` (.claude/settings.json), where
 # the baseline's own footprint lives. ConfigChange's domain is Claude Code SETTINGS
@@ -21,8 +22,10 @@
 # Config (baseline.config.json):
 #   "modules": { "configGuard": { "enabled": true } }
 #
-# Posture: under "block", a detected tamper exits 2 (Claude Code rejects the change
-# for the session); under "warn", it reports and exits 0. Off by default.
+# Posture: under "block", a detected tamper (or, under failClosed, a check that could
+# not run) exits 2: Claude Code refuses the change for the session and shows no
+# message to the user or Claude, only a debug-log line; this hook does not revert the
+# file. Under "warn", it reports (debug log only) and exits 0. Off by default.
 #
 # Payload (ConfigChange, on stdin): { "source": "project_settings",
 #   "file_path": "<changed settings file>" }  (file_path is optional).
