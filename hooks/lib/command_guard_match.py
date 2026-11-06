@@ -182,6 +182,41 @@ _FETCH_VALUE_LONGS = {"--data", "--data-raw", "--data-binary", "--data-urlencode
 # host[.tld][:port][/path] with no scheme -- curl/wget default to HTTP, so a bare
 # host is still a remote fetch. One unbounded class (no nested quantifier) on purpose.
 _BARE_HOST_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}(?::[0-9]+)?(?:/.*)?$")
+# A whole word that is an http(s) URL to this machine: localhost, 127.0.0.0/8 or [::1],
+# an optional port, then nothing or a path/query/fragment. The authority runs to the
+# first `/ ? #` as curl reads it, so anything else in it — `@` (userinfo), `\`, a quote,
+# `%`, a brace, whitespace — fails the full match and the word blocks. A brace anywhere
+# in the word blocks too: bash brace expansion and curl's own URL glob turn
+# `{http://localhost/,https://evil.example/x}` into a second, outside URL, and the
+# tokenizer strips the leading `{` (the closing `}` stays). That holds only
+# because the words are the real tokens and _WINPATH_RE never rewrites a `\` in the
+# middle of a word. ASCII digits only, and no leading zeros (curl reads 0177 as octal).
+_LOOPBACK_URL_RE = re.compile(
+    r"https?://(localhost|127(?:\.(?:0|[1-9][0-9]{0,2})){3}|\[::1\])(?::[0-9]{1,5})?(?:[/?#][^{}]*)?",
+    re.ASCII)
+
+
+# A word that reads as a URL: `://` anywhere, or a scheme of two or more letters followed
+# by a backslash (`http:\\host`; one letter is a drive, `C:\`). Each must be loopback.
+_BACKSLASH_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.\-]+:/*\\")
+# A positional whose authority carries userinfo: `@evil.example/`, `a@evil.example/x`.
+# curl and wget take the host after the `@`. Option values (`-d @file`) are not
+# positionals. (A URL that NEL / U+2028 / U+2029 would split is judged whole by the
+# in-word reading in _segments; this covers the remainder a split reading leaves.)
+_USERINFO_TARGET_RE = re.compile(r"[^/?#]*@[^/?#@]")
+
+
+def _url_like(word: str) -> bool:
+    return "://" in word or bool(_BACKSLASH_SCHEME_RE.match(word))
+
+
+def _is_loopback_url(word: str) -> bool:
+    """True when <word> is entirely an http(s) URL to localhost, 127/8 or [::1]."""
+    m = _LOOPBACK_URL_RE.fullmatch(word)
+    if not m:
+        return False
+    host = m.group(1)
+    return not host.startswith("127.") or all(int(o) <= 255 for o in host.split(".")[1:])
 
 # Shell operators that end a sub-command. Backtick and parens are included so a
 # command substitution's BODY is judged as its own segment.
@@ -216,7 +251,10 @@ _LEAD_GROUP_CHARS = "{!"
 # Drive-letter (C:\dir\tool.exe) and UNC (\\host\share\tool.exe) paths only. POSIX
 # tokenization would otherwise eat those separators; a single character class keeps
 # this linear (no backtracking), unlike a nested (?:[^\\]+\\)+ form.
-_WINPATH_RE = re.compile(r"(?i)(?:[a-z]:\\|\\\\)[^\s\"'|&;()<>]*")
+# A drive letter is a single letter, not the end of a word (`http:\` is not drive P:),
+# and a UNC path starts a word: rewriting a `\\` in mid-word would turn
+# `http://localhost\\@evil.example/` into a loopback-looking URL.
+_WINPATH_RE = re.compile(r"(?i)(?:(?<![a-z0-9])[a-z]:\\|(?<![^\s\"'=(])\\\\)[^\s\"'|&;()<>]*")
 
 # A PowerShell here-string opener: @' or @" as the last thing on a line.
 _PS_HERESTRING_RE = re.compile(r"@['\"]\s*$")
@@ -587,9 +625,16 @@ def _rules_at(toks, idx, saw_xargs):
                            "root/cwd/home target")
 
     elif cmd in ("curl", "wget"):
-        if re.search(r"[a-z][a-z0-9+.\-]*://", seg):   # explicit scheme://
+        # Every word holding `://` (any scheme, a glob such as `{https,x}://`, an option
+        # value, a header) must be a loopback http(s) URL; one that is not blocks, as
+        # before. The bare-host rule below still runs on the positionals either way.
+        # The words are the tokens themselves, never a re-split of the joined segment:
+        # str.split() also splits on NBSP and other Unicode spaces that bash keeps
+        # inside a word, which would cut `http://localhost<NBSP>@evil.example/` in two.
+        if any(not _is_loopback_url(w) for w in toks if _url_like(w)):
             out.append("direct remote fetch with curl/wget is forbidden")
-        elif any(_BARE_HOST_RE.match(t) for t in _fetch_targets(cmd, args)):
+        elif any(_BARE_HOST_RE.match(t) or _USERINFO_TARGET_RE.match(t)
+                 for t in _fetch_targets(cmd, args)):
             # curl/wget default to HTTP, so a scheme-less host is still a fetch.
             out.append("direct remote fetch with curl/wget is forbidden")
 
@@ -1020,6 +1065,11 @@ def _lenient_words(line: str):
 _WORD_BREAKS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 _AS_LINE_BREAK = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\n"))
 _AS_SPACE = str.maketrans(dict.fromkeys(_WORD_BREAKS, " "))
+# A third reading keeps each character INSIDE its word, as bash does, under a stand-in
+# that is neither a separator nor anything a rule allows: `http://localhost<U+2028>-x@
+# evil.example/` is one word to curl, and must be one word here too. Readings only add
+# segments, so this can only add blocks.
+_AS_IN_WORD = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\x01"))
 
 # Characters PowerShell separates words on and the readings take for part of a word.
 # Beyond tab, VT, FF and space, PowerShell's whitespace is NBSP, NEL and every
@@ -1053,7 +1103,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
                   lenient_on_error=lenient_on_error)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
-                + _segments(lf.translate(_AS_SPACE), _depth, **kw))
+                + _segments(lf.translate(_AS_SPACE), _depth, **kw)
+                + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
     segments, lenient = [], []
     text = _expand_ifs(_slashify_windows_paths(raw))
     if shell == "powershell" and ps_slashes:

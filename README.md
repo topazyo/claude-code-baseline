@@ -61,7 +61,9 @@ rather than waving it through as clean.
   and friends (including drive roots such as `C:/`, `/c` and `/mnt/c`, and
   `../..`), `git push --force` (including `+refspec` forms), `git reset
   --hard`, dangerous SQL (`drop/truncate table`, `delete from`), remote fetch
-  via `curl`/`wget` (including scheme-less hosts, since both default to HTTP),
+  via `curl`/`wget` (including scheme-less hosts, since both default to HTTP;
+  an `http(s)://` URL to `localhost`, `127.x.x.x` or `[::1]` is not a remote fetch, though
+  options that steer the connection elsewhere, such as `-x` or `--connect-to`, are not judged),
   and package installs (`npm/pnpm/yarn/pip install`, bare `yarn`,
   `python -m pip install`). The matcher is token-aware: it resolves quoting,
   `${IFS}`, wrapper paths (`/bin/rm`, `sh -c`, `xargs`), wrappers with options
