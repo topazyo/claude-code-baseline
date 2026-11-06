@@ -66,6 +66,15 @@ else
   echo "   SKIP (git not available)"
 fi
 
+echo "== 8. Hebrew translations in sync with the English docs =="
+# The Hebrew onboarding and README make the same security claims as the English
+# ones, to readers least able to cross-check them, so a stale translation fails the
+# build. The fixtures prove the checker catches each defect class it claims to
+# (drift, an altered or invented command, bidi controls, broken anchors, a decoder
+# message gone from the hooks); then the real files are checked.
+"$PY" "$ROOT/tests/test_translation_sync.py" || fail=1
+"$PY" "$ROOT/tests/translation_sync.py" check || fail=1
+
 echo ""
 if [ "$fail" -eq 0 ]; then echo "ALL GREEN"; else echo "FAILURES ABOVE"; fi
 exit $fail

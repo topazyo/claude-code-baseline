@@ -1,5 +1,7 @@
 # Onboarding: Claude Code Hooks & Our Security Baseline
 
+**English** · [עברית](ONBOARDING.he.md) — a complete Hebrew translation of this guide.
+
 > **New to Claude Code? New to hooks? Start here.** By the end you'll understand
 > what hooks are, why our org ships a security baseline, what it protects you
 > from, and how to turn on the optional pieces that fit your project.
