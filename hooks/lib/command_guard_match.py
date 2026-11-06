@@ -67,7 +67,10 @@ see through encoding (base64), arbitrary variable indirection (only the literal
 $HOME/${HOME} home tokens are caught), or runtime aliases. Two residual limits of
 the tokenizer itself, stated here rather than claimed away elsewhere: POSIX escape
 resolution consumes backslashes, so an *unquoted* Windows path is only recovered
-for drive-letter/UNC forms (see _slashify_windows_paths); and a command
+for drive-letter/UNC forms (see _slashify_windows_paths), and text holding one is
+judged both that way and as the shell reads it (see _segments) -- so a heredoc body
+of very many lines that each end in a path's backslash is refused as a continuation
+chain too long to inspect; and a command
 substitution inside a double-quoted ARGUMENT (`echo "$(...)"`) is not inspected --
 a quoted separator stays inside its word, as in bash (see _shell_words), so a
 `sh -c` script is judged whole but a quoted sentence is not mistaken for commands. Multi-line limits: the
@@ -1090,23 +1093,27 @@ _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
 
 
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
-              piped: bool = False, lenient_on_error: bool = False):
+              piped: bool = False, lenient_on_error: bool = False,
+              windows_paths: bool = True):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
     _logical_lines), each logical line is really tokenized (shlex, posix), then
     operator tokens end a segment. A logical line that spans several physical lines
-    is ALSO inspected line by line, leniently (see _lenient_words).
+    is ALSO inspected line by line, leniently (see _lenient_words). Text holding a
+    drive-letter or UNC path is also read without the path rewrite (windows_paths
+    False; see the end of this function).
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
-                  lenient_on_error=lenient_on_error)
+                  lenient_on_error=lenient_on_error, windows_paths=windows_paths)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
     segments, lenient = [], []
-    text = _expand_ifs(_slashify_windows_paths(raw))
+    slashed = _slashify_windows_paths(raw) if windows_paths else raw
+    text = _expand_ifs(slashed)
     if shell == "powershell" and ps_slashes:
         # PowerShell's escape is the backtick; a backslash is a path separator, so
         # `rm -r -Force ..\..` must not tokenize to `....`.
@@ -1167,7 +1174,24 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     # of `bash -c "rm -rf ~"` is already bare tokens. Splitting would take only its
     # first word as the script and strand the arguments; _lenient_inline judges
     # every word after the -c instead.
-    return segments + lenient
+    segments += lenient
+    # The drive-letter/UNC rewrite above reads `C:\dir\x` as a path; a POSIX shell
+    # reads those backslashes as it reads any other. So when the rewrite changed the
+    # text, ALSO judge the text as the shell itself reads it and add those segments:
+    # a command is judged by both readings, so this only adds blocks. The extra
+    # reading is lenient about quoting, because a path such as "C:\dir\" that the
+    # rewrite balances is often unbalanced read that way; such a line is then judged
+    # piecewise rather than refused. It is not lenient about _Uninspectable: a run of
+    # lines that each end in a backslash is a continuation chain read that way, and a
+    # chain too long to inspect still blocks. PowerShell's own reading (ps_slashes)
+    # turns every backslash into a separator anyway, so it has no second reading; an
+    # inline `bash -c` script in it is covered by the POSIX readings of the same text
+    # (see _powershell_segments). Cost: only text with a drive or UNC path pays, at
+    # most twice per nesting level.
+    if slashed != raw and not (shell == "powershell" and ps_slashes):
+        segments += _segments(raw, _depth, shell=shell, ps_slashes=ps_slashes,
+                              piped=piped, lenient_on_error=True, windows_paths=False)
+    return segments
 
 
 def _lenient_inline(toks):
