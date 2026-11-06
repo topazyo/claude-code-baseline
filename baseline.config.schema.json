@@ -20,7 +20,7 @@
       "type": "string",
       "enum": ["block", "warn"],
       "default": "block",
-      "description": "Global posture. 'block': hooks fail the tool call on violation. 'warn': hooks advise but never fail; the report is shown to the user (systemMessage) and to Claude (additionalContext), except configGuard's, which Claude Code discards for ConfigChange hooks. Note the event asymmetry: only PreToolUse hooks can fail a tool call. A PostToolUse hook exits after the write has already happened, so under 'block' it reports the violation to Claude rather than undoing it."
+      "description": "Global posture. 'block': hooks fail the tool call on violation (configGuard instead refuses the settings change, silently). 'warn': hooks advise but never fail; the report is shown to the user (systemMessage) and to Claude (additionalContext), except configGuard's, which Claude Code discards for ConfigChange hooks in every posture. Note the event asymmetry: only PreToolUse hooks can fail a tool call. A PostToolUse hook exits after the write has already happened, so under 'block' it reports the violation to Claude rather than undoing it."
     },
     "failClosed": {
       "type": "boolean",
@@ -87,7 +87,7 @@
         "configGuard": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ConfigChange tamper-detection. When enabled, watches in-session changes to the settings files the baseline wires it to - .claude/settings.json (source project_settings) and .claude/settings.local.json (source local_settings, which overrides it) - and blocks/warns if, in settings.json, the baseline hook wiring or deny-list is stripped, or, in either file, disableAllHooks or a risky environment value is set, or, in settings.local.json, a hook entry names a baseline script. Detection after the fact, in-session only: it sees a change Claude Code reports, not an edit made while no session is running, and it does not watch baseline.config.json or the hook scripts themselves.",
+          "description": "ConfigChange tamper-detection. When enabled, watches in-session changes to the settings files the baseline wires it to - .claude/settings.json (source project_settings) and .claude/settings.local.json (source local_settings, which overrides it) - and blocks/warns if, in settings.json, the baseline hook wiring or deny-list is stripped, or, in either file, disableAllHooks or a risky environment value is set, or, in settings.local.json, a hook entry names a baseline script. It runs after the change: under block it refuses the change for the session without any message (only the debug log has the report) and does not revert the file; in-session only: it sees a change Claude Code reports, not an edit made while no session is running, and it does not watch baseline.config.json or the hook scripts themselves.",
           "properties": { "enabled": { "type": "boolean", "default": false } }
         },
         "runTests": {

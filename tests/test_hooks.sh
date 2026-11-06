@@ -1060,6 +1060,20 @@ setcfg "c['enforcement']='warn'"
 run "tamper+warn -> 0"           modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_disable.json")" 0
 resetcfg
 run "disabled module -> 0"       modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_disable.json")" 0
+# Regression guard (passes on main too): a tamper report goes to stderr, in both postures,
+# and stdout stays empty. Claude Code shows a ConfigChange hook's report to no one (a
+# blocked change surfaces no message; it writes a debug-log line), so the docs point to
+# `claude --debug`; and a ConfigChange hook's stdout JSON is acted on as a decision, so
+# none may appear by accident.
+setcfg "c['modules']['configGuard']['enabled']=True"
+run_out "config-guard block, tamper -> 2" modules/config-guard.sh 2 <<< "$(ccp project_settings "$TDIR/_t_disable.json")"
+quiet_ok "config-guard block tamper prints nothing on stdout"
+err_has "config-guard block tamper report is on stderr" "SETTINGS TAMPER DETECTED"
+setcfg "c['enforcement']='warn'"
+run_out "config-guard warn, tamper -> 0" modules/config-guard.sh 0 <<< "$(ccp project_settings "$TDIR/_t_disable.json")"
+quiet_ok "config-guard warn tamper prints nothing on stdout"
+err_has "config-guard warn tamper report is on stderr" "SETTINGS TAMPER DETECTED"
+resetcfg
 # Assert the rendered report is intact (not just the exit code) — guards against the
 # grep-binary / CRLF corruption that mangled multi-finding output. All three findings
 # must appear cleanly, with no stray "Binary file" text.

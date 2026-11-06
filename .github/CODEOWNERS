@@ -1,6 +1,7 @@
 # Hook scripts are executable content that runs automatically on every
-# contributor's machine (see CVE-2025-59536). Every change to a guardrail, a
-# permission rule, or the installer requires security review.
+# contributor's machine once the folder is trusted (see GHSA-ph6w-f82w-28w6).
+# Every change to a guardrail, a permission rule, or the installer requires
+# security review.
 #
 # Consumers who install this baseline should add the equivalent rule to their
 # own repo:  /.claude/**  @their-security-team

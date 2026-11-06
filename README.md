@@ -32,7 +32,7 @@ a tool call **before** the tool runs:
 |-------|-------|-------------------------------|
 | `PreToolUse` | command-guard, scopeGuard | The tool call **is refused**. Nothing ran. |
 | `PostToolUse` | securityDefaults, fixTags, runTests, autoFormat, autoStage | **The write already happened.** The hook's stderr is reported back to Claude so it can correct course, and the dispatcher stops the rest of the chain — but nothing is undone or reverted. |
-| `ConfigChange` | configGuard | Detection after the fact, within the session. |
+| `ConfigChange` | configGuard | Fires when a settings file changes mid-session. A detected tamper (or, under `failClosed`, a check that could not run) is refused for the session — **silently**: Claude Code shows no message to you or Claude and writes only a debug-log line. configGuard does not revert the file: revert the change yourself (re-running `install.sh` restores only the hook wiring and deny-list; it leaves `disableAllHooks`, `env` and `settings.local.json` as they are). If a settings edit seems to have no effect, check `claude --debug`. |
 | `Stop` | trackerReminder | A reminder shown to you. Never blocks, never sends Claude back to work. |
 
 `"enforcement": "warn"` downgrades every one of the above to a warning: the action
@@ -43,7 +43,8 @@ JSON object on stdout — `systemMessage` for you, `additionalContext` for Claud
 The same applies to a control that could not run under `"failClosed": false`, and,
 in any posture, to the dispatcher's note that a formatter or auto-stage step ran out
 of time. Two exceptions: configGuard (Claude Code discards a ConfigChange hook's
-messages, so under `warn` its report reaches only the debug log, `claude --debug`)
+messages in every posture: under `warn` its report reaches only the debug log,
+`claude --debug`, and under `block` the change is refused without a message)
 and trackerReminder, which is advisory in every posture: its reminder is shown to you
 (`systemMessage`) but not passed to Claude, because context from a `Stop` hook keeps
 the turn going.
@@ -126,7 +127,7 @@ Two limits, stated plainly:
 | `securityDefaults` | PostToolUse | Verify immutable infra defaults haven't drifted, from a **declarative rules file** (see below). Reports to Claude after the write; cannot undo it. |
 | `fixTags` | PostToolUse | Require a traceability tag (e.g. `# FIX: TICKET-123`) on every added line. Configurable marker, file types, and an optional env gate. Reports to Claude after the write; cannot undo it. |
 | `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. Whether or not `scopeGuard` is enabled, `scope-guard.sh` also refuses a Write or Edit that puts the baseline hook directory's path (`/.claude/hooks/baseline/`) into a subagent or skill definition under `.claude/agents/` or `.claude/skills/`; that check has no switch and follows `enforcement`. |
-| `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` (baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, `disableAllHooks` or a risky environment value set) and of `.claude/settings.local.json` (`disableAllHooks`, a risky environment value, or a hook entry naming a baseline script, which the installer never writes there). **Off by default; detection after the change, not prevention; in-session only; watches those two files only** — never `baseline.config.json` and never the hook scripts. A deleted `settings.local.json` is normal; an unreadable one is treated as tampered. |
+| `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` (baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, `disableAllHooks` or a risky environment value set) and of `.claude/settings.local.json` (`disableAllHooks`, a risky environment value, or a hook entry naming a baseline script, which the installer never writes there). **Off by default; under `block` it refuses the change for the session, silently (the report is in `claude --debug`), and does not revert the file; in-session only; watches those two files only** — never `baseline.config.json` and never the hook scripts. A deleted `settings.local.json` is normal; an unreadable one is treated as tampered. |
 | `runTests` | PostToolUse | Run the right test/lint per file type (pytest, shellcheck/bats, yamllint/actionlint). Missing tools are skipped. Reports to Claude after the write; cannot undo it. A failing check's output is passed on verbatim but capped (the first 60 lines of a linter's report, the last 30 of pytest's, the last 20 of bats'); a passing one stays quiet. Anything a failing test prints — file contents, environment values — is therefore shown to Claude (and, under `warn`, to you). |
 | `trackerReminder` | Stop | When Claude stops and commits whose subject contains `commitGrep` are among the last 20 (not only this session's), show you a reminder to update a tracking doc — once per session, then again only for a new matching commit (an amended or rebased commit counts as new). The session memory is kept in `.git/baseline/`; without a usable `session_id` in the Stop input, or when that memory cannot be used, it reminds at every stop. Not passed to Claude. Never blocks. |
 | `autoStage` | PostToolUse | `git add` changed files after all gates pass. Never blocks. |
@@ -214,7 +215,8 @@ limit — not a bug. Read it before you rely on any of the above.
   settings edit that repairs it mid-session.
 - **Config tampering by a human or an external process is largely uncovered.**
   `configGuard` is off by default, and even enabled it sees only in-session
-  `.claude/settings.json` and `.claude/settings.local.json` changes, after they land.
+  `.claude/settings.json` and `.claude/settings.local.json` changes, after they land,
+  and its refusal under `block` is silent.
 - **Nothing here addresses prompt injection itself.** This baseline constrains
   which *actions* are permitted. It does not make the model resistant to
   malicious instructions arriving in a file, a web page, or an MCP response.
@@ -383,10 +385,13 @@ TLS 1.3, skills signing). Copy it to `.claude/security-defaults.json` and adapt.
 ### Review the hooks like the executable content they are
 
 Committing `.claude/hooks/baseline/**` plus the `settings.json` wiring means a
-script in the repo **runs automatically on every collaborator's machine**, with
-no per-command approval — the CVE-2025-59536 pattern this baseline exists to
-contain. A one-line PR to `common.sh` executes on everyone who pulls it. So, in
-every repo that adopts the baseline:
+script in the repo **runs automatically on every collaborator's machine** once
+they trust the folder, with no per-command approval. Accepting the trust prompt
+allows exactly that (GHSA-ph6w-f82w-28w6: until 1.0.87 the prompt did not make it
+clear; CVE-2025-59536, fixed in 1.0.111, was a related bug that ran a project's
+code before the prompt was accepted). This is what the baseline exists to contain.
+A one-line PR to `common.sh` executes on everyone who pulls it. So, in every repo
+that adopts the baseline:
 
 - Add a `CODEOWNERS` entry requiring security review of `/.claude/**` (this repo
   ships [its own](.github/CODEOWNERS) as a model — replace `@OWNER` before use).
