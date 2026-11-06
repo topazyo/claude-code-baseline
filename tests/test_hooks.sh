@@ -401,6 +401,89 @@ quiet_ok "tracker-reminder, empty tracker prints nothing"
 setcfg "$TRK.update(enabled=False, commitGrep='D3TRK-', tracker='CHANGELOG.md')"
 run_out "tracker-reminder, module off -> 0" modules/tracker-reminder.sh 0 <<< '{}'
 quiet_ok "tracker-reminder, module off prints nothing"
+# Per session (the Stop input's session_id): the matches are shown once, then only a NEW
+# matching commit is. The memory lives in .git/baseline/tracker-reminder/<session_id>.
+# Whenever it cannot be used, the module reminds at every Stop, as above with '{}'.
+stop_payload() { printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false}' "$1"; }
+TRKOLD="2 of the last 20 commits matched"; TRKALL="3 of the last 20 commits matched"
+SDIR="$WT/.git/baseline/tracker-reminder"
+setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-', tracker='CHANGELOG.md')"
+porc0="$(git status --porcelain)"
+run_out "tracker S1, first stop -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S1)"
+sysmsg_ok "tracker S1, first stop shows the matches as before" '"'"$TRKOLD"'" in m and "confirm CHANGELOG.md" in m'
+run_out "tracker S1, second stop -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S1)"
+quiet_ok "tracker S1, second stop with nothing new prints nothing"
+git commit -q --allow-empty -m "D3TRK-3 third" </dev/null
+run_out "tracker S1, after a new matching commit -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S1)"
+sysmsg_ok "tracker S1, a new matching commit is shown as 1 new" '"1 new matching commit(s) since the last reminder" in m and "D3TRK-" in m'
+run_out "tracker S1, stop after that -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S1)"
+quiet_ok "tracker S1, nothing new again prints nothing"
+run_out "tracker S2, another session -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S2)"
+sysmsg_ok "tracker S2, another session has its own memory" '"'"$TRKALL"'" in m'
+# The memory is in .git, not the working tree. Guard (passes on main too): no session_id
+# still reminds at every Stop.
+if [ -f "$SDIR/S1" ] && [ "$(git status --porcelain)" = "$porc0" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [tracker session memory must be in .git/baseline, not the working tree]"; fi
+for n in 1 2; do
+  run_out "tracker no session_id, stop $n -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+  sysmsg_ok "tracker no session_id, stop $n reminds" '"'"$TRKALL"'" in m'
+done
+# Stateless, twice each: ids that are not plain names, a payload that is not JSON, no stdin.
+long="$(printf 'x%.0s' $(seq 1 129))"
+for bad in '../evil' 'a/b' '..' '' "$long"; do
+  for n in 1 2; do
+    run_out "tracker id '${bad:0:12}', stop $n -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload "$bad")"
+    sysmsg_ok "tracker id '${bad:0:12}', stop $n reminds as without a session" '"'"$TRKALL"'" in m'
+  done
+done
+if [ ! -e "$WT/.git/baseline/evil" ] && [ ! -e "$WT/.git/evil" ] && [ ! -e "$SDIR/a" ] && [ ! -e "$SDIR/$long" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [tracker wrote a state file for an invalid session id]"; fi
+run_out "tracker unparseable payload -> 0" modules/tracker-reminder.sh 0 <<< '{ not json'
+sysmsg_ok "tracker unparseable payload reminds" '"'"$TRKALL"'" in m'
+run_out "tracker no stdin -> 0" modules/tracker-reminder.sh 0 < /dev/null
+sysmsg_ok "tracker no stdin reminds" '"'"$TRKALL"'" in m'
+# Unusable memory, portable on every host: a directory where the session file belongs, and
+# a plain file where the baseline directory belongs. Each reminds at every Stop.
+mkdir "$SDIR/S9"
+for n in 1 2; do
+  run_out "tracker S9 state is a directory, stop $n -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S9)"
+  sysmsg_ok "tracker S9 state is a directory, stop $n reminds" '"'"$TRKALL"'" in m'
+done
+mv "$WT/.git/baseline" "$TMP/baseline.saved"; printf 'x\n' > "$WT/.git/baseline"
+for n in 1 2; do
+  run_out "tracker .git/baseline is a file, stop $n -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S10)"
+  sysmsg_ok "tracker .git/baseline is a file, stop $n reminds" '"'"$TRKALL"'" in m'
+done
+rm -f "$WT/.git/baseline"
+# A symlinked baseline directory would aim the writes elsewhere: refused. Git Bash without
+# the symlink privilege copies on `ln -s`; there a junction (no privilege needed, and MSYS
+# reports it as a symlink) stands in, so Windows runs the case too.
+mkdir "$TMP/elsewhere"
+ln -s "$TMP/elsewhere" "$WT/.git/baseline" 2>/dev/null
+if [ ! -L "$WT/.git/baseline" ] && command -v cygpath >/dev/null 2>&1; then
+  rm -rf "$WT/.git/baseline"
+  MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$WT/.git/baseline")" "$(cygpath -w "$TMP/elsewhere")" >/dev/null 2>&1
+fi
+if [ -L "$WT/.git/baseline" ]; then
+  for n in 1 2; do
+    run_out "tracker symlinked .git/baseline, stop $n -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S11)"
+    sysmsg_ok "tracker symlinked .git/baseline, stop $n reminds" '"'"$TRKALL"'" in m'
+  done
+  if [ -z "$(ls -A "$TMP/elsewhere")" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [tracker wrote through a symlinked .git/baseline]"; fi
+  rm -f "$WT/.git/baseline"
+else
+  rm -rf "$WT/.git/baseline"
+  echo "  note: symlinked-state case not run (ln -s made no symlink on this host)"
+fi
+mv "$TMP/baseline.saved" "$WT/.git/baseline"
+# Prune: a session's first write removes memory idle for 14 days and keeps fresh memory.
+: > "$SDIR/OLD"; touch -t 202001010000 "$SDIR/OLD"
+run_out "tracker S12, first stop -> 0" modules/tracker-reminder.sh 0 <<< "$(stop_payload S12)"
+if [ ! -e "$SDIR/OLD" ] && [ -f "$SDIR/S1" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [tracker prune: old session memory kept or fresh memory removed]"; fi
+# Subject only: a commitGrep that is only in a hash does not count.
+hpre="$(git log -1 --format=%H --fixed-strings --grep 'D3TRK-1 first' | cut -c1-7)"
+if [ ${#hpre} -eq 7 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [tracker subject-only case: no hash prefix found]"; fi
+setcfg "$TRK.update(enabled=True, commitGrep='$hpre', tracker='CHANGELOG.md')"
+run_out "tracker commitGrep in a hash only -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+quiet_ok "tracker matches commit subjects, not hashes"
 resetcfg
 rm -f "$TMP/_err" "$TMP/_nerr"
 
