@@ -245,18 +245,90 @@ valid_rules; printf 'services:\n  app:\n    user: "1000:1000"\n' > "$WT/docker-c
 resetcfg; setcfg "c['enforcement']='warn'"
 run_out "post-write warn, nothing to report -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/notes.txt")"
 quiet_ok "post-write warn, nothing to report prints nothing"          # regression guard
-# A grandchild a module leaves running with the child's stderr must not hold the
-# dispatcher: run-tests calls a shellcheck stub that backgrounds a long sleep on stderr.
+# run-tests: a failing check's output must reach Claude (exit 2) and the warn notice. The
+# dispatcher discards its children's stdout, so the details have to go to stderr. Each
+# stub prints one marker on stdout and another on stderr, so capturing one stream fails.
 SCBIN="$TMP/sc-bin"; mkdir -p "$SCBIN"
-printf '#!/usr/bin/env bash\nsleep 40 >&2 &\necho "stub shellcheck: issue" >&2\nexit 1\n' > "$SCBIN/shellcheck"; chmod +x "$SCBIN/shellcheck"
+printf '#!/usr/bin/env bash\necho "SC9999 out-detail"\necho "SC9999 err-detail" >&2\nexit 1\n' > "$SCBIN/shellcheck"; chmod +x "$SCBIN/shellcheck"
 printf 'echo hi\n' > "$WT/stub.sh"
-setcfg "c['modules']['runTests']['enabled']=True"
+setcfg "c['modules']['runTests']['enabled']=True"; setcfg "c['enforcement']='warn'"
+run_out "post-write warn, run-tests fails -> 0" dispatcher/post-write.sh 0 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+notice_ok "run-tests failure details reach the warn notice" PostToolUse '"SC9999 out-detail" in m and "SC9999 err-detail" in m and "checks failed" in m'
+resetcfg; setcfg "c['modules']['runTests']['enabled']=True"
+run_out "post-write block, run-tests fails -> 2" dispatcher/post-write.sh 2 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+quiet_ok "post-write block, run-tests fails prints nothing on stdout"
+err_has "post-write block passes run-tests' stdout detail on" "SC9999 out-detail"
+err_has "post-write block passes run-tests' stderr detail on" "SC9999 err-detail"
+setcfg "c['failClosed']=False"
+run_out "post-write block+failClosed:false, run-tests fails -> 2" dispatcher/post-write.sh 2 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+err_has "post-write block+failClosed:false passes run-tests' stdout detail on" "SC9999 out-detail"
+err_has "post-write block+failClosed:false passes run-tests' stderr detail on" "SC9999 err-detail"
+resetcfg; setcfg "c['modules']['runTests']['enabled']=True"
+# The module alone: the details come first, then the verdict line.
+run_out "run-tests alone, failing check -> 2" modules/run-tests.sh 2 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+case "$ERR" in *"SC9999 out-detail"*"checks failed"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [run-tests: stdout detail missing or after the verdict line]" ;; esac
+case "$ERR" in *"SC9999 err-detail"*"checks failed"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [run-tests: stderr detail missing or after the verdict line]" ;; esac
+# Truncation: a linter keeps its first 60 lines, a test runner its last lines (bats: 20),
+# each with a marker; exactly the cap prints whole, no marker; an unterminated last line
+# is not glued to the verdict line.
+"$PY" -c "open(r'$(winpath "$SCBIN")/shellcheck','w',newline='\n').write('#!/usr/bin/env bash\n' + ''.join('echo \"LN%d.\"\n' % i for i in range(1, 71)) + 'exit 1\n')"
+run_out "run-tests, 70-line linter report -> 2" modules/run-tests.sh 2 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+case "$ERR" in *"LN1."*"LN60."*"10 more lines omitted"*"checks failed"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [run-tests linter head cap: first 60 lines + marker on stderr]" ;; esac
+case "$ERR" in *"LN61."*) fail=$((fail + 1)); echo "  FAIL [run-tests linter head cap printed line 61]" ;; *) pass=$((pass + 1)) ;; esac
+"$PY" -c "open(r'$(winpath "$SCBIN")/shellcheck','w',newline='\n').write('#!/usr/bin/env bash\n' + ''.join('echo \"LN%d.\"\n' % i for i in range(1, 61)) + 'exit 1\n')"
+run_out "run-tests, 60-line linter report -> 2" modules/run-tests.sh 2 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+case "$ERR" in *"LN1."*"LN60."*"checks failed"*) case "$ERR" in *omitted*) fail=$((fail + 1)); echo "  FAIL [run-tests: a report of exactly the cap got a marker]" ;; *) pass=$((pass + 1)) ;; esac ;; *) fail=$((fail + 1)); echo "  FAIL [run-tests: a report of exactly the cap was not printed whole]" ;; esac
+printf '#!/usr/bin/env bash\nprintf "no newline at the end"\nexit 1\n' > "$SCBIN/shellcheck"
+run_out "run-tests, unterminated report -> 2" modules/run-tests.sh 2 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+case "$ERR" in *"no newline at the end"$'\n'*"checks failed"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [run-tests: an unterminated last line was glued to the next line]" ;; esac
+# bats: a passing shellcheck, a failing 25-line bats run on tests/stub.bats.
+BATSBIN="$TMP/bats-bin"; mkdir -p "$BATSBIN" "$WT/tests"; : > "$WT/tests/stub.bats"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$BATSBIN/shellcheck"
+"$PY" -c "open(r'$(winpath "$BATSBIN")/bats','w',newline='\n').write('#!/usr/bin/env bash\n' + ''.join('echo \"BT%d.\"\n' % i for i in range(1, 26)) + 'exit 1\n')"
+chmod +x "$BATSBIN/shellcheck" "$BATSBIN/bats"
+run_out "run-tests, 25-line bats failure -> 2" modules/run-tests.sh 2 "PATH=$BATSBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+case "$ERR" in *"5 earlier lines omitted"*"BT6."*"BT25."*"checks failed"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [run-tests bats tail cap: marker + last 20 lines on stderr]" ;; esac
+case "$ERR" in *"BT5."*) fail=$((fail + 1)); echo "  FAIL [run-tests bats tail cap printed line 5]" ;; *) pass=$((pass + 1)) ;; esac
+rm -rf "$WT/tests"
+# An inherited OUT_TMP never chooses the file the checks write.
+printf 'keep\n' > "$TMP/keep-out"
+printf '#!/usr/bin/env bash\necho "SC9999 out-detail"\nexit 1\n' > "$SCBIN/shellcheck"
+run_out "run-tests, inherited OUT_TMP -> 2" modules/run-tests.sh 2 "PATH=$SCBIN:$PATH" "OUT_TMP=$TMP/keep-out" <<< "$(write_payload "$WT/stub.sh")"
+if [ "$(cat "$TMP/keep-out")" = keep ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [run-tests wrote to an inherited OUT_TMP]"; fi
+err_has "run-tests with an inherited OUT_TMP still reports the detail" "SC9999 out-detail"
+# New behaviour, fails on main (a passing linter's stderr chatter became a notice): a
+# passing check stays quiet under warn. The only test that kills "print on success" and
+# "capture stdout only, let stderr stream"; keep it.
+OKBIN="$TMP/sc-ok-bin"; mkdir -p "$OKBIN"
+printf '#!/usr/bin/env bash\necho "stub ok chatter out"\necho "stub ok chatter err" >&2\nexit 0\n' > "$OKBIN/shellcheck"; chmod +x "$OKBIN/shellcheck"
+setcfg "c['enforcement']='warn'"
+run_out "post-write warn, run-tests passes -> 0" dispatcher/post-write.sh 0 "PATH=$OKBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
+quiet_ok "post-write warn, a passing run-tests check prints nothing"
+# A grandchild a check leaves running holds run-tests' own output file, never a pipe, so
+# run-tests does not wait for it and is never killed at its 27 s budget: the notice has
+# the verdict line and no "exceeded" (that, not a tight clock, is what fails when a pipe
+# holds run-tests: a wall-clock bound under the budget flaked at 25 s on a loaded host).
+# The sleep runs from / so it never holds $TMP as its cwd.
+printf '#!/usr/bin/env bash\n(cd / && exec sleep 40) &\necho "stub shellcheck: issue" >&2\nexit 1\n' > "$SCBIN/shellcheck"
 t0=$(date +%s)
 run_out "post-write warn, run-tests fails with a lingering grandchild -> 0" dispatcher/post-write.sh 0 "PATH=$SCBIN:$PATH" <<< "$(write_payload "$WT/stub.sh")"
 t1=$(date +%s)
-if [ $((t1 - t0)) -lt 30 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a grandchild holding a child's stderr held the dispatcher for $((t1 - t0))s]"; fi
-notice_ok "run-tests failure under warn is shown, child stdout kept out" PostToolUse '"checks failed" in m'
+if [ $((t1 - t0)) -lt 30 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a grandchild of a run-tests check held the dispatcher for $((t1 - t0))s]"; fi
+notice_ok "run-tests failure with a lingering grandchild is shown, not killed" PostToolUse '"stub shellcheck: issue" in m and "checks failed" in m and "exceeded" not in m'
 resetcfg; rm -f "$WT/stub.sh"
+# The dispatcher's own file (D4): a child whose grandchild holds the CHILD's stderr must
+# not hold the dispatcher. A copy of the tree, with a stand-in for fix-tags.
+cp -r "$H" "$TMP/h2"
+printf '#!/usr/bin/env bash\n(cd / && exec sleep 40 >&2) &\necho "stand-in: lingering" >&2\nexit 0\n' > "$TMP/h2/modules/fix-tags.sh"
+setcfg "c['enforcement']='warn'"
+t0=$(date +%s)
+H0="$H"; H="$TMP/h2"
+run_out "post-write warn, a child's grandchild holds its stderr -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/notes.txt")"
+H="$H0"
+t1=$(date +%s)
+if [ $((t1 - t0)) -lt 30 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a grandchild holding a child's stderr held the dispatcher for $((t1 - t0))s]"; fi
+notice_ok "a child's stderr is shown though a grandchild still holds it" PostToolUse '"stand-in: lingering" in m'
+resetcfg
 
 # Inherited values cannot pre-seed a notice or aim the trap's cleanup at another file
 printf 'keep\n' > "$TMP/keepme"

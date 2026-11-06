@@ -10,6 +10,12 @@
 #
 # Posture: under "block", a test/lint failure exits 2 (full feedback to Claude,
 # which must fix it); under "warn", failures are reported but the hook exits 0.
+#
+# Output: a failing check's output goes to STDERR, the only stream that reaches anyone.
+# The dispatcher discards its children's stdout (its own stdout must stay one JSON
+# object), passes stderr to Claude on exit 2, and folds it into the shown notice under
+# warn. A passing check prints nothing there, so warn mode does not add a notice to
+# every edit. The details are the tool's own output, verbatim: repo-controlled text.
 
 set -uo pipefail
 
@@ -48,7 +54,60 @@ fi
 [[ -z "$CHANGED_FILE" ]] && CHANGED_FILE="."
 
 FAILED=0
+# Never an inherited value: bash imports the environment, and an OUT_TMP from it would
+# choose the file every check empties and writes (or, empty, force the streaming path).
+unset -v OUT_TMP
 run_if_available() { command -v "$1" >/dev/null 2>&1; }
+
+# run_check <head|tail> <max-lines> <label> <cmd> [args...]
+# Runs one check with its stdout and stderr in a file — not a pipe and not $( ): a
+# grandchild the tool leaves running would hold a pipe open and keep this module waiting
+# until the dispatcher kills it. On failure, at most <max-lines> of that output go to
+# stderr: the first for a linter (issues in file order), the last for a test runner (its
+# summary comes last). On success nothing goes to stderr.
+# One file, created on first use so an edit no check matches pays no fork, emptied and
+# then APPENDED to, as in the dispatcher (post-write.sh, _child_ran): a grandchild an
+# earlier check left running keeps writing at its old offset after a plain truncation,
+# which leaves NUL holes in the next check's text.
+run_check() {
+  local end="$1" max="$2" label="$3" rc=0 total; shift 3
+  if [[ -z "${OUT_TMP+x}" ]]; then
+    OUT_TMP="$(mktemp 2>/dev/null)" || OUT_TMP=""
+    # The only EXIT trap in this process (chain it with _bcl_emit_notice if this script
+    # ever calls bcl_notice_event). rm's own errors stay out of the notice. A SIGKILL
+    # (timeout -k, for a tool that ignores TERM) skips it and leaves the file in TMPDIR.
+    if [[ -n "$OUT_TMP" ]]; then trap 'rm -f -- "$OUT_TMP" 2>/dev/null' EXIT; fi
+  fi
+  if [[ -n "$OUT_TMP" ]]; then
+    : > "$OUT_TMP"
+    "$@" >>"$OUT_TMP" 2>&1 || rc=$?
+  else
+    # No temp file: stream to stderr, so a failure's details are never lost (the cost:
+    # a passing check's output joins a warn-mode notice too, on this rare path only).
+    "$@" >&2 || rc=$?
+  fi
+  if (( rc == 0 )); then echo "✅ $label passed"; return 0; fi
+  FAILED=1
+  echo "⚠️  $label failed (exit $rc):" >&2
+  [[ -n "$OUT_TMP" ]] || return 1
+  total=$(( $(wc -l < "$OUT_TMP") ))
+  # wc -l counts newlines: an unterminated last line is a line too, and gets its newline
+  # below so it is not glued to the next line of the report.
+  local open=0
+  if [[ -s "$OUT_TMP" && -n "$(tail -c 1 -- "$OUT_TMP")" ]]; then open=1; total=$((total + 1)); fi
+  if (( total <= max )); then
+    cat -- "$OUT_TMP" >&2
+    if (( open )); then echo >&2; fi
+  elif [[ "$end" == head ]]; then
+    head -n "$max" -- "$OUT_TMP" >&2
+    echo "… ($((total - max)) more lines omitted)" >&2
+  else
+    echo "… ($((total - max)) earlier lines omitted)" >&2
+    tail -n "$max" -- "$OUT_TMP" >&2
+    if (( open )); then echo >&2; fi
+  fi
+  return 1
+}
 
 echo "[run-tests] target: $CHANGED_FILE"
 
@@ -58,9 +117,9 @@ if [[ "$CHANGED_FILE" == *.py || "$CHANGED_FILE" == "." ]]; then
   if [[ -n "$PYBIN" ]] && "$PYBIN" -c 'import pytest' >/dev/null 2>&1 && [[ -d tests ]]; then
     BASENAME="$(basename "$CHANGED_FILE" .py)"
     if [[ -f "tests/test_${BASENAME}.py" ]]; then
-      "$PYBIN" -m pytest "tests/test_${BASENAME}.py" -x -q --tb=short 2>&1 | tail -30 || FAILED=1
+      run_check tail 30 pytest "$PYBIN" -m pytest "tests/test_${BASENAME}.py" -x -q --tb=short
     else
-      "$PYBIN" -m pytest tests/ -x -q --tb=short 2>&1 | tail -30 || FAILED=1
+      run_check tail 30 pytest "$PYBIN" -m pytest tests/ -x -q --tb=short
     fi
   else
     echo "[run-tests] pytest unavailable or no tests/ — skipping Python tests"
@@ -70,21 +129,21 @@ fi
 # --- Shell ----------------------------------------------------------------
 if [[ "$CHANGED_FILE" == *.sh || "$CHANGED_FILE" == *.bash ]]; then
   if run_if_available shellcheck; then
-    shellcheck --severity=error "$CHANGED_FILE" && echo "✅ shellcheck passed" || { echo "⚠️  shellcheck found issues"; FAILED=1; }
+    run_check head 60 shellcheck shellcheck --severity=error "$CHANGED_FILE"
   fi
   BASENAME="$(basename "$CHANGED_FILE" .sh)"
   if run_if_available bats && [[ -f "tests/${BASENAME}.bats" ]]; then
-    bats "tests/${BASENAME}.bats" 2>&1 | tail -20 || FAILED=1
+    run_check tail 20 bats bats "tests/${BASENAME}.bats"
   fi
 fi
 
 # --- YAML -----------------------------------------------------------------
 if [[ "$CHANGED_FILE" == *.yml || "$CHANGED_FILE" == *.yaml ]]; then
   if run_if_available yamllint; then
-    yamllint -d relaxed "$CHANGED_FILE" && echo "✅ yamllint passed" || { echo "⚠️  yamllint found issues"; FAILED=1; }
+    run_check head 60 yamllint yamllint -d relaxed "$CHANGED_FILE"
   fi
   if [[ "$CHANGED_FILE" == *.github/workflows/* ]] && run_if_available actionlint; then
-    actionlint "$CHANGED_FILE" && echo "✅ actionlint passed" || { echo "⚠️  actionlint found issues"; FAILED=1; }
+    run_check head 60 actionlint actionlint "$CHANGED_FILE"
   fi
 fi
 
