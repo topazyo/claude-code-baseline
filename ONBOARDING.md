@@ -332,7 +332,7 @@ and why each entry is on it:
 | `git push --force`, `git push -f` | irreversible remote history loss |
 | `git reset --hard` | irreversible local work loss |
 | `drop table`, `truncate table`, `delete from` | destructive data operations |
-| `curl`/`wget` at a remote host (with or without a `scheme://`) | unreviewed remote fetch (injection / supply-chain) |
+| `curl`/`wget` at a remote host (with or without a `scheme://`; `http(s)://localhost`, `127.x.x.x` and `[::1]` are allowed) | unreviewed remote fetch (injection / supply-chain) |
 | `npm install`, `pnpm install`, `yarn add`, `pip install` | unvetted dependency (supply-chain) |
 | PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | the same three categories, in the shell Windows sessions actually get |
 

