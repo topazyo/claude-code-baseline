@@ -273,6 +273,57 @@ setcfg "c['modules']['fixTags']['enabled']=True"
 run "untagged change -> 2"   modules/fix-tags.sh "$(write_payload "$WT/app.py")" 2
 resetcfg
 
+echo "== tracker-reminder (Stop): the reminder is shown to the user =="
+# Plain stdout from an exit-0 hook reaches only the debug log. The reminder must be ONE
+# JSON object holding only systemMessage: on Stop, additionalContext or a decision
+# would send Claude back to work. sysmsg_ok <desc> <python expr over m (the message)>
+sysmsg_ok() {
+  if printf '%s' "$OUT" | "$PY" -c '
+import json, sys
+d = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+assert set(d) == {"systemMessage"}, sorted(d)
+m = d["systemMessage"]
+assert eval(sys.argv[1]), m
+' "$2" 2>"$TMP/_nerr"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1: $(tail -1 "$TMP/_nerr") | stdout: $(printf '%s' "$OUT" | head -c 200)]"; fi
+}
+TRK="c['modules']['trackerReminder']"
+# Empty commits with a token no other test uses: the tree is untouched, the count is exact.
+git commit -q --allow-empty -m "D3TRK-1 first" </dev/null
+git commit -q --allow-empty -m "D3TRK-2 second" </dev/null
+setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-', tracker='CHANGELOG.md')"
+run_out "tracker-reminder, 2 matching commits -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+sysmsg_ok "tracker-reminder prints one systemMessage object" '"2 of the last 20 commits matched" in m and "D3TRK-" in m and "confirm CHANGELOG.md is up to date" in m'
+err_has "tracker-reminder text also on stderr (debug log)" "[tracker-reminder]"
+run_out "tracker-reminder, inherited notice -> 0" modules/tracker-reminder.sh 0 _BCL_NOTICE=INJECTED _BCL_NOTICE_EVENT=Stop <<< '{}'
+sysmsg_ok "inherited notice state adds no second object or text" '"INJECTED" not in m and "[tracker-reminder]" in m'   # regression guard
+# JSON encoding: quote in the commit token; quote, backslash, TAB and non-ASCII in the tracker
+git commit -q --allow-empty -m 'D3"Q quoted' </dev/null
+setcfg "$TRK.update(enabled=True, commitGrep='D3\"Q', tracker='docs/\"plan\" \\\\ \\t \\u05e9\\u05dc\\u05d5\\u05dd.md')"
+run_out "tracker-reminder, awkward values -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+sysmsg_ok "awkward tracker values round-trip through JSON" '"matched \x27D3\"Q\x27." in m and "confirm docs/\"plan\" \\ \t שלום.md is up to date" in m'
+# Oversized: kept under Claude Code's 10,000-character cap, still one valid object
+setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-', tracker='A' * 20000)"
+run_out "tracker-reminder, oversized tracker -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+sysmsg_ok "oversized reminder is truncated under the cap" 'len(m) < 10000 and "truncated" in m'
+for pad in "" "x"; do
+  setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-', tracker='$pad' + '\\u05e9' * 9000)"
+  run_out "tracker-reminder, oversized multibyte (pad '$pad') -> 0" modules/tracker-reminder.sh 0 LC_ALL=C <<< '{}'
+  sysmsg_ok "multibyte cut (pad '$pad') stays valid UTF-8 under the cap" 'len(m) < 10000 and "truncated" in m and "ש" in m'
+done
+# Nothing to remind about: stdout stays empty (regression guards)
+setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-NONE', tracker='CHANGELOG.md')"
+run_out "tracker-reminder, no matching commit -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+quiet_ok "tracker-reminder, no matching commit prints nothing"
+setcfg "$TRK.update(enabled=True, commitGrep='D3TRK-', tracker='')"
+run_out "tracker-reminder, empty tracker -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+quiet_ok "tracker-reminder, empty tracker prints nothing"
+# Off, with everything else set to fire: only the enabled gate can keep it quiet
+setcfg "$TRK.update(enabled=False, commitGrep='D3TRK-', tracker='CHANGELOG.md')"
+run_out "tracker-reminder, module off -> 0" modules/tracker-reminder.sh 0 <<< '{}'
+quiet_ok "tracker-reminder, module off prints nothing"
+resetcfg
+rm -f "$TMP/_err" "$TMP/_nerr"
+
 echo "== common.sh load guard ignores the environment =="
 # The library's double-source guard must not be settable from outside. An inherited
 # _BCL_SOURCED used to make every hook skip common.sh: command-guard died on its first

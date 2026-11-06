@@ -88,6 +88,9 @@ a fixture in `tests/` before bumping the pin.
       *(Also: re-check that a Windows session without Git Bash still gets the
       PowerShell tool rather than Bash, which is why the matchers are `Bash|PowerShell`.)*
 - [ ] **Stop hook exit `2`** semantics (continue/block) unchanged. *(trackerReminder.)*
+      Also: a Stop hook's `systemMessage` is still shown to the user, and Stop
+      `hookSpecificOutput.additionalContext` still continues the turn (the reason
+      trackerReminder uses `systemMessage` only).
 - [ ] **`ConfigChange` event** still exists with the documented payload/semantics.
       *(R5 — tamper-detection hook; interim defense is the deny-list above.)*
 - [ ] **Managed-settings knobs** — `allowManagedHooksOnly`,
