@@ -5,7 +5,8 @@
 # Inject (or update) the org Claude Code hook baseline into a target repo.
 # Idempotent: re-running refreshes the hooks and re-merges settings without
 # duplicating anything. Safe-by-default: it never overwrites an existing
-# baseline.config.json, and it backs up settings.json before merging.
+# baseline.config.json, and it backs up settings.json before replacing it with a
+# merged copy (no backup, and no write, when the merge changes nothing).
 #
 # Usage:
 #   ./install.sh [--target <repo-dir>] [--with-openclaw-rules]
@@ -21,7 +22,10 @@
 #                           fire. Refuses (nothing written) unless a rules file will
 #                           exist: pass --with-openclaw-rules or create the rules
 #                           file first. An existing config is never rewritten.
-#   --dry-run               Print actions without changing anything.
+#   --dry-run               Print what a real run would do and change nothing. It
+#                           still runs the settings merge, into a system temp file,
+#                           so a settings.json the real run would reject fails the
+#                           dry run too (exit 1).
 #
 # Requires: bash, Python 3.7+ as python3 (or python), git (recommended).
 
@@ -217,6 +221,26 @@ esac
 CLAUDE_DIR="$TARGET/.claude"
 HOOKS_DST="$CLAUDE_DIR/hooks/baseline"
 
+# A .claude or .claude/hooks that is a link (a repo can ship one) would aim the hook
+# tree's replacement, and every write below, outside the target: refuse first.
+for d in "$CLAUDE_DIR" "$CLAUDE_DIR/hooks"; do
+  if [[ -L "$d" ]]; then
+    echo "ERROR: $d is a symbolic link (or junction). The installer replaces and writes" >&2
+    echo "       files under it, so it would act outside $TARGET. Nothing was written." >&2
+    exit 2
+  fi
+done
+
+# real_dir <dir> -> its physical path plus "/", lower-cased where the filesystem
+# ignores case (Windows), so two spellings of one directory compare equal.
+real_dir() {
+  local p
+  p="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  p="$p/"
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')" ;; esac
+  printf '%s' "$p"
+}
+
 # --enable-security-defaults preflight, before anything is written. An enabled
 # securityDefaults module whose rules file is missing fails closed and blocks every
 # infra write, so refuse unless the rules file will exist once this run finishes.
@@ -235,11 +259,46 @@ sys.stdout.write(str(((c.get("modules") or {}).get("securityDefaults") or {}).ge
 fi
 
 # 1. Hooks (namespaced under .claude/hooks/baseline — never collides with the
-#    repo's own hooks). Wipe the baseline subtree first so removed hooks don't
-#    linger across upgrades, then copy fresh.
+#    repo's own hooks). The whole baseline tree is replaced: removed hooks don't
+#    linger across upgrades, and nothing planted in it survives a re-install.
 echo "› hooks"
+# Never delete the source we are installing from: refuse a baseline checkout that was
+# vendored inside the destination itself.
+SRC_REAL="$(real_dir "$SRC")"
+if [[ -d "$HOOKS_DST" ]]; then
+  DST_REAL="$(real_dir "$HOOKS_DST")" || {
+    echo "ERROR: cannot read $HOOKS_DST. Nothing was written." >&2; exit 2; }
+  case "$SRC_REAL" in
+    "$DST_REAL"*)
+      echo "ERROR: the baseline source ($SRC_REAL) is inside $HOOKS_DST, which this" >&2
+      echo "       installer replaces wholesale. Install from a checkout outside it." >&2
+      echo "       Nothing was written." >&2
+      exit 2 ;;
+  esac
+fi
+# Name every file the baseline does not ship before it goes: a file planted here may be
+# the evidence of tampering, and deleting it silently would destroy that evidence.
+if [[ -d "$HOOKS_DST" && ! -L "$HOOKS_DST" ]]; then
+  # comm must collate like the sorts that feed it (C), or a name such as .DS_Store
+  # makes it report unsorted input and exit 1, which set -e turns into an abort.
+  EXTRA="$(LC_ALL=C comm -23 \
+    <(cd "$HOOKS_DST" && find . \( -type f -o -type l \) ! -path '*/__pycache__/*' | LC_ALL=C sort) \
+    <(cd "$SRC/hooks" && find . \( -type f -o -type l \) ! -path '*/__pycache__/*' | LC_ALL=C sort))"
+  if [[ -n "$EXTRA" ]]; then
+    while IFS= read -r f; do
+      f="${f//[[:cntrl:]]/?}"   # a planted name must not drive the terminal
+      if [[ $DRY -eq 1 ]]; then
+        say "would remove a file the baseline does not ship: .claude/hooks/baseline/${f#./}"
+      else
+        say "removing a file the baseline does not ship: .claude/hooks/baseline/${f#./}"
+      fi
+    done <<< "$EXTRA"
+  fi
+fi
+# rm -rf on a symlink (or junction) operand removes the link, never its target; a test
+# pins this, since a link here would otherwise aim the wipe outside the repo.
+run rm -rf "$HOOKS_DST"
 run mkdir -p "$HOOKS_DST"
-run rm -rf "$HOOKS_DST/lib" "$HOOKS_DST/guardrails" "$HOOKS_DST/modules" "$HOOKS_DST/dispatcher"
 run cp -R "$SRC/hooks/." "$HOOKS_DST/"
 if [[ $DRY -eq 0 ]]; then
   find "$HOOKS_DST" -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
@@ -247,7 +306,11 @@ if [[ $DRY -eq 0 ]]; then
   # absolute path of the machine that built them and go stale against the source.
   find "$HOOKS_DST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 fi
-say "copied lib/ guardrails/ modules/ dispatcher/ → .claude/hooks/baseline/"
+if [[ $DRY -eq 1 ]]; then
+  say "would replace .claude/hooks/baseline/ with the baseline hook tree"
+else
+  say "replaced .claude/hooks/baseline/ with the baseline hook tree"
+fi
 
 # 2. Config — never clobber an existing one (it carries local toggles).
 echo "› config"
@@ -257,25 +320,45 @@ if [[ -f "$CLAUDE_DIR/baseline.config.json" ]]; then
 else
   CFG_CREATED=1
   run cp "$SRC/baseline.config.json" "$CLAUDE_DIR/baseline.config.json"
-  say "wrote default .claude/baseline.config.json"
+  if [[ $DRY -eq 1 ]]; then
+    say "would write default .claude/baseline.config.json"
+  else
+    say "wrote default .claude/baseline.config.json"
+  fi
   # Stamp note (create path only — never rewrites an existing config). The value
   # itself rides along in the copied config; hooks/VERSION (recopied below) is the
   # drift marker tools/baseline-status.sh reads. See RELEASING.md.
   BLV="$("$PY" -I -S -X utf8 -c 'import json,sys
 try: sys.stdout.write(str(json.load(open(sys.argv[1],encoding="utf-8")).get("baselineVersion","") or ""))
 except Exception: pass' "$SRC/baseline.config.json" 2>/dev/null || true)"
-  [[ -n "$BLV" ]] && say "stamped baselineVersion: $BLV"
+  if [[ -n "$BLV" && $DRY -eq 1 ]]; then
+    say "would stamp baselineVersion: $BLV"
+  elif [[ -n "$BLV" ]]; then
+    say "stamped baselineVersion: $BLV"
+  fi
 fi
 run cp "$SRC/baseline.config.schema.json" "$CLAUDE_DIR/baseline.config.schema.json"
-say "refreshed .claude/baseline.config.schema.json"
+if [[ $DRY -eq 1 ]]; then
+  say "would refresh .claude/baseline.config.schema.json"
+else
+  say "refreshed .claude/baseline.config.schema.json"
+fi
 
-# 3. Settings merge (back up first, then idempotent merge).
+# 3. Settings merge: merge into a temp file, then — only if that changes the file —
+#    back up the original and move the result into place.
 echo "› settings.json"
 SETTINGS="$CLAUDE_DIR/settings.json"
-TMP="$CLAUDE_DIR/.settings.merge.$$"
-# The merge always writes to $TMP and is only moved into place on success, so an
-# interrupted or failed merge can never leave a truncated settings.json behind.
-trap 'rm -f "${TMP:-}" 2>/dev/null || true' EXIT
+# The merge always writes to $MERGE_TMP and is only moved into place on success, so an
+# interrupted or failed merge can never leave a truncated settings.json behind. A dry
+# run merges too — into a system temp file, so nothing under the target is written —
+# so that a settings.json the real run would reject fails the dry run as well.
+if [[ $DRY -eq 1 ]]; then
+  MERGE_TMP="$(mktemp 2>/dev/null)" || {
+    echo "ERROR: cannot create a temp file for the dry-run settings merge." >&2; exit 1; }
+else
+  MERGE_TMP="$CLAUDE_DIR/.settings.merge.$$"
+fi
+trap 'rm -f "${MERGE_TMP:-}" 2>/dev/null || true' EXIT
 
 # merge_failed <exit-code> — the merge is the one step that can destroy consumer
 # configuration, so it is the one step whose exit status is never assumed. Rather
@@ -284,40 +367,108 @@ trap 'rm -f "${TMP:-}" 2>/dev/null || true' EXIT
 # non-zero and says why on stderr; we report where the untouched original is and
 # stop before the mv. The original stays byte-identical.
 merge_failed() {
-  rm -f "$TMP" 2>/dev/null || true
+  rm -f "$MERGE_TMP" 2>/dev/null || true
   echo "" >&2
+  if [[ $DRY -eq 1 ]]; then
+    echo "DRY RUN: the real run would stop here — settings.json could not be merged (merge exited $1)." >&2
+    echo "  Nothing was written. Fix the error reported above, then re-run." >&2
+    exit 1
+  fi
   echo "INSTALL INCOMPLETE — settings.json was NOT merged (merge exited $1)." >&2
   echo "  Your settings.json was not modified: $SETTINGS" >&2
-  # An explicit if, not `[[ ]] && echo`: under set -e a false && list would abort
-  # this function and swallow the guidance below it.
-  if [[ -n "${BACKUP:-}" ]]; then
-    echo "  Backup taken by this run:       $BACKUP" >&2
-  fi
   echo "  Hook files WERE written under $CLAUDE_DIR/hooks/baseline/, but nothing is" >&2
   echo "  wired up until the merge succeeds — this install grants NO guardrails yet." >&2
   echo "  Fix the JSON error reported above, then re-run this installer." >&2
   exit 1
 }
 
-if [[ -f "$SETTINGS" ]]; then
-  BACKUP="$SETTINGS.bak.$(date +%Y%m%d%H%M%S)"
-  run cp "$SETTINGS" "$BACKUP"
-  say "backed up existing settings.json → $(basename "$BACKUP")"
-  if [[ $DRY -eq 0 ]]; then
-    MERGE_RC=0
-    "$PY" -I -S -X utf8 "$SRC/lib/merge_settings.py" "$SETTINGS" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
-    [[ $MERGE_RC -eq 0 ]] || merge_failed "$MERGE_RC"
-    mv "$TMP" "$SETTINGS"
+# same_settings <a> <b>: the same text once a UTF-8 BOM and CRLF line ends are set
+# aside. Native Windows Python writes the merge with CRLF, so a byte compare would call
+# an LF settings.json (or a CRLF one on Linux) changed on every run.
+same_settings() {
+  "$PY" -I -S -X utf8 -c 'import sys
+def norm(p):
+    b = open(p, "rb").read()
+    if b[:3] == b"\xef\xbb\xbf":
+        b = b[3:]
+    return b.replace(b"\r\n", b"\n")
+sys.exit(0 if norm(sys.argv[1]) == norm(sys.argv[2]) else 1)' "$1" "$2" 2>/dev/null
+}
+
+# tgit <args>: git in the target, never steered by the operator's GIT_DIR-style
+# variables, and with core.fsmonitor off (a hostile repo's config must not run code).
+tgit() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+    git -C "$TARGET" -c core.fsmonitor=false "$@"
+}
+
+# ignore_backups: keep settings.json.bak.* out of git through the repo's LOCAL exclude
+# file (backups only exist on the machine that ran this). Only when the target is the
+# repo's own top level — never a parent repo the target merely sits inside — and git
+# does not already ignore the backup. Never fatal: settings.json is merged already.
+ignore_backups() {
+  local top excl line
+  top="$(tgit rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [[ -n "$top" && "$(real_dir "$top")" == "$(real_dir "$TARGET")" ]] || return 0
+  # --no-index: the backup is untracked, and reading the index is what runs fsmonitor.
+  if tgit check-ignore --no-index -q -- "$BACKUP" 2>/dev/null; then return 0; fi
+  excl="$(tgit rev-parse --git-path info/exclude 2>/dev/null)" || return 0
+  [[ -n "$excl" ]] || return 0
+  case "$excl" in /*|?:*) ;; *) excl="$TARGET/$excl" ;; esac
+  line="/.claude/settings.json.bak.*"
+  # Already there (a negation elsewhere can make check-ignore say "not ignored"): once.
+  if [[ -f "$excl" ]] && grep -qF -- "$line" "$excl" 2>/dev/null; then return 0; fi
+  if [[ $DRY -eq 1 ]]; then
+    say "would add $line to the repo's local git exclude ($excl)"
+    return 0
   fi
-  say "merged baseline hooks + deny-list into existing settings.json"
+  if { mkdir -p "${excl%/*}" &&
+       if [[ -s "$excl" && -n "$(tail -c 1 "$excl")" ]]; then printf '\n' >> "$excl"; fi &&
+       printf '%s\n' "$line" >> "$excl"; } 2>/dev/null; then
+    say "added $line to the repo's local git exclude ($excl)"
+  else
+    echo "  WARNING: could not add $line to $excl; keep settings.json.bak.* out of git yourself." >&2
+  fi
+}
+
+# What the closing banner reports for settings.json (the unchanged case says so).
+SETTINGS_BANNER="  • the hook wiring from settings.template.json → $CLAUDE_DIR/settings.json
+  • the deny-list, merged into permissions.deny in that same file"
+if [[ -f "$SETTINGS" ]]; then MERGE_IN="$SETTINGS"; else MERGE_IN="-"; fi
+MERGE_RC=0
+"$PY" -I -S -X utf8 "$SRC/lib/merge_settings.py" "$MERGE_IN" "$SRC/settings.template.json" "$MERGE_TMP" || MERGE_RC=$?
+[[ $MERGE_RC -eq 0 ]] || merge_failed "$MERGE_RC"
+
+if [[ ! -f "$SETTINGS" ]]; then
+  if [[ $DRY -eq 1 ]]; then
+    say "would create settings.json from baseline"
+  else
+    mv "$MERGE_TMP" "$SETTINGS"
+    say "created settings.json from baseline"
+  fi
+elif same_settings "$SETTINGS" "$MERGE_TMP"; then
+  rm -f "$MERGE_TMP"
+  SETTINGS_BANNER="  • nothing in $CLAUDE_DIR/settings.json: it already had the baseline wiring and deny-list"
+  if [[ $DRY -eq 1 ]]; then
+    say "would leave settings.json as it is (already up to date; no backup)"
+  else
+    say "settings.json already up to date — left as it is, no backup"
+  fi
 else
-  if [[ $DRY -eq 0 ]]; then
-    MERGE_RC=0
-    "$PY" -I -S -X utf8 "$SRC/lib/merge_settings.py" "-" "$SRC/settings.template.json" "$TMP" || MERGE_RC=$?
-    [[ $MERGE_RC -eq 0 ]] || merge_failed "$MERGE_RC"
-    mv "$TMP" "$SETTINGS"
+  # A unique name: two runs in the same second must not overwrite the first backup.
+  BACKUP="$SETTINGS.bak.$(date +%Y%m%d%H%M%S)"
+  BACKUP_BASE="$BACKUP"; n=0
+  while [[ -e "$BACKUP" || -L "$BACKUP" ]]; do n=$((n + 1)); BACKUP="$BACKUP_BASE.$n"; done
+  if [[ $DRY -eq 1 ]]; then
+    say "would back up settings.json → $(basename "$BACKUP")"
+    say "would merge baseline hooks + deny-list into settings.json"
+  else
+    cp "$SETTINGS" "$BACKUP"
+    mv "$MERGE_TMP" "$SETTINGS"
+    say "backed up settings.json → $(basename "$BACKUP")"
+    say "merged baseline hooks + deny-list into settings.json"
   fi
-  say "created settings.json from baseline"
+  ignore_backups
 fi
 
 # 4. Optional example rules for the securityDefaults module.
@@ -327,7 +478,9 @@ if [[ $WITH_OPENCLAW -eq 1 ]]; then
     say "kept existing .claude/security-defaults.json"
   else
     run cp "$SRC/examples/security-defaults.openclaw.json" "$CLAUDE_DIR/security-defaults.json"
-    if [[ $ENABLE_SD -eq 1 ]]; then
+    if [[ $DRY -eq 1 ]]; then
+      say "would write .claude/security-defaults.json"
+    elif [[ $ENABLE_SD -eq 1 ]]; then
       say "wrote .claude/security-defaults.json"
     else
       say "wrote .claude/security-defaults.json (enable via modules.securityDefaults.enabled)"
@@ -377,8 +530,7 @@ cat <<EOF
 
 $HEADLINE
   • the hook tree  → $CLAUDE_DIR/hooks/baseline/
-  • the hook wiring from settings.template.json → $CLAUDE_DIR/settings.json
-  • the deny-list, merged into permissions.deny in that same file
+$SETTINGS_BANNER
 
 Nothing here has been verified to fire. Which guardrails and modules actually run
 is decided by:

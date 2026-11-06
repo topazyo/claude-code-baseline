@@ -238,7 +238,9 @@ Or point at a repo explicitly, and optionally seed the example security rules:
 
 ```bash
 claude-code-baseline/install.sh --target ../some-repo --with-openclaw-rules
-claude-code-baseline/install.sh --dry-run         # preview, change nothing
+claude-code-baseline/install.sh --dry-run         # preview; writes nothing, but runs the
+                                                  # settings merge in a temp file and exits 1
+                                                  # if the real run would stop there
 ```
 
 Every post-write module ships **off**, so on a default install writing a file
@@ -258,19 +260,24 @@ set `modules.securityDefaults.enabled` to `true` yourself.
 What it does (idempotent — safe to re-run):
 
 1. Copies hooks to **`.claude/hooks/baseline/`** (namespaced — never collides
-   with a repo's own `.claude/hooks/`). The baseline subtree is replaced wholesale
-   on each run so removed hooks don't linger.
+   with a repo's own `.claude/hooks/`). The whole `.claude/hooks/baseline/` tree
+   is replaced on each run, so removed hooks don't linger and nothing planted
+   there survives; each file the baseline does not ship is named before it goes.
 2. Writes **`.claude/baseline.config.json`** *(only if absent — your toggles are
    never clobbered)* and refreshes the JSON schema next to it.
 3. **Merges** the baseline hook wiring + a security deny-list into
-   **`.claude/settings.json`**, backing up the previous file to
-   `settings.json.bak.<timestamp>` first. The merge replaces only baseline-managed
+   **`.claude/settings.json`**. When the merge changes the file, the previous
+   one is saved first as `settings.json.bak.<timestamp>` (`.1`, `.2`, … if that
+   name is taken), and in a git work tree the backups are added to the repo's local
+   `.git/info/exclude` unless git already ignores them; a re-install that changes
+   nothing leaves the file and writes no backup. Old backups are never deleted. The merge replaces only baseline-managed
    hook entries, one by one, so a hook of yours that shares a matcher group with
    one stays. Under the events the template wires (`PreToolUse`, `PostToolUse`,
    `Stop`, `ConfigChange`), any hook whose command contains
    `/.claude/hooks/baseline/` counts as baseline-managed: it is removed and the
    template's entries are added back, so a baseline script you wired there by hand,
-   under any matcher, is gone after the next install. It unions the deny-list; your
+   under any matcher, is gone after the next install. A baseline script wired under
+   any other event is left as it is and reported. It unions the deny-list; your
    `permissions.allow`, `model`, and everything else are left untouched. If the
    existing file cannot be parsed, the merge **aborts** — it never treats an
    unreadable settings file as an empty one.
@@ -379,7 +386,8 @@ TLS 1.3, skills signing). Copy it to `.claude/security-defaults.json` and adapt.
 - **Commit** `.claude/hooks/baseline/`, `.claude/baseline.config.json`, and the
   schema so the baseline travels with the repo and applies to every contributor.
 - **Do not commit** `.claude/settings.local.json` (per-developer overrides) or the
-  `settings.json.bak.*` backups.
+  `settings.json.bak.*` backups (the installer adds those to the repo's local
+  `.git/info/exclude` when git does not already ignore them).
 - To roll across many repos, loop `install.sh --target <repo>` over a checkout list.
 
 ### Review the hooks like the executable content they are

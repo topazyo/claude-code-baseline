@@ -10,7 +10,11 @@ Rules:
     then append the template's groups. Removal is per hook: a repo's own hook in the
     same matcher group stays, and a group is dropped only when removing our entries
     left it empty. This makes re-running the installer idempotent — baseline entries
-    are replaced, not duplicated.
+    are replaced, not duplicated. Events outside the template are left exactly as
+    they are; a baseline entry found under one is reported on stderr, not removed
+    (it can only have been wired by hand). The one exception is RETIRED_EVENTS: an
+    event a past template wired and the current one no longer does is swept the same
+    way, its key dropped only if removing our entries emptied it.
   * permissions.deny: union with the existing list (order-preserving, de-duplicated).
   * Everything else in the existing file (model, permissions.allow, env, ...) is
     left exactly as it was. An `env` key that can run code before the baseline
@@ -49,6 +53,11 @@ from pathlib import Path
 from typing import Any, Iterable, NoReturn
 
 BASELINE_MARKER = "/.claude/hooks/baseline/"
+# Events an earlier settings.template.json wired and the current one no longer does.
+# Their baseline entries are removed on install, like the template events'. Every
+# template so far has wired the same four events, so this is empty; add an event here
+# in the same change that removes it from the template.
+RETIRED_EVENTS: tuple[str, ...] = ()
 
 # Environment values a project settings `env` block must not set, whatever the value.
 # MIRRORS RISKY_ENV_* in hooks/modules/config-guard.sh, which explains each entry; a
@@ -269,7 +278,33 @@ def merge_hooks(existing_hooks: dict, template_hooks: dict) -> dict:
                 "that event. Correct the key and re-run.",
             )
         out[event] = without_baseline_hooks(current) + list(groups)
+    for event in RETIRED_EVENTS:
+        current = out.get(event)
+        if event in template_hooks or not isinstance(current, list):
+            continue
+        kept = without_baseline_hooks(current)
+        if kept or not current:
+            out[event] = kept
+        else:
+            del out[event]   # only our entries were there: we emptied it
     return out
+
+
+def baseline_outside_template(hooks: Any, template_hooks: dict) -> list[str]:
+    """Events outside the template (and RETIRED_EVENTS) that still hold a baseline
+    hook entry. The merge keeps them as they are; main() reports them."""
+    found = []
+    if not isinstance(hooks, dict):
+        return found
+    for event, groups in hooks.items():
+        if event in template_hooks or event in RETIRED_EVENTS or not isinstance(groups, list):
+            continue
+        for group in groups:
+            entries = group.get("hooks") if isinstance(group, dict) else None
+            if isinstance(entries, list) and any(hook_is_baseline(h) for h in entries):
+                found.append(event)
+                break
+    return found
 
 
 def merge_deny(existing_perms: dict, template_perms: dict) -> list:
@@ -525,6 +560,13 @@ def main() -> int:
             f"WARNING: settings.json env sets {', '.join(risky)}. Such values can run code "
             "before the baseline hooks, redirect them, or change their posture. Kept as is; "
             "remove them unless you set them on purpose.\n")
+    outside = [ascii(e)[1:-1] for e in
+               baseline_outside_template(merged["hooks"], as_object(template.get("hooks"), "hooks", "baseline template"))]
+    if outside:
+        sys.stderr.write(
+            f"NOTE: settings.json wires baseline scripts under {', '.join(outside)}, which the "
+            "baseline template does not use. Kept as is; remove them unless you wired them on "
+            "purpose.\n")
     return 0
 
 
