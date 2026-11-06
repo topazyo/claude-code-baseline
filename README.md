@@ -1,5 +1,7 @@
 # claude-code-baseline
 
+**English** · [עברית](README.he.md)
+
 An org baseline for **Claude Code hooks + settings**, distributed as a single
 bootstrap script. Run `install.sh` inside any repo and it gains a standard set
 of safety defaults plus a menu of opt-in workflow modules — all driven by one
@@ -504,7 +506,9 @@ claude-code-baseline/
 ├── baseline.config.schema.json        # schema for the config
 ├── settings.template.json             # hook wiring + deny-list merged into target
 ├── README.md                          # this file
+├── README.he.md                       # Hebrew overview + "What this does not protect against"
 ├── ONBOARDING.md                      # how Claude Code hooks/permissions actually work
+├── ONBOARDING.he.md                   # complete Hebrew translation of ONBOARDING.md
 ├── ROADMAP.md                         # enhancement roadmap (planned + deferred work)
 ├── RELEASING.md                       # per-release re-verification checklist
 ├── SECURITY.md                        # private vulnerability reporting + scope
@@ -533,6 +537,8 @@ claude-code-baseline/
 │   ├── test_managed.sh                # validates the managed/ enterprise profiles
 │   ├── test_status.sh                 # exercises tools/baseline-status.sh
 │   ├── policy-change-gate.sh          # fails policy changes lacking updated fixtures
+│   ├── translation_sync.py            # Hebrew-docs drift check (+ stamp / mark-stale)
+│   ├── test_translation_sync.py       # fixtures proving the drift check catches each defect
 │   └── README.md
 └── hooks/                             # copied to target .claude/hooks/baseline/
     ├── VERSION                        # baselineVersion stamp (a convention, not a checksum)

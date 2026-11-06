@@ -22,6 +22,8 @@ on any failure. Runs under Linux, WSL, macOS, and Git Bash on Windows.
 | `test_merge_settings.py` | Pure unit fixtures for the install-time merge (`lib/merge_settings.py:merge_hooks`): baseline hook entries are removed one by one, so a repo's own hook in the same matcher group, its fields and the group's keys survive; unrecognised shapes are kept in place; only a group the merge emptied is dropped; merging twice changes nothing. |
 | `test_hooks.sh` | End-to-end: installs the baseline into a throwaway repo and exercises each hook's exit codes — command-guard, security-defaults fail-closed (missing/malformed/empty rules), exit-2 semantics, posture (`block`/`warn`/`failClosed`) toggles, malformed-config, scope-guard, fix-tags, that the Stop tracker-reminder prints its reminder as one JSON `systemMessage` object (and nothing when there is nothing to remind about), once per session and then only for a new matching commit, falling back to every stop when its session memory in `.git` cannot be used, that no inherited environment variable can make the hooks skip `common.sh` or pass its globals on, that every Python the baseline's own helpers start is isolated (`-I -S -X utf8`: modules planted in the project, on `PYTHONPATH` or as a `.pth` file are never imported; non-ASCII patterns and rule messages work), and that an interpreter that is found but does not run makes command-guard and the post-write dispatcher fail closed — plus the installer itself: a repo's own hooks survive the settings merge, and the installer refuses before writing anything unless the interpreter the hooks will use runs, prints nothing else on stdout, and is 3.7+ (a Windows Store `python3` stub is skipped when a real Python is there). |
 | `test_latency.sh` | **Latency regression gate** (`run.sh` step 7). Installs the baseline into a throwaway repo and times the hot-path hooks — command-guard (every Bash call), the post-write dispatcher (every Write/Edit), scope-guard, and config-guard — failing if one exceeds its budget. |
+| `translation_sync.py` | **Hebrew-docs drift gate** (`run.sh` step 8). Fails when an English section of `ONBOARDING.md` or a translated section of `README.md` changed after its Hebrew counterpart was translated, or when a translation altered, dropped or invented a command, carries a bidi-control character, lacks its direction wrappers, links to a missing anchor, or quotes a hook message that no longer exists. Also the maintainer tool for `stamp` / `mark-stale` (below). |
+| `test_translation_sync.py` | Fixtures for the drift gate: each defect class above is planted in a throwaway repo and must fail; `mark-stale` → `stamp` round-trips. |
 | `policy-change-gate.sh` | **Release gate.** Fails if a change touches `command-guard.sh`, the matcher, `common.sh`, or `settings.template.json` (the deny-list) without also touching `tests/`. |
 
 ## Adding a rule? Add a fixture.
@@ -101,6 +103,37 @@ hook, not in the constant.
 **Skips cleanly** (exit 0, with a message) where `date +%s%N` has no nanosecond
 precision — BSD/macOS `date` prints a literal `N`. A latency test that reports a
 false failure on a developer's machine gets deleted, not fixed.
+
+## Hebrew translations (`translation_sync.py`)
+
+`ONBOARDING.he.md` is a complete Hebrew translation of `ONBOARDING.md`;
+`README.he.md` translates the README's opening and its "What this does not
+protect against" section. The English files are authoritative. Each translated
+section starts with a marker recording the hash of the English section it was
+translated from:
+
+```
+<!-- he-sync: part-2--why-secure-by-default-for-an-ai-coding-agent sha256=0123456789abcdef -->
+```
+
+**You edited an English section and step 8 failed.** The failure names the section.
+Then either:
+
+1. **Retranslate it** in the same change, then record that:
+   `python3 tests/translation_sync.py stamp ONBOARDING.he.md <section-id>`; or
+2. **If you cannot**, mark it instead:
+   `python3 tests/translation_sync.py mark-stale ONBOARDING.he.md <section-id>`.
+   This records the new hash *and* puts a visible Hebrew banner on the section
+   ("this section may be out of date; the English wins"). `stamp` removes it once
+   someone retranslates the section.
+
+Never `stamp` a section you did not retranslate: that hides exactly the drift the
+gate exists to show. Commands, JSON and every inline code span must stay
+byte-identical to the English; diagrams may be explained in Hebrew below the
+original. A translator's own note goes between `<!-- he-note:start -->` and
+`<!-- he-note:end -->`, and Hebrew-only appendices after `<!-- he-only -->`; the
+message decoder (`<!-- he-decoder:start -->` … `end`) is checked against the hook
+source instead.
 
 ## CI
 

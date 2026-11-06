@@ -17,3 +17,8 @@
 /tests/                     @topazyo
 /.github/                   @topazyo
 /SECURITY.md                @topazyo
+
+# The Hebrew translations restate the security claims and limits of the English
+# docs; a mistranslated negation reads as a protection that does not exist. A
+# change to them needs review by someone who reads Hebrew.
+/*.he.md                    @topazyo
