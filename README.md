@@ -65,7 +65,8 @@ and tracker-reminder reports it. A byte order mark or UTF-16 text is read normal
 - **command-guard** — `PreToolUse(Bash|PowerShell)`, **enabled by default**.
   Blocks a curated set of destructive / unapproved shell commands: `rm -rf /`
   and friends (including drive roots such as `C:/`, `/c` and `/mnt/c`, and
-  `../..`), `git push --force` (including `+refspec` forms), `git reset
+  `../..`), `git push --force` (including `+refspec` forms), `git push --mirror`
+  and `--prune`, deleting a remote `main`, `master` or `HEAD`, `git reset
   --hard`, dangerous SQL (`drop/truncate table`, `delete from`), remote fetch
   via `curl`/`wget` (including scheme-less hosts, since both default to HTTP;
   an `http(s)://` URL to `localhost`, `127.x.x.x` or `[::1]` is not a remote fetch, though
@@ -73,9 +74,11 @@ and tracker-reminder reports it. A byte order mark or UTF-16 text is read normal
   and package installs (`npm/pnpm/yarn/pip install`, bare `yarn`,
   `python -m pip install`). The matcher is token-aware: it resolves quoting,
   `${IFS}`, wrapper paths (`/bin/rm`, `sh -c`, `xargs`), wrappers with options
-  (`sudo -u root`, `nice -n 10`, `timeout 5`), `eval`, `env -S`, redirections,
+  (`sudo -u root`, `nice -n 10`, `timeout 5`), `eval`, `env -S`, the Windows
+  runners `cmd /c`, `pwsh -Command`/`powershell -Command` and `wsl`, redirections,
   `.exe` suffixes, newline-separated and compound commands, and blocks a shell
-  reading its commands from a pipe (`... | sh`) and anything it cannot parse --
+  or Windows runner reading its commands from a pipe (`... | sh`), `pwsh
+  -EncodedCommand`, and anything it cannot parse --
   including `eval "$(...)"`, so a setup line such as `eval "$(ssh-agent -s)"` is
   refused.
   A newline inside a quoted string (a
@@ -173,7 +176,12 @@ limit — not a bug. Read it before you rely on any of the above.
   `sed -i … "$CFG"`, does not contain the literal path and is not caught.
 - **command-guard is a blocklist, not an allowlist.** It matches command
   *names*. Base64 or other encoding, `$VAR` indirection, runtime aliases, and
-  any binary that simply isn't on the list all pass uninspected.
+  any binary that simply isn't on the list all pass uninspected. So do git
+  settings made outside the command (`git config`, `GIT_CONFIG_*` variables),
+  deleting a remote branch under any name other than `main`, `master` or `HEAD`
+  (only server-side branch protection that binds admins stops that), cmd
+  built-ins (`rd /s`, `del`), `wsl --unregister`, and a script file run by
+  `pwsh -File` or `Start-Process`.
 - **PostToolUse cannot undo a write.** `securityDefaults`, `fixTags` and
   `runTests` report a violation *after* the file has changed on disk. They give
   Claude a chance to fix it; they do not prevent it.

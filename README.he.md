@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=860c4d24ed64563a -->
+<!-- he-sync: what-this-does-not-protect-against sha256=27fe45189693a29f -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -58,7 +58,11 @@
   `sed -i … "$CFG"`, לא מכילה את הנתיב המילולי, ולכן לא נתפסת.
 - **ה-command-guard הוא רשימה שחורה (blocklist), לא רשימת היתרים.** הוא מזהה *שמות* של פקודות.
   base64 או קידוד אחר, הפניה דרך `$VAR`, כינויים (aliases) שמוגדרים בזמן ריצה, וכל קובץ
-  הרצה שפשוט לא נמצא ברשימה — כל אלה עוברים בלי בדיקה.
+  הרצה שפשוט לא נמצא ברשימה — כל אלה עוברים בלי בדיקה. אותו דבר נכון להגדרות git שנקבעו
+  מחוץ לפקודה (`git config`, משתני `GIT_CONFIG_*`), למחיקה של ענף מרוחק בכל שם שאינו
+  `main`, `master` או `HEAD` (את זה עוצרת רק הגנת ענפים (branch protection) בצד השרת,
+  ורק אם היא חלה גם על מנהלי מערכת), לפקודות המובנות של cmd (`rd /s`, `del`),
+  ל-`wsl --unregister`, ולקובץ סקריפט שמורץ דרך `pwsh -File` או `Start-Process`.
 - **PostToolUse לא יכול לבטל כתיבה.** המודולים `securityDefaults`, `fixTags`
   ו-`runTests` מדווחים על הפרה *אחרי* שהקובץ כבר השתנה בדיסק. הם נותנים ל-Claude הזדמנות
   לתקן; הם לא מונעים את השינוי.

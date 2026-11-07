@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 150
+FP_FLOOR = 200
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -630,6 +630,91 @@ CASES = [
     # apostrophe closes the quote, so the trailing '@ leaves it unbalanced.
     ("ml bash payload gets no here-string handling",
      "git commit -m @'\ndon't stop\n'@", B, ()),
+    # --- git push: --mirror and --prune delete remote refs; deleting main/master/HEAD ---
+    ("push --mirror", "git push --mirror", B, ()),
+    ("push --mirror origin", "git push --mirror origin", B, ()),
+    ("push --prune", "git push --prune origin", B, ()),
+    ("push --delete main", "git push origin --delete main", B, ()),
+    ("push :main refspec", "git push origin :main", B, ()),
+    ("push -d master", "git push -d origin master", B, ()),
+    ("push --delete refs/heads/main", "git push origin --delete refs/heads/main", B, ()),
+    ("fp push --delete a feature branch", "git push origin --delete feat/x", A, ()),
+    ("fp push :feature refspec", "git push origin :feat/x", A, ()),
+    ("fp push -d a feature branch", "git push -d origin feat/x", A, ()),
+    ("fp push HEAD:main (a push, not a delete)", "git push origin HEAD:main", A, ()),
+    ("fp push -d from a remote named main", "git push -d main feat/x", A, ()),
+    ("fp push with -c user.name", "git -c user.name=x push origin main", A, ()),
+    ("fp push with an unforced -c push refspec",
+     "git -c remote.origin.push=refs/heads/main:refs/heads/main push origin", A, ()),
+    ("fp push --dry-run", "git push --dry-run origin main", A, ()),
+    ("fp push --porcelain", "git push --porcelain origin main", A, ()),
+    ("fp push --push-option", "git push --push-option=ci.skip origin main", A, ()),
+    ("fp mirror config on a fetch", "git -c remote.origin.mirror=true fetch origin", A, ()),
+    # --- Windows runners: cmd /c|/k, pwsh/powershell -Command, wsl ---
+    ("cmd /c git push --force", "cmd /c git push --force", B, ()),
+    ("cmd.exe /c quoted reset", 'cmd.exe /c "git reset --hard"', B, ()),
+    ("cmd //c (Git Bash form)", "cmd //c git reset --hard", B, ()),
+    ("cmd /k npm install", "cmd /k npm install left-pad", B, ()),
+    ("cmd /d /s /c rm -rf /", 'cmd /d /s /c "rm -rf /"', B, ()),
+    ("pwsh -Command reset", 'pwsh -Command "git reset --hard"', B, ()),
+    ("pwsh -c push --force", "pwsh -c 'git push --force'", B, ()),
+    ("pwsh -NoProfile -Command unquoted", "pwsh -NoProfile -Command git reset --hard", B, ()),
+    ("pwsh with option values before -Command",
+     'pwsh -NoProfile -ExecutionPolicy Bypass -Command "git reset --hard"', B, ()),
+    ("powershell -Command npm install", 'powershell -Command "npm install left-pad"', B, ()),
+    ("powershell -ExecutionPolicy Bypass -Command",
+     'powershell -ExecutionPolicy Bypass -Command "git reset --hard"', B, ()),
+    ("powershell positional command", "powershell git reset --hard", B, ()),
+    ("powershell positional after an option value",
+     "powershell -ExecutionPolicy Bypass git reset --hard", B, ()),
+    ("powershell positional with a git -f", "powershell git push -f origin main", B, ()),
+    ("powershell -Command script block", 'powershell -Command "& {git reset --hard}"', B, ()),
+    ("pwsh -EncodedCommand is uninspectable", "pwsh -EncodedCommand AAAA", B, ()),
+    ("pipe into pwsh -Command -", "echo x | pwsh -Command -", B, ()),
+    ("pipe into pwsh -File -", "echo x | pwsh -File -", B, ()),
+    ("pipe into powershell with no command", "echo x | powershell -ExecutionPolicy Bypass", B, ()),
+    ("pipe into cmd", "echo x | cmd", B, ()),
+    ("pipe into wsl", "echo x | wsl", B, ()),
+    ("wsl rm -rf ~", "wsl rm -rf ~", B, ()),
+    ("wsl -e push --force", "wsl -e git push --force", B, ()),
+    ("wsl.exe --exec rm -rf /", "wsl.exe --exec rm -rf /", B, ()),
+    ("wsl -d distro -- reset", "wsl -d Ubuntu -- git reset --hard", B, ()),
+    ("wsl -u root rm -rf /", "wsl -u root rm -rf /", B, ()),
+    ("wsl on the second line", "git commit -m wip\nwsl rm -rf ~", B, ()),
+    ("fp cmd /c dir", "cmd /c dir", A, ()),
+    ("fp cmd //c npm ci", 'cmd //c "npm ci"', A, ()),
+    ("fp cmd /c commit with an apostrophe", 'cmd /c git commit -m "don\'t break"', A, ()),
+    ("fp pwsh -Command Get-ChildItem", "pwsh -Command Get-ChildItem", A, ()),
+    ("fp pwsh -File", "pwsh -File build.ps1", A, ()),
+    ("fp pwsh -File with script args", "pwsh -NoProfile -File ./scripts/test.ps1 -Verbose", A, ()),
+    ("fp powershell -File", "powershell -ExecutionPolicy Bypass -File x.ps1", A, ()),
+    ("fp pwsh -c a variable", "pwsh -NoProfile -c '$PSVersionTable'", A, ()),
+    ("fp pwsh -c an assignment", "pwsh -c '$ErrorActionPreference=\"Stop\"; Get-ChildItem'", A, ()),
+    ("fp pipe into pwsh -c $input", "git diff | pwsh -c '$input | Out-String'", A, ()),
+    ("fp pwsh -c spaced assignment", "pwsh -c '$x = 1; Write-Output $x'", A, ()),
+    ("fp pipe into a pwsh script file", "git log | pwsh -File ./fmt.ps1", A, ()),
+    ("fp pipe into a pwsh positional script", "x | pwsh build.ps1", A, ()),
+    ("fp wsl ls ~", "wsl ls ~", A, ()),
+    ("fp wsl -d distro -- make test", "wsl -d Ubuntu -- make test", A, ()),
+    ("fp wsl --list --verbose", "wsl --list --verbose", A, ()),
+    ("fp wsl --shutdown", "wsl --shutdown", A, ()),
+    ("fp wsl git status", "wsl git status", A, ()),
+    ("fp wsl -e bash -c ls", 'wsl -e bash -c "ls -la"', A, ()),
+    ("fp pipe into wsl grep", "git log | wsl grep fix", A, ()),
+    ("fp wsl as an argument", "grep wsl notes.txt", A, ()),
+    ("fp cmd /c as echoed text", "echo cmd /c dir", A, ()),
+    ("fp runner names in a commit message", 'git commit -m "wsl: support cmd /c on Windows"', A, ()),
+    ("fp dot-source a venv", ". ./venv/bin/activate", A, ()),
+    ("pwsh output captured from a forced push", "pwsh -c '$out = git push --force'", B, ()),
+    ("powershell output discarded from a reset", "powershell -c '$null = git reset --hard'", B, ()),
+    ("push --repo= --delete main", "git push --repo=origin --delete main", B, ()),
+    ("push --repo --delete main", "git push --repo origin --delete main", B, ()),
+    ("fp powershell positional cmdlet with -ea", "powershell Get-ChildItem -ea 0", A, ()),
+    ("fp pwsh script argument -e", "pwsh build.ps1 -e prod", A, ()),
+    ("fp pwsh -c destructuring assignment", "pwsh -c '$a, $b = 1, 2'", A, ()),
+    ("fp a long cmd /c echo", "cmd /c echo " + "word " * 780, A, ()),
+    ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
+     ("status ; echo",)),
 ]
 
 # PowerShell payloads (tool_name "PowerShell"): evaluated with shell="powershell",
@@ -743,6 +828,26 @@ PS_CASES = [
     # the words this repo policy pattern needs (in bash it stays unmatched: CASES).
     ("ps U+180E read as a space reaches a repo policy pattern",
      "Write-Output" + chr(0x180E) + "hello", B, ("write-output hello",)),
+    # Windows runners and push rules apply to a PowerShell payload too.
+    ("ps cmd /c push --force", "cmd /c git push --force", B, ()),
+    ("ps wsl reset", "wsl git reset --hard", B, ()),
+    ("ps pwsh -c push --force", "pwsh -c git push --force", B, ()),
+    ("ps push --mirror", "git push --mirror", B, ()),
+    ("ps pwsh -Command script block", "pwsh -Command { git reset --hard }", B, ()),
+    # The grouping reading (_ps_ungroup) opens only a group around one word.
+    ("ps fp push to the current branch", "git push origin (git branch --show-current)", A, ()),
+    ("ps fp Write-Output (Get-Date)", "Write-Output (Get-Date)", A, ()),
+    ("ps fp if (Test-Path) block", "if (Test-Path x) { git status }", A, ()),
+    ("ps fp dot-source a script", ". ./build.ps1", A, ()),
+    ("ps fp dot-source $PROFILE", ". $PROFILE", A, ()),
+    ("ps fp parens in a commit message", 'git commit -m "Fix (#12)"', A, ()),
+    ("ps fp targeted rm of a joined temp path", "rm -r -fo (Join-Path $env:TEMP build)", A, ()),
+    ("ps fp targeted rm of a joined home path", "rm -r -fo (Join-Path $HOME .cache)", A, ()),
+    ("ps fp push a dated ref", "git push origin (Get-Date -Format yyyyMMdd)", A, ()),
+    ("ps fp here-string body with parens and braces",
+     "git commit -F - @'\nfix: handle (parens) and {braces}\n\nbody line\n'@", A, ()),
+    ("ps fp a long pwsh -Command script",
+     'pwsh -NoProfile -Command "' + "Write-Output (Get-Date) `t {x}; " * 110 + '"', A, ()),
 ]
 
 # tool_name plumbing through main(): the same text is a PowerShell here-string only
@@ -902,9 +1007,209 @@ def _winpath_wiring_problem():
     return ""
 
 
+# Readings that only an evasive string would exercise as a block fixture, asserted on
+# benign text instead: PowerShell's grouping reading (_ps_ungroup) and the Windows
+# runners' readings (_runner_scripts, _lenient_runner). Same row shape as SPACE_CASES.
+GROUP_CASES = [
+    ("ps: a parenthesized argument", "powershell", 'Write-Output ("a")',
+     [["write-output", "a"]], []),
+    ("ps: $( ) and @( ) arguments", "powershell", "Write-Output $(\"a\") @('b')",
+     [["write-output", "a", "b"]], []),
+    ("ps: a call operator on a grouped name", "powershell", "& ('git') status",
+     [["git", "status"]], []),
+    ("ps: a script block", "powershell", "& {git status}", [["git", "status"]], []),
+    ("ps: a multi-word group stays a group", "powershell", "Write-Output (Join-Path a b)",
+     [], [["write-output", "join-path", "a", "b"]]),
+    ("bash: cmd caret escape removed", "bash", "cmd /c echo a^b",
+     [["echo", "ab"], ["echo", "a^b"]], []),
+    ("bash: cmd switches in one word", "bash", "cmd /d/c echo x", [["echo", "x"]], []),
+    ("bash: cmd switch glued to the command", "bash", "cmd /cecho x", [["echo", "x"]], []),
+    ("bash: wsl -e keeps a quoted script whole", "bash", 'wsl -e bash -c "ls -la"',
+     [["ls", "-la"]], []),
+    ("bash: wsl value option read both ways", "bash", "wsl -d Ubuntu ls",
+     [["ls"], ["ubuntu", "ls"]], []),
+    ("bash: wsl ~ start-in-home shorthand", "bash", "wsl ~ ls", [["ls"]], []),
+    ("bash: powershell positional after an option value", "bash",
+     "powershell -ExecutionPolicy Bypass Write-Output x", [["write-output", "x"]], []),
+    ("bash: pwsh -Command after option values", "bash",
+     "pwsh -NoProfile -ExecutionPolicy Bypass -Command Write-Output x",
+     [["write-output", "x"]], []),
+    ("bash: pwsh script block", "bash", 'pwsh -c "& {Write-Output x}"',
+     [["write-output", "x"]], []),
+    ("bash: a runner in a substitution (lenient)", "bash", 'echo "$(wsl ls ~)"',
+     [["ls", "~"]], []),
+    ("bash: a runner word that is an argument", "bash", "echo wsl ls", [], [["ls"]]),
+    ("bash: pwsh script backtick escapes decoded", "bash", "pwsh -c 'Write-Output a`tb'",
+     [["write-output", "a", "b"]], []),
+]
+
+
+def _seg(words, ps_script=False, piped=False):
+    seg = m._new_seg(words, piped)
+    seg.ps_script = ps_script
+    return seg
+
+
+def _flagged(text):
+    """{tuple(words): the set of ps_script values} over the segments _segments gives
+    for bash text (a set, so one wrongly marked copy among several shows)."""
+    out = {}
+    m._RunnerBudget.used = 0             # evaluate() resets it; a direct call must too
+    for s in m._segments(text):
+        out.setdefault(tuple(s), set()).add(getattr(s, "ps_script", False))
+    return out
+
+
+def _timing(shell, text):
+    import time
+    t0 = time.perf_counter()
+    m.evaluate(text, shell=shell)
+    return time.perf_counter() - t0
+
+
+def _long_runner_chain():
+    """One long segment of nested runners whose readings multiply (see _runner_segments)."""
+    tail = "`e`u{41}" + chr(0xA0) + chr(0x0B) + " C:\\\\x"
+    out = "cmd /c powershell -ep a wsl -d x ~ powershell -ep a cmd /c "
+    while len(out) + 8 + len(tail) <= m._MAX_INSPECT_LEN:
+        out += "a^{b} c "
+    return out + tail
+
+
+def _distinct_runner_payload():
+    out, i = "", 0
+    while True:
+        unit = f'cmd /c pwsh -c wsl -e cmd /c echo a^b{i} ("x") `e{chr(0xA0)}{{y}}; '
+        if len(out) + len(unit) > m._MAX_INSPECT_LEN:
+            return out
+        out, i = out + unit, i + 1
+
+
+# Helper-level checks: (label, thunk, expected). The table-gap and config forms of git,
+# and the exemptions, are pinned here on benign values rather than as block fixtures.
+STRUCT_CASES = [
+    ("git: an option missing from the table still yields push",
+     lambda: "push" in [c[0] for c in m._git_candidates(["--newopt", "v", "--bare", "push"])],
+     True),
+    ("git: --attr-source takes a value",
+     lambda: m._git_subcommand(["--attr-source", "head", "push"])[0], "push"),
+    ("git: --config-env takes a value",
+     lambda: m._git_subcommand(["--config-env", "a=b", "push"])[0], "push"),
+    ("git: candidates stop at a word no option precedes",
+     lambda: [c[0] for c in m._git_candidates(["-c", "a=b", "push", "x"])], ["push", "a=b", "push"]),
+    ("git: -c mirror", lambda: bool(m._git_push_config_reasons(
+        ["-c", "remote.origin.mirror=true"])), True),
+    ("git: -c mirror with no value", lambda: bool(m._git_push_config_reasons(
+        ["-c", "remote.origin.mirror"])), True),
+    ("git: -c forced push refspec", lambda: bool(m._git_push_config_reasons(
+        ["-c", "remote.origin.push=+refs/heads/x:refs/heads/x"])), True),
+    ("git: --config-env push key", lambda: bool(m._git_push_config_reasons(
+        ["--config-env", "remote.origin.push=V"])), True),
+    ("git: --config-env= mirror key", lambda: bool(m._git_push_config_reasons(
+        ["--config-env=remote.origin.mirror=V"])), True),
+    ("git: -c user.name gives nothing", lambda: m._git_push_config_reasons(
+        ["-c", "user.name=x"]), []),
+    ("git: an unforced -c push refspec gives nothing", lambda: m._git_push_config_reasons(
+        ["-c", "remote.origin.push=refs/heads/x:refs/heads/x"]), []),
+    ("dot: `. git status` judges git", lambda: m._effective_cmd_index([".", "git", "status"])[0], 1),
+    ("dot: `. $profile` keeps the dot", lambda: m._effective_cmd_index([".", "$profile"])[0], 0),
+    ("dot: a piped `. /dev/stdin` still reads stdin",
+     lambda: m._shell_reads_stdin(_seg([".", "/dev/stdin"], piped=True)), True),
+    ("ps_script: a lone $ word is an expression", lambda: m._reasons_for(
+        _seg(["$psversiontable"], ps_script=True)), []),
+    ("ps_script: $x = 1 is an expression", lambda: m._reasons_for(
+        _seg(["$x", "=", "1"], ps_script=True)), []),
+    ("ps_script: $x followed by a word is uninspectable", lambda: bool(m._reasons_for(
+        _seg(["$x", "push"], ps_script=True))), True),
+    ("ps_script: outside a pwsh script $x = 1 is uninspectable", lambda: bool(m._reasons_for(
+        _seg(["$x", "=", "1"]))), True),
+    ("ps_script: a pwsh script's segments are marked",
+     lambda: _flagged("pwsh -c '$x = 1'").get(("$x", "=", "1")), {True}),
+    ("ps_script: not passed to a script nested in it",
+     lambda: _flagged("pwsh -c 'bash -c \"echo x\"'").get(("echo", "x")), {False}),
+    ("ps_script: not set on a cmd runner's command",
+     lambda: _flagged("cmd /c echo x").get(("echo", "x")), {False}),
+    ("ps_script: not set on a runner's command found by the lenient pass",
+     lambda: _flagged("pwsh -c 'echo \"$(cmd /c echo x)\"'").get(("echo", "x")), {False}),
+    ("ps_script: an exempt copy does not stand in for a judged one",
+     lambda: bool(m.evaluate("pwsh -c '$y = 1'; $y = 1")), True),
+    ("git: the git rule reads every candidate subcommand", lambda: bool(m._rules_at(
+        ["git", "--newopt", "v", "--bare", "push", "--mirror"], 0, False)), True),
+    ("git: the push rule reads -c settings", lambda: bool(m._git_rules(
+        "push", ["origin"], ["-c", "remote.origin.mirror=true"])), True),
+    ("git: -c settings matter only to a push", lambda: m._git_rules(
+        "fetch", ["origin"], ["-c", "remote.origin.mirror=true"]), []),
+    ("git: -c delete refspec of main", lambda: bool(m._git_push_config_reasons(
+        ["-c", "remote.origin.push=:main"])), True),
+    ("git: -c delete refspec of a feature branch", lambda: m._git_push_config_reasons(
+        ["-c", "remote.origin.push=:feat/x"]), []),
+    ("ps_script: an assignment's right-hand side is judged", lambda: bool(m._reasons_for(
+        _seg(["$x", "=", "git", "reset", "--hard"], ps_script=True))), True),
+    ("ps_script: a chained assignment's command is judged", lambda: bool(m._reasons_for(
+        _seg(["$a", "=", "$b", "+=", "git", "reset", "--hard"], ps_script=True))), True),
+    ("ps_script: a 4 KB assignment chain is judged without recursion",
+     lambda: m.evaluate("pwsh -c '" + "$a = " * 800 + "x'"), []),
+    ("ps_script: an assignment chain behind skipped words is judged without recursion",
+     lambda: [m.evaluate("pwsh -c '$a = " + link * n + "x'") for link, n in
+              (("- $b = ", 580), ("- $ = ", 670), ("sh $b = ", 500), ("a= $b = ", 500))],
+     [[], [], [], []]),
+    ("ps_script: the same chain in a PowerShell payload", lambda: m.evaluate(
+        "pwsh -c '$a = " + "- $b = " * 580 + "x'", shell="powershell"), []),
+    ("ps_script: a command behind a skipped word after =", lambda: bool(m.evaluate(
+        "pwsh -c '$a = - $b = git reset --hard'")), True),
+    ("ps_script: an assignment of a value is not", lambda: m._reasons_for(
+        _seg(["$x", "=", "git", "status"], ps_script=True)), []),
+    ("ps_script: a destructuring target", lambda: m._reasons_for(
+        _seg(["$a,", "$b", "=", "1,", "2"], ps_script=True)), []),
+    ("encoded: only pwsh's own switches", lambda: m._ps_encoded(["get-childitem", "-ea", "0"]),
+     False),
+    ("encoded: after an option value", lambda: m._ps_encoded(["-ep", "bypass", "-enc", "aaaa"]),
+     True),
+    ("encoded: not inside a -Command script", lambda: m._ps_encoded(["-c", "wsl", "-e", "ls"]),
+     False),
+    ("value options: -c and -e take no value", lambda: m._ps_positionals(
+        ["-c", "x", "-e", "y"], True), ["x", "-e", "y"]),
+    ("runner budget: a 4 KB nested-runner chain is refused, not run to the timeout",
+     lambda: (m.evaluate(_long_runner_chain(), shell="powershell") or [""])[0].startswith(
+         "uninspectable command (Windows runner scripts too long"), True),
+    ("timing: 4 KB nested-runner chain in one segment (PowerShell)",
+     lambda: _timing("powershell", _long_runner_chain()) < 3.0, True),
+    ("switch -c", lambda: m._ps_switch("-c"), "command"),
+    ("switch /c", lambda: m._ps_switch("/c"), "command"),
+    ("switch --command", lambda: m._ps_switch("--command"), "command"),
+    ("switch en-dash c", lambda: m._ps_switch("–c"), "command"),
+    ("switch -cwa", lambda: m._ps_switch("-cwa"), "command"),
+    ("switch -e", lambda: m._ps_switch("-e"), "encoded"),
+    ("switch -enc", lambda: m._ps_switch("-enc"), "encoded"),
+    ("switch -ec", lambda: m._ps_switch("-ec"), "encoded"),
+    ("switch -f", lambda: m._ps_switch("-f"), "file"),
+    ("switch -ex (ExecutionPolicy)", lambda: m._ps_switch("-ex"), "other"),
+    ("switch -config (ConfigurationName)", lambda: m._ps_switch("-config"), "other"),
+    ("not a switch", lambda: m._ps_switch("bypass"), None),
+    ("ungroup keeps ${name} and quotes", lambda: m._ps_ungroup('${env:a} ("q") {x}'),
+     '${env:a}  "q"   x '),
+    ("ungroup leaves a multi-word group", lambda: m._ps_ungroup("(Join-Path a b)"),
+     "(Join-Path a b)"),
+    # The runner readings multiply; their tokenization is memoized (_runner_segments).
+    # 4 KB of distinct nested runners took ~0.3 s here (~0.07 s before the runners);
+    # the hook timeout is 10 s.
+    ("timing: 4 KB of nested runners (PowerShell)",
+     lambda: _timing("powershell", _distinct_runner_payload()) < 3.0, True),
+    ("timing: 4 KB of nested runners (Bash)", lambda: _timing(
+        "bash", ("cmd /c wsl -- pwsh -Command cmd //c echo a^b 'q w' ; " * 80)[:4096]) < 3.0,
+     True),
+]
+
+
+def _struct_problem(thunk, expected):
+    got = thunk()
+    return "" if got == expected else f"want {expected!r}, got {got!r}"
+
+
 def _space_case_problem(shell, text, present, absent):
     """Why the words evaluate() judges for text do not match a SPACE_CASES row, or
     an empty string when they do."""
+    m._RunnerBudget.used = 0             # evaluate() resets it; a direct call must too
     segs = (m._powershell_segments(text) if shell == "powershell"
             else m._segments(text, shell=shell))
     words = [list(s) for s in segs]
@@ -1024,6 +1329,14 @@ if pytest is not None:
     def test_winpath_wiring():
         assert not _winpath_wiring_problem()
 
+    @pytest.mark.parametrize("label,shell,text,present,absent", GROUP_CASES)
+    def test_group_and_runner_reading(label, shell, text, present, absent):
+        assert not _space_case_problem(shell, text, present, absent), label
+
+    @pytest.mark.parametrize("label,thunk,expected", STRUCT_CASES)
+    def test_struct(label, thunk, expected):
+        assert not _struct_problem(thunk, expected), label
+
     def test_fp_floor():
         n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in _all_cases() if not sb)
         assert n_allow >= FP_FLOOR, (
@@ -1087,15 +1400,31 @@ def run():
     else:
         failed += 1
         print(f"  FAIL [winpath: second reading runs only for a path] {problem}")
+    for label, shell, text, present, absent in GROUP_CASES:
+        problem = _space_case_problem(shell, text, present, absent)
+        if not problem:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [group/runner: {label}] {shell} {text!r}: {problem}")
+    for label, thunk, expected in STRUCT_CASES:
+        problem = _struct_problem(thunk, expected)
+        if not problem:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [struct: {label}] {problem}")
     n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in cases if not sb)
     n_block = len(cases) - n_allow
     n_space = len(SPACE_CASES) + 2
     n_winpath = len(WINPATH_CASES) + 1
-    total = len(cases) + len(MAIN_CASES) + len(READING_CASES) + n_space + n_winpath
+    total = (len(cases) + len(MAIN_CASES) + len(READING_CASES) + n_space + n_winpath
+             + len(GROUP_CASES) + len(STRUCT_CASES))
     print(f"\ncommand-guard fixtures: {passed} passed, {failed} failed, "
           f"{total} total ({n_allow} allow / {n_block} block, "
           f"+{len(MAIN_CASES)} via main(), +{len(READING_CASES)} PowerShell readings, "
-          f"+{n_space} PowerShell word separators, +{n_winpath} Windows-path readings)")
+          f"+{n_space} PowerShell word separators, +{n_winpath} Windows-path readings, "
+          f"+{len(GROUP_CASES)} grouping/runner readings, +{len(STRUCT_CASES)} helper checks)")
     # FP-budget floor: the allow corpus must never shrink below the last release floor.
     if n_allow < FP_FLOOR:
         failed += 1
