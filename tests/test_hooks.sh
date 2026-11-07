@@ -226,6 +226,7 @@ err_has "matcher error text is passed on" "planted for the test"
 if command -v timeout >/dev/null 2>&1; then
   plant_matcher "import time; time.sleep(9)"
   run_out "matcher over its 5s budget -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+  quiet_ok "matcher timeout: nothing on stdout"
   err_has "matcher timeout is reported" "exceeded its 5s budget"
 else
   echo "  SKIP [matcher over its 5s budget: no timeout(1) on PATH]"
