@@ -117,6 +117,9 @@ _MAX_INSPECT_LEN = 4096
 # Cap on the text the continuation-chain pass may build from one command (it is
 # quadratic in the length of a run of continued lines). Past it: BLOCK.
 _MAX_CHAIN_CHARS = 131072
+# Cap on the Windows-runner script text one evaluation may tokenize (the readings of
+# nested runners multiply; see _runner_segments). Past it: BLOCK.
+_MAX_RUNNER_CHARS = 262144
 
 # Catastrophic delete "roots" (after canonicalization). Targeted paths are allowed.
 _DANGER_ROOTS = {"/", ".", "..", "*", "~", "$home", "${home}", "/*"}
@@ -188,10 +191,11 @@ _PS_VALUE_OPTS = ("executionpolicy", "ep", "windowstyle", "inputformat", "output
                   "configurationname", "configurationfile", "custompipename", "version",
                   "psconsolefile", "workingdirectory", "wd", "settingsfile")
 # What may follow a $ word that starts a PowerShell expression statement.
-_PS_EXPR_NEXT = {"=", "+=", "-=", "*=", "/=", "%=", "??=", "-eq", "-ne", "-gt", "-lt", "-ge",
-                 "-le", "-like", "-notlike", "-match", "-notmatch", "-replace", "-contains",
-                 "-notcontains", "-in", "-notin", "-and", "-or", "-is", "-isnot", "-as",
-                 "-split", "-join"}
+_PS_ASSIGN = {"=", "+=", "-=", "*=", "/=", "%=", "??="}
+_PS_EXPR_NEXT = _PS_ASSIGN | {
+    "-eq", "-ne", "-gt", "-lt", "-ge", "-le", "-like", "-notlike", "-match", "-notmatch",
+    "-replace", "-contains", "-notcontains", "-in", "-notin", "-and", "-or", "-is",
+    "-isnot", "-as", "-split", "-join"}
 # wsl options that take a value (`wsl -d Ubuntu -u root -- cmd`).
 _WSL_VALUE_OPTS = {"-d", "--distribution", "--distribution-id", "-u", "--user", "--cd",
                    "--shell-type"}
@@ -473,6 +477,8 @@ def _git_push_config_reasons(globals_):
                            "is forbidden")
             elif m and val.startswith("+"):
                 out.append("forced git push via +refspec is forbidden")
+            elif m and val.startswith(":") and _ref_name(val[1:]) in _PROTECTED_REFS:
+                out.append("deleting a main/master/HEAD remote ref is forbidden")
         env = nxt if a == "--config-env" else (
             a.split("=", 1)[1] if a.startswith("--config-env=") else None)
         if env is not None and _GIT_REMOTE_CFG_RE.match(env.partition("=")[0]):
@@ -487,11 +493,22 @@ def _ref_name(ref: str) -> str:
 
 def _deletes_protected_ref(args) -> bool:
     """`git push --delete <remote> main`, `git push -d …`, or a `:main` refspec. Only
-    the refs after the remote count (a remote may be called main); `HEAD:main` pushes."""
+    the refs after the remote count (a remote may be called main) -- all of them when
+    --repo names the remote; `HEAD:main` pushes."""
     deleting = any(_matches_long(a, ("--delete",))
                    or (a.startswith("-") and not a.startswith("--") and "d" in a[1:].lower())
                    for a in args)
-    refs = [a for a in args if not a.startswith("-")][1:]
+    positionals, repo, skip = [], False, False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == "--repo":
+            repo = skip = True
+        elif a.startswith("--repo="):
+            repo = True
+        elif not a.startswith("-"):
+            positionals.append(a)
+    refs = positionals if repo else positionals[1:]
     if deleting and any(_ref_name(r) in _PROTECTED_REFS for r in refs):
         return True
     return any(r.startswith(":") and _ref_name(r[1:]) in _PROTECTED_REFS for r in refs)
@@ -697,11 +714,17 @@ def _rules_at(toks, idx, saw_xargs):
     # `$x="y"`) or an assignment or operator follows it (`$x = 1`, `$a -eq 2`).
     # PowerShell refuses `$x <word>`, so that shape only runs after an OUTER shell
     # expanded it (`pwsh -c "$CMD -rf /"` from bash): it stays uninspectable.
+    # A destructuring target (`$a, $b = 1, 2`) ends in a comma. The right-hand side of
+    # an assignment runs as a pipeline (`$out = git push --force`): judge it.
     if "$" in cmd or toks[idx].startswith(("$(", "`")):
         nxt = toks[idx + 1].lower() if idx + 1 < len(toks) else None
         if not (getattr(toks, "ps_script", False)
-                and (nxt is None or nxt in _PS_EXPR_NEXT)):
+                and (nxt is None or nxt in _PS_EXPR_NEXT or toks[idx].endswith(","))):
             out.append("uninspectable command word (shell expansion in command position)")
+        elif nxt in _PS_ASSIGN and idx + 2 < len(toks):
+            rhs = _new_seg(toks[idx + 2:], getattr(toks, "piped", False))
+            rhs.ps_script = True
+            out += [r for r in _reasons_for(rhs) if r not in out]
         return out
 
     if cmd == "rm":
@@ -731,7 +754,7 @@ def _rules_at(toks, idx, saw_xargs):
                 if r not in out:
                     out.append(r)
 
-    elif cmd in _PS_RUNNERS and _ps_decisive_switch(args)[0] == "encoded":
+    elif cmd in _PS_RUNNERS and _ps_encoded(args):
         out.append("PowerShell -EncodedCommand (uninspectable)")
 
     elif cmd == "find":
@@ -895,6 +918,30 @@ def _ps_decisive_switch(args):
     return None, -1
 
 
+def _ps_encoded(args) -> bool:
+    """An -EncodedCommand switch among pwsh/powershell's OWN switches: those before the
+    first positional word, -Command or -File (values of _PS_VALUE_OPTS stepped over).
+    After it the switches are the command's or script's (`powershell Get-ChildItem
+    -ea 0`, -ea being -ErrorAction there)."""
+    j = 0
+    while j < len(args):
+        kind = _ps_switch(args[j])
+        if kind == "encoded":
+            return True
+        if kind != "other":
+            return False
+        j += 2 if _ps_takes_value(args[j]) else 1
+    return False
+
+
+def _ps_takes_value(tok: str) -> bool:
+    """A pwsh/powershell switch other than -Command/-EncodedCommand/-File whose name is a
+    prefix of a _PS_VALUE_OPTS entry, with no `:value` glued to it."""
+    name = _ps_switch_name(tok)
+    return (name is not None and ":" not in tok and _ps_switch(tok) == "other"
+            and any(v.startswith(name) for v in _PS_VALUE_OPTS))
+
+
 def _ps_positionals(args, consume: bool):
     """Windows PowerShell 5.1 runs its first positional word as a command: the words from
     there on. consume: a switch named in _PS_VALUE_OPTS takes the next word as its value
@@ -902,11 +949,9 @@ def _ps_positionals(args, consume: bool):
     j = 0
     while j < len(args):
         a = args[j]
-        name = _ps_switch_name(a)
-        if name is None:
+        if _ps_switch_name(a) is None:
             return args[j:]
-        takes = consume and ":" not in a and any(v.startswith(name) for v in _PS_VALUE_OPTS)
-        j += 2 if takes else 1
+        j += 2 if consume and _ps_takes_value(a) else 1
     return []
 
 
@@ -989,7 +1034,8 @@ def _runner_scripts(toks):
     --hard"` is `git reset --hard`. (A quoted script for a shell later in the words,
     `wsl -e bash -c '...'`, is still found whole by _split_inline_script.) cmd's text is
     also read with its ^ escapes removed, and a pwsh/powershell script in its grouping
-    reading (_ps_ungroup). ps marks a PowerShell script (see ps_script in _rules_at).
+    reading (_ps_ungroup) and with its backtick escapes decoded. ps marks a PowerShell
+    script (see ps_script in _rules_at).
     """
     out = []
     for kind, words in _runner_rests(toks):
@@ -998,6 +1044,7 @@ def _runner_scripts(toks):
             texts.append(texts[0].replace("^", ""))
         if kind == "ps":
             texts += [_ps_ungroup(t) for t in texts]
+            texts += [_ps_unescape_everywhere(t) for t in texts if "`" in t]
         out += [(t, kind == "ps") for t in texts]
     return list(dict.fromkeys(out))
 
@@ -1542,13 +1589,27 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     return segments
 
 
+class _RunnerBudget:
+    """Characters of runner script tokenized in this evaluate() call (see below)."""
+    used = 0
+
+
 @functools.lru_cache(maxsize=4096)
 def _runner_segments(script: str, depth: int, piped: bool, ps: bool):
     """_segments() of a Windows runner's script (see _runner_scripts), memoized: the
-    PowerShell readings and nested runners hand the same script text down many times
-    (a 4 KB payload of nested runners otherwise costs ~15x). The arguments are all the
-    result depends on, and no segment is changed after the call that made it returns,
-    so sharing the result is safe. evaluate() clears the cache on entry."""
+    PowerShell readings and nested runners hand the same script text down many times.
+    The arguments are all the result depends on, and no segment is changed after the
+    call that made it returns, so sharing the result is safe. evaluate() clears the
+    cache and the budget on entry.
+
+    Budgeted: the readings multiply per nesting level, so a 4 KB chain of nested
+    runners can hand down thousands of distinct long scripts. Past _MAX_RUNNER_CHARS
+    tokenized in one evaluation the command is refused as uninspectable (a block),
+    like an over-long continuation chain, rather than run toward the hook timeout."""
+    _RunnerBudget.used += len(script)
+    if _RunnerBudget.used > _MAX_RUNNER_CHARS:
+        raise _Uninspectable(
+            f"Windows runner scripts too long to inspect (> {_MAX_RUNNER_CHARS} chars)")
     return tuple(_segments(script, depth, piped=piped, lenient_on_error=True,
                            ps_script=ps))
 
@@ -1927,6 +1988,7 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
         return []
 
     _runner_segments.cache_clear()
+    _RunnerBudget.used = 0
     try:
         segments = (_powershell_segments(raw) if shell == "powershell"
                     else _segments(raw, shell=shell))
@@ -1940,7 +2002,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
 
     # The readings overlap heavily; judge each distinct segment once. The key holds
     # everything a rule reads, ps_script included, so an exempt copy of a segment
-    # never stands in for one that is not.
+    # never stands in for one that is not. (extraPatterns below still see every
+    # segment in order: a pattern may span two of them.)
     seen, unique = set(), []
     for toks in segments:
         key = (tuple(toks), getattr(toks, "piped", False),
@@ -1948,10 +2011,9 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
         if key not in seen:
             seen.add(key)
             unique.append(toks)
-    segments = unique
 
     reasons = []
-    for toks in segments:
+    for toks in unique:
         for r in _reasons_for(toks):
             if r not in reasons:
                 reasons.append(r)

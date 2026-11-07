@@ -77,7 +77,8 @@ and tracker-reminder reports it. A byte order mark or UTF-16 text is read normal
   (`sudo -u root`, `nice -n 10`, `timeout 5`), `eval`, `env -S`, the Windows
   runners `cmd /c`, `pwsh -Command`/`powershell -Command` and `wsl`, redirections,
   `.exe` suffixes, newline-separated and compound commands, and blocks a shell
-  reading its commands from a pipe (`... | sh`) and anything it cannot parse --
+  or Windows runner reading its commands from a pipe (`... | sh`), `pwsh
+  -EncodedCommand`, and anything it cannot parse --
   including `eval "$(...)"`, so a setup line such as `eval "$(ssh-agent -s)"` is
   refused.
   A newline inside a quoted string (a

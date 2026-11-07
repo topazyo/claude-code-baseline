@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 195
+FP_FLOOR = 200
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -705,6 +705,16 @@ CASES = [
     ("fp cmd /c as echoed text", "echo cmd /c dir", A, ()),
     ("fp runner names in a commit message", 'git commit -m "wsl: support cmd /c on Windows"', A, ()),
     ("fp dot-source a venv", ". ./venv/bin/activate", A, ()),
+    ("pwsh output captured from a forced push", "pwsh -c '$out = git push --force'", B, ()),
+    ("powershell output discarded from a reset", "powershell -c '$null = git reset --hard'", B, ()),
+    ("push --repo= --delete main", "git push --repo=origin --delete main", B, ()),
+    ("push --repo --delete main", "git push --repo origin --delete main", B, ()),
+    ("fp powershell positional cmdlet with -ea", "powershell Get-ChildItem -ea 0", A, ()),
+    ("fp pwsh script argument -e", "pwsh build.ps1 -e prod", A, ()),
+    ("fp pwsh -c destructuring assignment", "pwsh -c '$a, $b = 1, 2'", A, ()),
+    ("fp a long cmd /c echo", "cmd /c echo " + "word " * 780, A, ()),
+    ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
+     ("status ; echo",)),
 ]
 
 # PowerShell payloads (tool_name "PowerShell"): evaluated with shell="powershell",
@@ -836,6 +846,8 @@ PS_CASES = [
     ("ps fp push a dated ref", "git push origin (Get-Date -Format yyyyMMdd)", A, ()),
     ("ps fp here-string body with parens and braces",
      "git commit -F - @'\nfix: handle (parens) and {braces}\n\nbody line\n'@", A, ()),
+    ("ps fp a long pwsh -Command script",
+     'pwsh -NoProfile -Command "' + "Write-Output (Get-Date) `t {x}; " * 110 + '"', A, ()),
 ]
 
 # tool_name plumbing through main(): the same text is a PowerShell here-string only
@@ -1027,6 +1039,8 @@ GROUP_CASES = [
     ("bash: a runner in a substitution (lenient)", "bash", 'echo "$(wsl ls ~)"',
      [["ls", "~"]], []),
     ("bash: a runner word that is an argument", "bash", "echo wsl ls", [], [["ls"]]),
+    ("bash: pwsh script backtick escapes decoded", "bash", "pwsh -c 'Write-Output a`tb'",
+     [["write-output", "a", "b"]], []),
 ]
 
 
@@ -1050,6 +1064,15 @@ def _timing(shell, text):
     t0 = time.perf_counter()
     m.evaluate(text, shell=shell)
     return time.perf_counter() - t0
+
+
+def _long_runner_chain():
+    """One long segment of nested runners whose readings multiply (see _runner_segments)."""
+    tail = "`e`u{41}" + chr(0xA0) + chr(0x0B) + " C:\\\\x"
+    out = "cmd /c powershell -ep a wsl -d x ~ powershell -ep a cmd /c "
+    while len(out) + 8 + len(tail) <= m._MAX_INSPECT_LEN:
+        out += "a^{b} c "
+    return out + tail
 
 
 def _distinct_runner_payload():
@@ -1115,6 +1138,29 @@ STRUCT_CASES = [
         "push", ["origin"], ["-c", "remote.origin.mirror=true"])), True),
     ("git: -c settings matter only to a push", lambda: m._git_rules(
         "fetch", ["origin"], ["-c", "remote.origin.mirror=true"]), []),
+    ("git: -c delete refspec of main", lambda: bool(m._git_push_config_reasons(
+        ["-c", "remote.origin.push=:main"])), True),
+    ("git: -c delete refspec of a feature branch", lambda: m._git_push_config_reasons(
+        ["-c", "remote.origin.push=:feat/x"]), []),
+    ("ps_script: an assignment's right-hand side is judged", lambda: bool(m._reasons_for(
+        _seg(["$x", "=", "git", "reset", "--hard"], ps_script=True))), True),
+    ("ps_script: an assignment of a value is not", lambda: m._reasons_for(
+        _seg(["$x", "=", "git", "status"], ps_script=True)), []),
+    ("ps_script: a destructuring target", lambda: m._reasons_for(
+        _seg(["$a,", "$b", "=", "1,", "2"], ps_script=True)), []),
+    ("encoded: only pwsh's own switches", lambda: m._ps_encoded(["get-childitem", "-ea", "0"]),
+     False),
+    ("encoded: after an option value", lambda: m._ps_encoded(["-ep", "bypass", "-enc", "aaaa"]),
+     True),
+    ("encoded: not inside a -Command script", lambda: m._ps_encoded(["-c", "wsl", "-e", "ls"]),
+     False),
+    ("value options: -c and -e take no value", lambda: m._ps_positionals(
+        ["-c", "x", "-e", "y"], True), ["x", "-e", "y"]),
+    ("runner budget: a 4 KB nested-runner chain is refused, not run to the timeout",
+     lambda: (m.evaluate(_long_runner_chain(), shell="powershell") or [""])[0].startswith(
+         "uninspectable command (Windows runner scripts too long"), True),
+    ("timing: 4 KB nested-runner chain in one segment (PowerShell)",
+     lambda: _timing("powershell", _long_runner_chain()) < 3.0, True),
     ("switch -c", lambda: m._ps_switch("-c"), "command"),
     ("switch /c", lambda: m._ps_switch("/c"), "command"),
     ("switch --command", lambda: m._ps_switch("--command"), "command"),
