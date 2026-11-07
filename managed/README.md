@@ -60,8 +60,13 @@ tampering with the baseline *non-overridably and in every repo* — not just the
 > **path-text** rules — `Bash(*.claude/baseline.config.json*)` and PowerShell forward- and
 > backslash variants — which do cover the shell path. Understand what a text rule can and
 > cannot do: it matches the **command string**, so `cd .claude && sed -i … settings.json`
-> and `sed -i … "$CFG"` are *not* matched, and command-guard's own tamper rule is the
-> other half of that coverage. And it is still a **permission** control, not a filesystem
+> and `sed -i … "$CFG"` are *not* matched, and nothing else in the baseline catches those
+> forms either (see [What this does not protect against](../README.md#what-this-does-not-protect-against)).
+> Under the managed profiles that matters less for the floor itself: the managed hooks
+> take their posture and the other managed keys from `<BASELINE_PREFIX>/managed.config.json`
+> (see "Installing the guardrail scripts"), so a repo-side edit of
+> `.claude/baseline.config.json` cannot weaken them. It can still drop that repo's own
+> `extraPatterns`, `fixTags` or `securityDefaults` settings. And it is still a **permission** control, not a filesystem
 > one: it governs what Claude Code will run, not what a human at a terminal, a Makefile,
 > or a CI job can write. A deliberate side effect worth knowing before you deploy:
 > read-only shell access to those paths (`cat .claude/settings.json`,
@@ -225,13 +230,42 @@ the absolute path where you deploy a copy of this repo's `hooks/` tree on every
 machine, e.g. `/opt/claude-code-baseline/hooks` (POSIX) or
 `C:\Program Files\ClaudeCode\baseline-hooks` (Windows). Steps:
 
-1. Copy `claude-code-baseline/hooks/` to that fixed path on the golden image / via
-   config management (it must be present for the managed hooks to run).
+1. Copy the **source** `claude-code-baseline/hooks/` to that fixed path on the golden
+   image / via config management (it must be present for the managed hooks to run).
+   Never copy a repo's installed `.claude/hooks/baseline/`: `install.sh` marks that tree
+   per-repo with an `INSTALL_SCOPE` file, and the source tree has none. The deployed
+   tree must not contain `INSTALL_SCOPE` (acceptance step 0 checks this).
 2. Substitute `<BASELINE_PREFIX>` in the deployed `managed-settings.json` with that
    absolute path (forward slashes work on all platforms).
-3. The scripts read per-repo `.claude/baseline.config.json` when present and fall
-   back to safe defaults (`block` posture, `failClosed: true`, guardrails on) when
-   a repo has no config — so the floor works even in repos that never ran `install.sh`.
+3. **Posture comes from you, not from the repo.** Run from `<BASELINE_PREFIX>`, the
+   scripts take these keys **only** from an optional `<BASELINE_PREFIX>/managed.config.json`
+   and ignore the repo's values for them: `enforcement`, `failClosed`, every
+   `guardrails.<name>.enabled` (`commandGuard`, `autoFormat`) and
+   `modules.runTests.enabled`. That is the posture, plus every switch that could turn
+   the floor off or run code a repo supplies (`autoFormat` runs the repo's formatters,
+   `runTests` its test suite). With no `managed.config.json` they take the safe
+   defaults: `block`, `failClosed: true`, command-guard on, `autoFormat` and `runTests`
+   off. For example, to run command-guard in warn mode fleet-wide:
+   ```json
+   { "enforcement": "warn" }
+   ```
+   Every other key still comes from the repo's `.claude/baseline.config.json`. Those
+   keys can only add checks: the inspect-only modules (`securityDefaults`, `fixTags`),
+   `commandGuard.extraPatterns`, and the rules file and tag settings. So the managed
+   config sets no org-wide `extraPatterns` and cannot force `securityDefaults` on. A
+   `managed.config.json` that exists but cannot be read (invalid JSON, not an object,
+   or not readable by the user running Claude Code) makes the managed hooks refuse
+   every call they watch until an administrator fixes it. Keep it world-readable.
+   There is no schema for it; it takes the same key names as `baseline.config.json`.
+   A repo with no config of its own still gets the full floor, even if it never ran
+   `install.sh`.
+4. **The prefix and `managed.config.json` must not be writable by users.** The managed
+   deny rules cover `.claude/hooks/baseline` path text in the repo, not
+   `<BASELINE_PREFIX>`. Whoever can write the prefix can replace the scripts, or drop in
+   an `INSTALL_SCOPE` that makes them obey each repo again. Deploy the prefix as
+   root/administrator-owned and read-only to users. Add
+   `Bash(*<BASELINE_PREFIX>*)` and `PowerShell(*<BASELINE_PREFIX>*)` deny rules if you
+   want the agent's shell refused there too.
 
 > Repos that *also* ran `install.sh` will have their own per-repo command-guard in
 > addition; the duplicate run is harmless (both block the same things). For a single
@@ -490,6 +524,8 @@ Run these on a machine after deploying, to prove the floor is non-overridable:
    sources** must show `(file)`, `(drop-ins)`, `(file + drop-ins)` or a `, merged` list
    that includes `file` or `drop-ins`, and **Skipped sources** must not list this file. Otherwise a
    higher-ranked managed source shadows it (see "Where managed settings live").
+   Finally, confirm `<BASELINE_PREFIX>/INSTALL_SCOPE` does **not** exist (`test ! -e`).
+   With it, the managed scripts would take their posture from each repo.
 1. **Managed deny survives skip-permissions.** In any repo, ask Claude Code (with
    `--dangerously-skip-permissions`) to read a `.env` file. It must be **blocked** by
    the managed deny — bypass mode does not override a managed deny rule.

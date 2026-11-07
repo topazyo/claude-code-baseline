@@ -33,6 +33,11 @@ set -uo pipefail
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../hooks/lib/common.sh
 source "$SRC_ROOT/hooks/lib/common.sh"
+# This tool reports each repo's OWN install, read with the source tree's library, which
+# carries no INSTALL_SCOPE marker and would otherwise read as a managed deployment and
+# ignore the repo's posture keys (see _bcl_cfg_scope). Set after sourcing: common.sh
+# unsets every _BCL_CFG_ name when it loads, so a hook can never inherit this.
+_BCL_CFG_PER_REPO=1
 
 STRICT=0
 JSON_OUT=""

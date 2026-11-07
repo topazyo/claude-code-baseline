@@ -31,8 +31,18 @@ bcl_prime
 
 bcl_module_enabled fixTags || exit 0
 
-# Optional env gate.
+# Optional env gate. The value comes from the repo's config and is used as a variable
+# NAME (${!GATE_VAR}), so it must be one: bash evaluates anything else it is handed
+# there (an array subscript, say) as an expression. Empty means "no gate".
 GATE_VAR="$(bcl_cfg modules.fixTags.requireWhenEnv "")"
+GATE_VAR="${GATE_VAR%$'\r'}"   # the unprimed bcl_cfg fallback can keep Windows' CR
+# Explicit ASCII lists, not ranges: what a range matches depends on the locale.
+_bcl_first='_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+_bcl_rest="${_bcl_first}0123456789"
+if [[ -n "$GATE_VAR" ]] && [[ "${GATE_VAR:0:1}" != ["$_bcl_first"] || "$GATE_VAR" == *[!"$_bcl_rest"]* ]]; then
+  echo "[fix-tags] CONTROL COULD NOT RUN — modules.fixTags.requireWhenEnv must be an environment variable name (letters, digits and _, not starting with a digit); the tag check did not run." >&2
+  bcl_failclosed_exit; exit $?
+fi
 if [[ -n "$GATE_VAR" && -z "${!GATE_VAR:-}" ]]; then
   exit 0
 fi

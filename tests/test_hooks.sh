@@ -588,6 +588,104 @@ for v in "False" "'false'"; do
 done
 resetcfg
 
+echo "== a managed deployment takes posture and code-running switches from managed.config.json (H2) =="
+# A copy of the SOURCE hook tree outside any install (no INSTALL_SCOPE marker) is what
+# managed settings run from <BASELINE_PREFIX>. Same project, same repo config: the
+# per-repo hooks obey the repo; the managed ones take enforcement, failClosed,
+# guardrails.*.enabled and modules.runTests.enabled only from the managed config.
+[ ! -e "$SRC/hooks/INSTALL_SCOPE" ] && [ -z "$(git -C "$SRC" ls-files -- hooks/INSTALL_SCOPE 2>/dev/null)" ] \
+  && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [the source hook tree must not carry INSTALL_SCOPE]"; }
+[ "$(cat "$H/INSTALL_SCOPE" 2>/dev/null)" = "per-repo" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [install.sh marks its hook tree per-repo]"; }
+MH="$TMP/mprefix/hooks"; mkdir -p "$TMP/mprefix"; cp -R "$SRC/hooks" "$MH"
+run_m() {  # run_m <desc> <hook> <want-rc> < payload — like run_out, from the managed tree
+  local desc="$1" hook="$2" want="$3" got
+  OUT="$(bash -p "$MH/$hook" 2>"$TMP/_err")"; got=$?
+  ERR="$(cat "$TMP/_err")"
+  if [ "$got" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] want=$want got=$got"; fi
+}
+# probe <hook tree>: the readers' answers for the managed keys, as one line.
+probe() {
+  bash -p -c 'source "$1/lib/common.sh"; bcl_prime
+    printf "posture=%s fc=%s cg=%s af=%s rt=%s" "$(bcl_posture)" "$(bcl_cfg failClosed true)" \
+      "$(bcl_guardrail_enabled commandGuard && echo on || echo off)" \
+      "$(bcl_guardrail_opted_in autoFormat && echo on || echo off)" \
+      "$(bcl_module_enabled runTests && echo on || echo off)"' _ "$1"
+}
+probe_is() { local got; got="$(probe "$2")"; [ "$got" = "$3" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [$1: got '$got', want '$3']"; }; }
+SAFE="posture=block fc=true cg=on af=off rt=off"
+REPOSET="c['enforcement']='warn'; c['failClosed']=False; c['guardrails']['commandGuard']['enabled']=False; c['guardrails']['autoFormat']['enabled']=True; c['modules']['runTests']['enabled']=True"
+resetcfg; setcfg "$REPOSET"
+probe_is "per-repo tree reads the repo's posture and switches" "$H" "posture=warn fc=false cg=off af=on rt=on"
+probe_is "managed tree ignores them (no managed config: safe defaults)" "$MH" "$SAFE"
+run_m "managed command-guard blocks although the repo switched it off" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git push --force origin main')"
+run_out "per-repo command-guard in the same repo obeys the repo" guardrails/command-guard.sh 0 <<< "$(bash_payload 'git push --force origin main')"
+resetcfg; setcfg "c['guardrails']['commandGuard']['extraPatterns']=['zz-managed-extra-zz']"
+run_m "repo extraPatterns still apply from the managed tree" guardrails/command-guard.sh 2 <<< "$(bash_payload 'echo zz-managed-extra-zz')"
+err_has "the repo pattern is the reason" "matched repo policy pattern"
+resetcfg; setcfg "c['enforcement']='warn'"
+run_m "repo warn with no managed config still blocks" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git push --force origin main')"
+# The repo can force the per-call readers (a config past the prime's bounds): same rule.
+resetcfg; setcfg "$REPOSET; c['pad']={str(i): i for i in range(5000)}"
+probe_is "managed tree, oversized repo config (per-call readers)" "$MH" "$SAFE"
+run_m "managed command-guard, oversized repo config, blocks" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git push --force origin main')"
+# A repo key that differs from a managed key only by a character the eval stripping
+# drops (NUL) must not come out as that key.
+resetcfg
+"$PY" -c "import json,sys;p=sys.argv[1];c=json.load(open(p));c['modules']['runTests']={'enab\x00led': True};c['guardrails']['commandGuard']={'enab\x00led': False};json.dump(c,open(p,'w'))" "$CFG"
+probe_is "a NUL-spelled repo key does not shadow a managed key" "$MH" "$SAFE"
+resetcfg; setcfg "$REPOSET"
+# A link in the repo pointing its hook dir at the managed tree changes nothing for it.
+mv "$WT/.claude/hooks/baseline" "$TMP/mprefix/installed.keep"
+ln -s "$MH" "$WT/.claude/hooks/baseline" 2>/dev/null
+if [ ! -L "$WT/.claude/hooks/baseline" ] && command -v cygpath >/dev/null 2>&1; then
+  rm -rf "$WT/.claude/hooks/baseline"
+  cmd //c mklink /J "$(cygpath -w "$WT/.claude/hooks/baseline")" "$(cygpath -w "$MH")" >/dev/null 2>&1
+fi
+if [ -e "$WT/.claude/hooks/baseline/lib/common.sh" ]; then
+  probe_is "a repo link to the managed tree leaves it managed" "$MH" "$SAFE"
+else
+  echo "  SKIP [repo link to the managed tree: neither ln -s nor mklink /J worked here]"
+fi
+rm -rf "$WT/.claude/hooks/baseline" 2>/dev/null; [ -L "$WT/.claude/hooks/baseline" ] && rm -f "$WT/.claude/hooks/baseline"
+mv "$TMP/mprefix/installed.keep" "$WT/.claude/hooks/baseline"
+[ -f "$H/INSTALL_SCOPE" ] && [ -f "$H/lib/common.sh" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [installed hook tree restored after the link case]"; }
+# The managed config is read, in the encodings the repo config accepts.
+for codec in utf-8 utf-8-sig utf-16; do
+  "$PY" -c "import json,sys;open(sys.argv[1],'wb').write(json.dumps({'enforcement':'warn','modules':{'runTests':{'enabled':True}}}).encode(sys.argv[2]))" "$(winpath "$MH/managed.config.json")" "$codec"
+  probe_is "managed.config.json ($codec) is read" "$MH" "posture=warn fc=true cg=on af=off rt=on"
+done
+run_m "managed warn: managed command-guard allows" guardrails/command-guard.sh 0 <<< "$(bash_payload 'git push --force origin main')"
+notice_ok "managed warn: the allowed hit is shown" PreToolUse '"Would have been blocked by Claude Code baseline command-guard" in m'
+for bad in '{ "enforcement": "warn", }' '[]'; do
+  printf '%s\n' "$bad" > "$MH/managed.config.json"
+  run_m "unreadable managed config ($bad) -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+  err_has "the managed config is named" "the managed config managed.config.json"
+done
+rm -f "$MH/managed.config.json"
+resetcfg
+# The environment cannot switch a managed hook to per-repo: every _BCL_CFG_ name is
+# unset when common.sh loads (tools/baseline-status.sh sets it after sourcing).
+setcfg "c['guardrails']['commandGuard']['enabled']=False"
+OUT="$(printf '%s' "$(bash_payload 'git push --force origin main')" | _BCL_CFG_PER_REPO=1 bash -p "$MH/guardrails/command-guard.sh" 2>/dev/null)"; rc=$?
+[ "$rc" = 2 ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [inherited _BCL_CFG_PER_REPO=1 does not make a managed hook per-repo: rc=$rc]"; }
+resetcfg
+
+echo "== fix-tags: requireWhenEnv must be a variable name (M6) =="
+printf 'x = 1\n' > "$WT/ft.py"
+for v in 'NOT A NAME' 'arr[0]' '1x'; do
+  setcfg "c['modules']['fixTags'].update(enabled=True, requireWhenEnv='$v')"
+  run_out "requireWhenEnv='$v' -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/ft.py")"
+  err_has "requireWhenEnv='$v' is reported" "requireWhenEnv must be an environment variable name"
+  resetcfg
+done
+setcfg "c['modules']['fixTags'].update(enabled=True, requireWhenEnv='BCL_TEST_UNSET_GATE')"
+run_out "a valid, unset requireWhenEnv still gates the check off -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/ft.py")"
+err_lacks "a valid name is not reported" "requireWhenEnv must be"
+resetcfg; setcfg "c['enforcement']='warn'; c['modules']['fixTags'].update(enabled=True, requireWhenEnv='arr[0]')"
+run_out "invalid requireWhenEnv under warn -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/ft.py")"
+notice_ok "invalid requireWhenEnv under warn is shown" PostToolUse '"requireWhenEnv must be an environment variable name" in m'
+resetcfg; rm -f "$WT/ft.py"
+
 echo "== common.sh load guard ignores the environment =="
 # The library's double-source guard must not be settable from outside. An inherited
 # _BCL_SOURCED used to make every hook skip common.sh: command-guard died on its first
@@ -1562,6 +1660,7 @@ printf 'echo planted\n' > "$IK/.claude/hooks/baseline/planted.sh"; mkdir -p "$IK
 inst "$IK"
 ok_if "files the baseline does not ship are removed (rc=$IRC)" '[ "$IRC" = 0 ] && [ ! -e "$IK/.claude/hooks/baseline/planted.sh" ] && [ ! -e "$IK/.claude/hooks/baseline/stale" ] && [ -f "$IK/.claude/hooks/baseline/VERSION" ] && [ -f "$IK/.claude/hooks/baseline/lib/common.sh" ]'
 ok_if "each removed file is named first" 'printf "%s" "$IOUT" | grep -qF "removing a file the baseline does not ship: .claude/hooks/baseline/planted.sh" && printf "%s" "$IOUT" | grep -qF ".claude/hooks/baseline/stale/x"'
+ok_if "the per-repo marker is rewritten, never reported as a planted file" '! printf "%s" "$IOUT" | grep -qF "INSTALL_SCOPE" && [ "$(cat "$IK/.claude/hooks/baseline/INSTALL_SCOPE")" = per-repo ]'
 # A symlinked (or, on Windows, junction) hook tree is unlinked, never followed.
 mkdir -p "$TMP/inst-outside"; printf 'keep\n' > "$TMP/inst-outside/sentinel"
 IL="$TMP/inst-link"; mkdir -p "$IL/.claude/hooks"; ( cd "$IL" && git init -q )

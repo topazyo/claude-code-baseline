@@ -421,6 +421,10 @@ that adopts the baseline:
 For a floor individual devs can't disable, deploy the [`managed/`](managed/README.md)
 profile via Claude Code **enterprise managed settings** (an org-admin action).
 This `install.sh` template stays the customizable per-repo layer on top of it.
+The managed hooks take their posture and every switch that could disarm them or run
+repo code from an admin-owned `managed.config.json` beside them, never from the
+repo's `.claude/baseline.config.json` (see
+[Installing the guardrail scripts](managed/README.md#installing-the-guardrail-scripts-for-the-hooks-block)).
 
 Two properties of that tier are actually verified here: a managed **deny** rule
 holds under `--dangerously-skip-permissions`, and managed **hooks** survive a

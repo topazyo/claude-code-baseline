@@ -282,7 +282,7 @@ if [[ -d "$HOOKS_DST" && ! -L "$HOOKS_DST" ]]; then
   # comm must collate like the sorts that feed it (C), or a name such as .DS_Store
   # makes it report unsorted input and exit 1, which set -e turns into an abort.
   EXTRA="$(LC_ALL=C comm -23 \
-    <(cd "$HOOKS_DST" && find . \( -type f -o -type l \) ! -path '*/__pycache__/*' | LC_ALL=C sort) \
+    <(cd "$HOOKS_DST" && find . \( -type f -o -type l \) ! -path '*/__pycache__/*' ! -path ./INSTALL_SCOPE | LC_ALL=C sort) \
     <(cd "$SRC/hooks" && find . \( -type f -o -type l \) ! -path '*/__pycache__/*' | LC_ALL=C sort))"
   if [[ -n "$EXTRA" ]]; then
     while IFS= read -r f; do
@@ -305,11 +305,18 @@ if [[ $DRY -eq 0 ]]; then
   # Never propagate compiled bytecode into a consumer repo: .pyc files embed the
   # absolute path of the machine that built them and go stale against the source.
   find "$HOOKS_DST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  # The per-repo marker. A hook tree WITHOUT it is a managed deployment (an admin's copy
+  # of the source hooks/ under <BASELINE_PREFIX>), whose posture and code-running
+  # switches come from <BASELINE_PREFIX>/managed.config.json, never from the repo
+  # (common.sh _bcl_cfg_scope). The source tree never ships one; a stray copy is
+  # replaced by this installer's own.
+  rm -f "$HOOKS_DST/INSTALL_SCOPE"
+  printf 'per-repo\n' > "$HOOKS_DST/INSTALL_SCOPE"
 fi
 if [[ $DRY -eq 1 ]]; then
-  say "would replace .claude/hooks/baseline/ with the baseline hook tree"
+  say "would replace .claude/hooks/baseline/ with the baseline hook tree (marked per-repo)"
 else
-  say "replaced .claude/hooks/baseline/ with the baseline hook tree"
+  say "replaced .claude/hooks/baseline/ with the baseline hook tree (marked per-repo)"
 fi
 
 # 2. Config — never clobber an existing one (it carries local toggles).
