@@ -1,6 +1,7 @@
 # claude-code-baseline CI (ROADMAP R3).
 #
-# Runs the adversarial test suite and enforces the policy-change release gate.
+# Runs the adversarial test suite. The policy-change release gate is in
+# policy-gate.yml.
 # NOTE: GitHub Actions only runs workflows under the REPOSITORY ROOT's
 # .github/workflows/. This file is therefore active once claude-code-baseline is
 # its own repository (its intended home). While the directory is vendored inside
@@ -9,8 +10,8 @@ name: claude-code-baseline CI
 
 # No `paths:` filter, deliberately. It previously listed hooks/tests/lib/*.json/
 # install.sh, which excluded managed/** and tools/** — the managed-settings
-# profiles and the drift reporter got ZERO CI, and the policy gate names two of
-# those managed files as high-risk. A filtered-out job reports no status rather
+# profiles and the drift reporter got ZERO CI, and the policy gate treats both
+# directories as high-risk. A filtered-out job reports no status rather
 # than a failing one, and an absent check reads as a green check on the PR page,
 # so the gap was invisible. Everything is cheap to run; run it on everything.
 on:
@@ -54,19 +55,8 @@ jobs:
         shell: bash
         run: bash tests/run.sh
 
-  policy-gate:
-    name: Policy-change release gate
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Full history: the gate diffs against the merge base, which a shallow
-          # clone cannot compute.
-          fetch-depth: 0
-      - name: Fetch base ref
-        # Unshallowed fetch of the base branch. --depth=1 here would defeat the
-        # merge-base lookup the gate performs.
-        run: git fetch --no-tags origin "${{ github.base_ref }}"
-      - name: Require updated fixtures when policy/matcher changes
-        run: bash tests/policy-change-gate.sh "origin/${{ github.base_ref }}"
+# The policy-change release gate lives in policy-gate.yml, which runs on
+# pull_request only. It used to be a job here with `if: github.event_name ==
+# 'pull_request'`: on a push run that job was SKIPPED, a skipped job reports
+# "Success", and it posted that under the same check name as the real PR run on
+# the same head commit — so the required check could be satisfied by the skip.

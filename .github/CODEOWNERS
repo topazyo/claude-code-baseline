@@ -1,22 +1,32 @@
 # Hook scripts are executable content that runs automatically on every
 # contributor's machine once the folder is trusted (see GHSA-ph6w-f82w-28w6).
-# Every change to a guardrail, a permission rule, or the installer requires
-# security review.
+# Every change to a guardrail, a permission rule, the installer, the tools, the
+# tests or the CI workflows is routed to the owners below for security review.
+# With a single maintainer that review is advisory, not enforced: GitHub does not
+# let an author approve their own pull request, so branch protection on main
+# requires the CI checks instead — the test suite on both OSes and the
+# policy-change release gate — and not an approving review. A repository with a
+# second reviewer should also require code-owner review in branch protection.
 #
 # Consumers who install this baseline should add the equivalent rule to their
 # own repo:  /.claude/**  @their-security-team
 #
 # Maintainer. Replace with a security team handle if ownership moves.
 
-/hooks/                     @topazyo
-/lib/                       @topazyo
-/managed/                   @topazyo
-/settings.template.json     @topazyo
-/baseline.config.json       @topazyo
-/install.sh                 @topazyo
-/tests/                     @topazyo
-/.github/                   @topazyo
-/SECURITY.md                @topazyo
+/hooks/                       @topazyo
+/lib/                         @topazyo
+/tools/                       @topazyo
+/managed/                     @topazyo
+/examples/                    @topazyo
+/settings.template.json       @topazyo
+/baseline.config.json         @topazyo
+/baseline.config.schema.json  @topazyo
+/install.sh                   @topazyo
+/.gitattributes               @topazyo
+/tests/                       @topazyo
+/.github/                     @topazyo
+/SECURITY.md                  @topazyo
+/RELEASING.md                 @topazyo
 
 # The Hebrew translations restate the security claims and limits of the English
 # docs; a mistranslated negation reads as a protection that does not exist. A

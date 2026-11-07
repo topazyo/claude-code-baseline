@@ -1,0 +1,66 @@
+# claude-code-baseline :: policy-change release gate (ROADMAP R3).
+#
+# Fails a pull request that changes what the baseline enforces without adding or
+# modifying an enforcement fixture file. tests/policy-change-gate.sh defines both
+# sets; tests/test_policy_gate.sh proves it, case by case.
+#
+# Its own workflow, on pull_request ONLY, with no job-level `if:`. A skipped job
+# reports "Success" and satisfies a required check, so a push-triggered copy of
+# this job (skipped, same check name, same head commit) could stand in for the
+# real one. Here every run of the check is a real run.
+#
+# The step runs the BASE branch's copy of the gate, not the PR's: a PR that
+# weakens the gate is judged by the gate it is trying to change.
+#
+# Limit, stated rather than hidden: on pull_request GitHub runs the workflow from
+# the PR's merge commit, so a PR that edits THIS file can change or skip the job
+# that judges it. The gate classifies .github/ as policy, so such a PR needs a
+# fixture change and shows the workflow diff to the reviewer — but only a human
+# reading that diff stops it. This is a tripwire for mistakes, not a boundary
+# against a hostile PR author.
+name: Policy-change release gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  policy-gate:
+    # This string is the required status check's name in branch protection.
+    # Renaming it silently un-requires the gate — change both together.
+    name: Policy-change release gate
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full commit SHA, like every action in this repo (see baseline-ci.yml).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the gate diffs against the merge base, which a shallow
+          # clone cannot compute.
+          fetch-depth: 0
+          # The token is not left in .git/config: the gate only reads, and the base
+          # fetch below works anonymously on this public repository. If the repository
+          # ever goes private that fetch fails — closed and loudly; drop this line then.
+          persist-credentials: false
+      - name: Fetch base ref
+        # Unshallowed fetch of the base branch. --depth=1 here would defeat the
+        # merge-base lookup the gate performs. The ref goes through env, never
+        # ${{ }} inside run:, so a branch name cannot become shell text.
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "$BASE_REF"
+      - name: Require updated fixtures when policy changes (base branch's copy of the gate)
+        # shell: bash runs `bash --noprofile --norc -eo pipefail`, so a failed
+        # `git show` fails the step; the -s test also refuses an empty copy.
+        # Never `git show ... | bash -s`: without pipefail a failed show would hand
+        # bash an empty script, which exits 0.
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          gate="$RUNNER_TEMP/policy-change-gate.sh"
+          git show "origin/$BASE_REF:tests/policy-change-gate.sh" > "$gate"
+          [ -s "$gate" ] || { echo "RELEASE GATE FAILED: the base branch's gate script is missing or empty" >&2; exit 1; }
+          bash "$gate" "origin/$BASE_REF"
