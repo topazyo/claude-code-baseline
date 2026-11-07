@@ -29,7 +29,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 135
+FP_FLOOR = 150
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -446,6 +446,41 @@ CASES = [
     ("a5 fp targeted path on a drive", "rm -rf /c/Users/me/proj/build", A, ()),
     ("a5 fp targeted windows path", "rm -rf C:/tmp/build", A, ()),
 
+    # --- Windows paths read both as a path and as the shell reads them (see
+    # WINPATH_CASES): every drive-root spelling still blocks, and ordinary commands,
+    # commit messages and PR bodies naming Windows paths stay allowed. ---
+    ("winpath drive root C:\\", "rm -rf C:\\", B, ()),
+    ("winpath drive root 'C:\\'", "rm -rf 'C:\\'", B, ()),
+    ("winpath drive root \"C:\\\\\"", 'rm -rf "C:\\\\"', B, ()),
+    ("winpath drive root \"C:\\\"", 'rm -rf "C:\\"', B, ()),
+    ("winpath drive root C:\\\\", "rm -rf C:\\\\", B, ()),
+    ("winpath drive root glob D:\\*", "rm -rf D:\\*", B, ()),
+    ("winpath fp heredoc commit body with a quoted path",
+     "git commit -m \"$(cat <<'EOF'\nFix quoting of paths like \"C:\\temp\\\" in the"
+     " installer\n\nCo-Authored-By: x <y@z>\nEOF\n)\"", A, ()),
+    ("winpath fp heredoc PR body with a trailing-backslash path",
+     "gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\n- default dir is"
+     " C:\\Users\\me\\\n- done\nEOF\n)\"", A, ()),
+    ("winpath fp ls a Windows path", "ls C:\\Users\\me", A, ()),
+    ("winpath fp cat a quoted Windows path", 'cat "C:\\Users\\me\\notes.txt"', A, ()),
+    ("winpath fp script and output paths", "python C:\\tools\\build.py --out C:\\tmp\\out", A, ()),
+    ("winpath fp targeted delete", "rm -rf C:\\tmp\\build", A, ()),
+    ("winpath fp git -C a Windows path", "git -C C:\\src\\repo status", A, ()),
+    ("winpath fp copy from a UNC share", "cp \\\\server\\share\\file.txt .", A, ()),
+    ("winpath fp commit message, double-quoted paths",
+     'git commit -m "Handle C:\\dir\\ and D:\\x paths"', A, ()),
+    ("winpath fp commit message, single-quoted path", "git commit -m 'Handle C:\\dir\\ paths'", A, ()),
+    ("winpath fp trailing-backslash path then another command", 'echo "C:\\dir\\" && git status', A, ()),
+    # Documented limit (module docstring): read as the shell reads it, a long run of
+    # lines ending in a path's backslash is one continuation chain, too long to
+    # inspect, so it blocks. These two rows bracket where that false positive starts.
+    ("winpath limit long run of trailing-backslash path lines blocks",
+     "gh pr create --title t --body \"$(cat <<'EOF'\n"
+     + "- default dir is C:\\Users\\me\\proj\\\n" * 100 + "EOF\n)\"", B, ()),
+    ("winpath fp shorter run of trailing-backslash path lines",
+     "gh pr create --title t --body \"$(cat <<'EOF'\n"
+     + "- default dir is C:\\Users\\me\\proj\\\n" * 60 + "EOF\n)\"", A, ()),
+
     # --- A6: package installs past option values; more install spellings ---
     ("a6 yarn install", "yarn install", B, ()),
     ("a6 bare yarn", "yarn", B, ()),
@@ -663,6 +698,12 @@ PS_CASES = [
     ('ps fp typographic quotes around text', 'Write-Output \u201chello\u201d', A, ()),
     ('ps backtick-a next to an rm target in bash -c', 'bash -c "rm -rf `a ~"', B, ()),
     ('ps fp trailing backslash in a double-quoted path', 'git add "C:\\dir\\"', A, ()),
+    ('ps winpath drive root through bash -c', 'bash -c "rm -rf C:\\\\"', B, ()),
+    ('ps winpath fp here-string commit with a quoted path',
+     "git commit -m @'\nFix \"C:\\temp\\\" handling\n'@", A, ()),
+    ('ps winpath fp bash -c listing a Windows path', 'bash -c "ls C:\\Users\\me"', A, ()),
+    ('ps winpath fp commit message with a trailing-backslash path',
+     'git commit -m "Fix C:\\dir\\ handling"', A, ()),
     ('ps backtick-t in an unquoted bash -c argument', 'bash -c rm`t-rf`t~', B, ()),
     ('ps backtick-n in an unquoted bash -c argument', 'bash -c echo`nrm`t-rf`t~', B, ()),
     ("ps mid-word @' is not a here-string", 'Write-Output x@\'\nhi\'\nbash -c "rm -rf `t ~"\n\'@\'', B, ()),
@@ -818,6 +859,48 @@ SPACE_CASES = [
      [["write-output", "hello"], ["write-output", "bye"]], []),
 ]
 
+# Text holding a drive-letter or UNC path is judged in two readings (see the end of
+# _segments): with the path's backslashes read as separators, and as a POSIX shell
+# reads them. Both must be among the judged words, for Bash payloads and for an
+# inline bash -c script in a PowerShell payload (whose POSIX readings carry it).
+# Same row shape as SPACE_CASES.
+WINPATH_CASES = [
+    ("bash: a drive path in both readings", "bash", "cat C:\\temp\\notes.txt",
+     [["cat", "c:/temp/notes.txt"], ["cat", "c:tempnotes.txt"]], []),
+    ("bash: a UNC path in both readings", "bash", "cat \\\\srv\\share\\x.txt",
+     [["cat", "//srv/share/x.txt"], ["cat", "\\srvsharex.txt"]], []),
+    ("powershell: bash -c in double quotes", "powershell", 'bash -c "cat C:\\temp\\notes.txt"',
+     [["cat", "c:/temp/notes.txt"], ["cat", "c:tempnotes.txt"]], []),
+    ("powershell: bash -c in single quotes", "powershell", "bash -c 'cat C:\\temp\\notes.txt'",
+     [["cat", "c:/temp/notes.txt"], ["cat", "c:tempnotes.txt"]], []),
+    ("powershell: bash -c with a backtick escape", "powershell",
+     'bash -c "cat C:\\temp\\notes.txt `t"', [["cat", "c:tempnotes.txt"]], []),
+]
+
+
+def _winpath_wiring_problem():
+    """Why the second reading of _segments does not run for text holding a drive path,
+    or runs for text without one, or an empty string when it is as it should be."""
+    calls, real = [], m._segments
+
+    def recording(raw, *args, **kw):
+        if kw.get("windows_paths") is False:
+            calls.append(raw)
+        return real(raw, *args, **kw)
+
+    m._segments = recording
+    try:
+        m.evaluate("cat C:\\temp\\x.txt")
+        with_path = len(calls)
+        m.evaluate("cat /tmp/x.txt")
+        without_path = len(calls) - with_path
+    finally:
+        m._segments = real
+    if with_path < 1 or without_path:
+        return (f"second reading ran {with_path} time(s) for a drive path and "
+                f"{without_path} time(s) for a POSIX path")
+    return ""
+
 
 def _space_case_problem(shell, text, present, absent):
     """Why the words evaluate() judges for text do not match a SPACE_CASES row, or
@@ -934,6 +1017,13 @@ if pytest is not None:
     def test_ps_space_wiring():
         assert not _space_wiring_problem()
 
+    @pytest.mark.parametrize("label,shell,text,present,absent", WINPATH_CASES)
+    def test_winpath_reading(label, shell, text, present, absent):
+        assert not _space_case_problem(shell, text, present, absent), label
+
+    def test_winpath_wiring():
+        assert not _winpath_wiring_problem()
+
     def test_fp_floor():
         n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in _all_cases() if not sb)
         assert n_allow >= FP_FLOOR, (
@@ -984,14 +1074,28 @@ def run():
         else:
             failed += 1
             print(f"  FAIL [space: {label}] {problem}")
+    for label, shell, text, present, absent in WINPATH_CASES:
+        problem = _space_case_problem(shell, text, present, absent)
+        if not problem:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [winpath: {label}] {shell} {text!r}: {problem}")
+    problem = _winpath_wiring_problem()
+    if not problem:
+        passed += 1
+    else:
+        failed += 1
+        print(f"  FAIL [winpath: second reading runs only for a path] {problem}")
     n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in cases if not sb)
     n_block = len(cases) - n_allow
     n_space = len(SPACE_CASES) + 2
-    total = len(cases) + len(MAIN_CASES) + len(READING_CASES) + n_space
+    n_winpath = len(WINPATH_CASES) + 1
+    total = len(cases) + len(MAIN_CASES) + len(READING_CASES) + n_space + n_winpath
     print(f"\ncommand-guard fixtures: {passed} passed, {failed} failed, "
           f"{total} total ({n_allow} allow / {n_block} block, "
           f"+{len(MAIN_CASES)} via main(), +{len(READING_CASES)} PowerShell readings, "
-          f"+{n_space} PowerShell word separators)")
+          f"+{n_space} PowerShell word separators, +{n_winpath} Windows-path readings)")
     # FP-budget floor: the allow corpus must never shrink below the last release floor.
     if n_allow < FP_FLOOR:
         failed += 1
