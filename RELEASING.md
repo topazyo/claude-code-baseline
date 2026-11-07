@@ -156,9 +156,18 @@ a fixture in `tests/` before bumping the pin.
 ## Test gate
 
 - [ ] `bash tests/run.sh` is green (matcher fixtures + hook integration tests).
-- [ ] If anything in `command-guard.sh`, the matcher, `common.sh`, or the deny-list
-      (`settings.template.json`) changed, a fixture changed too — `tests/policy-change-gate.sh`
-      will fail the PR otherwise.
+- [ ] If anything the baseline enforces changed — `hooks/` (except `VERSION`), `lib/`,
+      `tools/`, `managed/`, `examples/`, `tests/`, `install.sh`, `settings.template.json`,
+      `baseline.config.json` beyond its version line, the schema, `.gitattributes`,
+      `.gitmodules`, `.github/` (except `CODEOWNERS`); root-level `*.md` and any
+      `README*.md` are exempt — an enforcement fixture file was added or modified too: `tests/test_command_guard.py`, `test_hooks.sh`,
+      `test_managed.sh`, `test_merge_settings.py`, `test_status.sh` or
+      `test_policy_gate.sh`. `tests/policy-change-gate.sh` fails the PR otherwise; CI
+      (`.github/workflows/policy-gate.yml`) runs the base branch's copy, and branch
+      protection requires the "Policy-change release gate" check.
+- [ ] The block corpus did not shrink: `BLOCK_FLOOR` in `test_command_guard.py` was not
+      lowered, and no `MUST_BLOCK` row was edited or removed without the rule behind it
+      being deliberately retired.
       > The gate **fails closed**: it needs a resolvable base ref and a merge-base, and
       > it diffs the whole branch rather than the tip commit. A bare local run with no
       > `origin/main` exits 1 and tells you to pass a base (`HEAD~1`) explicitly. That is

@@ -418,7 +418,8 @@ A one-line PR to `common.sh` executes on everyone who pulls it. So, in every rep
 that adopts the baseline:
 
 - Add a `CODEOWNERS` entry requiring security review of `/.claude/**` (this repo
-  ships [its own](.github/CODEOWNERS) as a model — replace `@OWNER` before use).
+  ships [its own](.github/CODEOWNERS) as a model — it names this repo's
+  maintainer, `@topazyo`; replace that handle with your security team's before use).
 - Turn on branch protection: required review from those owners, and no direct
   pushes to the default branch.
 - Treat any diff touching a hook, a permission rule, or the installer as a
@@ -509,9 +510,14 @@ the tool does not currently verify the `settings.json` wiring. See
 bash tests/run.sh   # bash -n + py_compile + matcher + merge fixtures + hook integration tests
 ```
 
-Any change to the matcher, the deny-list, or a guard hook must ship with a
-fixture — `tests/policy-change-gate.sh` (run in CI on PRs) fails a policy change
-that lacks updated tests. See [`tests/README.md`](tests/README.md).
+Any change to what the baseline enforces — `hooks/`, `lib/`, `tools/`, `managed/`,
+`examples/`, `tests/`, the installer, the config, its schema, the settings template,
+`.gitattributes`, `.gitmodules` and the CI workflows (root-level docs and READMEs
+aside) — must ship with an added or modified enforcement fixture file. `tests/policy-change-gate.sh`
+fails the pull request otherwise; CI runs the **base branch's** copy of it, as a
+required check. It is a tripwire for mistakes, not a boundary: a pull request can
+edit the workflow that runs it, and only a reviewer reading that diff stops it.
+See [`tests/README.md`](tests/README.md).
 
 ## Layout
 
@@ -531,8 +537,10 @@ claude-code-baseline/
 ├── LICENSE                            # Apache-2.0
 ├── .gitignore  .gitattributes         # junk exclusion; LF-pinned shell scripts
 ├── .github/
-│   ├── CODEOWNERS                     # security review on hooks/permissions/installer
-│   └── workflows/baseline-ci.yml      # CI: test suite + policy-change gate
+│   ├── CODEOWNERS                     # review routing (advisory with one maintainer)
+│   └── workflows/
+│       ├── baseline-ci.yml            # CI: test suite, both OSes
+│       └── policy-gate.yml            # CI: policy-change release gate, on PRs
 ├── lib/
 │   └── merge_settings.py              # install-time JSON merge
 ├── examples/

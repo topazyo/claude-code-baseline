@@ -726,7 +726,7 @@ echo "exit=$?"     # expect: the literal "REGRESSION BLOCKER …" message on std
 
 ---
 
-<!-- he-sync: part-7--for-repo-owners--team-leads sha256=50d33504e84200e8 -->
+<!-- he-sync: part-7--for-repo-owners--team-leads sha256=c115a61b50ff3747 -->
 ## חלק 7 — לבעלי ריפו ולראשי צוותים
 
 <sub>[המקור באנגלית](ONBOARDING.md#part-7--for-repo-owners--team-leads)</sub>
@@ -814,9 +814,12 @@ echo "exit=$?"     # expect: the literal "REGRESSION BLOCKER …" message on std
 - **שער CI לשינויים ב-baseline.** *(קיים — ראו `tests/`.)* הפקודה `bash tests/run.sh`
   מריצה את חבילת הבדיקות האדברסריאלית שנשמרת בבקרת גרסאות (בדיקות ההתאמה ב-`test_command_guard.py`,
   כולל דרכי עקיפה, ו-`test_hooks.sh` מקצה לקצה), והקובץ `tests/policy-change-gate.sh` הוא
-  שער שחרור שמכשיל כל שינוי ברשימת החסימה, במנגנון ההתאמה או ב-`common.sh` שאין לצידו
-  בדיקות מעודכנות. הקובץ `.github/workflows/baseline-ci.yml` מחבר את שניהם ל-CI.
-  *(OWASP AI Agent Security Cheat Sheet.)*
+  שער שחרור שמכשיל כל שינוי במה שה-baseline אוכף (ה-hooks, המתקין, ההגדרות, הפרופילים
+  המנוהלים, ה-workflows של CI) כשלא נוסף או שונה לצידו קובץ בדיקות. הקובץ
+  `.github/workflows/baseline-ci.yml` מריץ את חבילת הבדיקות, והקובץ
+  `.github/workflows/policy-gate.yml` מריץ בכל pull request את העותק של השער מה-branch
+  הבסיסי, כבדיקה נדרשת. השער תופס טעויות, לא pull request עוין, שיכול לערוך את ה-workflow
+  שמריץ אותו. *(OWASP AI Agent Security Cheat Sheet.)*
 
 ---
 

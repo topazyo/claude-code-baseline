@@ -76,9 +76,9 @@ exactly this reason.)
 ### `--strict` has no CI consumer in this repository
 
 `--strict` is intended for an **operator-run or org-level** job that fails on drift.
-**`.github/workflows/baseline-ci.yml` does not invoke it** — that workflow's only run
-steps are `tests/run.sh`, a `git fetch`, and `tests/policy-change-gate.sh`; it never
-mentions `baseline-status.sh`, `--strict`, or drift. An earlier revision of this file
+**No workflow in `.github/workflows/` invokes it** — `baseline-ci.yml` runs only
+`tests/run.sh`, and `policy-gate.yml` only fetches the base branch and runs its copy of
+`tests/policy-change-gate.sh`; neither mentions `baseline-status.sh`, `--strict`, or drift. An earlier revision of this file
 blamed the inertness on the workflow being dormant while vendored, implying `--strict`
 would start working once this directory became its own repository. It does not, and it
 cannot: a cross-repo drift check needs the *consumer* repos checked out, which this

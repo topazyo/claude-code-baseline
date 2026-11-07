@@ -31,6 +31,13 @@ B, A = True, False  # block / allow
 #     denominator), so any "%" would be theater. See tests/README.md.
 FP_FLOOR = 200
 
+# Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
+# ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
+# the fixtures for a rule is exactly how a disabled rule would pass this suite — so
+# run() fails. It drifts low between releases by design; run() nudges a bump.
+# MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
+BLOCK_FLOOR = 395
+
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
     ("orig rm -rf /", "rm -rf /", B, ()),
@@ -1085,6 +1092,183 @@ def _distinct_runner_payload():
         out, i = out + unit, i + 1
 
 
+def _long_continuation_chain():
+    """Many lines ending in a path's backslash: one continuation chain, too long to inspect."""
+    return ("gh pr create --title t --body \"$(cat <<'EOF'\n"
+            + "- default dir is C:\\Users\\me\\proj\\\n" * 100 + "EOF\n)\"")
+
+
+# MUST_BLOCK: (label, command, shell, extra_patterns, reason) — each command must block,
+# and one of its reasons must contain `reason`. It is a frozen list, kept OUT of CASES
+# on purpose: CASES is edited all the time, and deleting a rule's fixtures from CASES
+# together with the rule is how a disabled rule would pass. Editing a row here to make
+# a test pass is the failure this list exists to catch — change a row only when the
+# rule itself is deliberately retired, under review.
+#
+# One row per reason-producing SITE in the matcher, not per rule family: several sites
+# share one reason string (five produce "package installation requires explicit
+# approval"; -c remote.<name>.mirror and --mirror produce the same mirror reason), so a
+# string-level check cannot tell a disabled site from its sibling. The first 15 rows
+# are the original blocklist.
+MUST_BLOCK = [
+    ("orig rm -rf /", "rm -rf /", "bash", (), "(rm -rf)"),
+    ("orig rm -rf .", "rm -rf .", "bash", (), "(rm -rf)"),
+    ("orig rm -rf ./", "rm -rf ./", "bash", (), "(rm -rf)"),
+    ("orig git push --force", "git push --force", "bash", (), "forced git push is forbidden"),
+    ("orig git push -f", "git push -f", "bash", (), "forced git push is forbidden"),
+    ("orig git reset --hard", "git reset --hard", "bash", (), "hard git reset"),
+    ("orig drop table", "psql -c 'drop table users'", "bash", (), "drop/truncate table"),
+    ("orig truncate table", "mysql -e 'truncate table logs'", "bash", (), "drop/truncate table"),
+    ("orig delete from", "sqlite3 db 'delete from users'", "bash", (), "(delete from)"),
+    ("orig curl http", "curl http://example.com/x", "bash", (), "direct remote fetch"),
+    ("orig wget http", "wget http://example.com/x", "bash", (), "direct remote fetch"),
+    ("orig npm install", "npm install left-pad", "bash", (), "package installation"),
+    ("orig pnpm install", "pnpm install", "bash", (), "package installation"),
+    ("orig yarn add", "yarn add foo", "bash", (), "package installation"),
+    ("orig pip install", "pip install requests", "bash", (), "package installation"),
+    # rm
+    ("rm -rf home", "rm -rf ~", "bash", (), "(rm -rf)"),
+    ("xargs rm -rf", "find . -name x | xargs rm -rf", "bash", (), "piped from xargs"),
+    # git, from its arguments
+    ("push +refspec", "git push origin +main", "bash", (), "via +refspec"),
+    ("push --mirror", "git push --mirror origin", "bash", (), "mirror git push"),
+    ("push --prune", "git push --prune origin", "bash", (), "git push --prune"),
+    ("push :main", "git push origin :main", "bash", (), "deleting a main/master/HEAD"),
+    ("push --delete main", "git push origin --delete main", "bash", (), "deleting a main/master/HEAD"),
+    # git, from its -c / --config-env global options
+    ("-c remote mirror", "git -c remote.origin.mirror push origin", "bash", (), "mirror git push"),
+    ("-c remote push +refspec", "git -c remote.origin.push=+refs/heads/*:refs/heads/* push origin",
+     "bash", (), "via +refspec"),
+    ("-c remote push :main", "git -c remote.origin.push=:main push origin", "bash", (),
+     "deleting a main/master/HEAD"),
+    ("--config-env remote mirror", "git --config-env=remote.origin.mirror=GIT_MIRROR push origin",
+     "bash", (), "reconfigured from an environment variable"),
+    # find, fetch, installers
+    ("find / -delete", "find / -delete", "bash", (), "recursive delete via find"),
+    ("find / -exec rm", "find / -exec rm {} +", "bash", (), "recursive delete via find"),
+    ("wget bare host", "wget example.com", "bash", (), "direct remote fetch"),
+    ("bare yarn", "yarn", "bash", (), "package installation"),
+    ("uv pip install", "uv pip install requests", "bash", (), "package installation"),
+    ("python -m pip install", "python -m pip install requests", "bash", (), "package installation"),
+    # shapes the matcher cannot see into
+    ("pipe into sh", "echo ls | sh", "bash", (), "shell reading its commands from a pipe"),
+    ("$CMD command word", "$CMD -rf /", "bash", (), "shell expansion in command position"),
+    ("pwsh -EncodedCommand", "pwsh -EncodedCommand ZQBjAGgAbwA=", "bash", (), "-EncodedCommand"),
+    ("unbalanced quote", 'echo "unterminated', "bash", (), "unbalanced quoting"),
+    ("over-long command", "echo " + "a" * 5000, "bash", (), "command too large to inspect"),
+    ("over-long continuation chain", _long_continuation_chain(), "bash", (),
+     "continued lines too long"),
+    ("over-long runner chain", _long_runner_chain(), "powershell", (),
+     "Windows runner scripts too long"),
+    # Windows runners
+    ("cmd /c from bash", "cmd /c rm -rf /", "bash", (), "(rm -rf)"),
+    ("cmd /c from PowerShell", "cmd /c rm -rf /", "powershell", (), "(rm -rf)"),
+    ("pwsh -Command", 'pwsh -Command "git push --force"', "bash", (), "forced git push is forbidden"),
+    ("wsl", "wsl rm -rf /", "bash", (), "(rm -rf)"),
+    # a repository's own extraPatterns
+    ("extraPatterns", "terraform destroy -auto-approve", "bash", ("terraform destroy",),
+     "matched repo policy pattern: terraform destroy"),
+]
+
+
+def _must_block_problem(cmd, shell, extra, reason):
+    reasons = m.evaluate(cmd, extra, shell=shell)
+    if not reasons:
+        return "ALLOWED"
+    if not any(reason in r for r in reasons):
+        return f"blocked, but not for {reason!r}: {reasons}"
+    return ""
+
+
+# Reason coverage. Every block reason the matcher can emit must be emitted by some
+# fixture — otherwise the rule behind it can be switched off (`elif False and ...`)
+# with its fixtures deleted, and nothing here notices. The reasons are read from the
+# matcher's source: in the functions that build reasons, a string literal (or the
+# constant head of an f-string) that is appended, returned in a list, or assigned to
+# a name; plus every _Uninspectable message anywhere, which evaluate() wraps as
+# "uninspectable command (<message>)" and so is matched as a substring.
+_REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reasons_for", "evaluate")
+# The number of reason literals the walk finds today. ONLY EVER INCREASE IT, like the
+# fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
+# (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
+# those reasons would silently leave coverage. More prints a bump note.
+REASON_FLOOR = 31
+
+
+def _str_shape(node):
+    """(text, is_exact) for a str literal or the constant head of an f-string, else None."""
+    import ast
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value, True
+    if isinstance(node, ast.JoinedStr):
+        head = ""
+        for v in node.values:
+            if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                break
+            head += v.value
+        return head, False
+    return None
+
+
+def _reason_literals():
+    """[(text, mode, line)] with mode "exact", "prefix" or "substring"."""
+    import ast
+    with open(m.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    found = []
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name in _REASON_FUNCS):
+            continue
+        for node in ast.walk(fn):
+            cands = []
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "append" and node.args):
+                cands.append(node.args[0])
+            elif isinstance(node, ast.Return) and isinstance(node.value, ast.List):
+                cands.extend(node.value.elts)
+            elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+                  and isinstance(node.targets[0], ast.Name)):
+                cands.append(node.value)
+            for c in cands:
+                shape = _str_shape(c)
+                # A reason is a phrase; a bare token ("push", "-delete") is not one.
+                if shape and " " in shape[0].strip():
+                    found.append((shape[0], "exact" if shape[1] else "prefix", c.lineno))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_Uninspectable" and node.args):
+            shape = _str_shape(node.args[0])
+            if shape:
+                found.append((shape[0], "substring", node.lineno))
+    return found
+
+
+def _reason_coverage_problems():
+    """The reason literals no fixture produces, as messages ([] when all are covered)."""
+    literals = _reason_literals()
+    if len(literals) < REASON_FLOOR:
+        return [f"the reason walk found {len(literals)} literals (< REASON_FLOOR {REASON_FLOOR}): "
+                f"it broke, or reasons moved where it cannot see them (a module constant). "
+                f"Fix the walk; lower REASON_FLOOR only for a deliberately retired rule"]
+    produced = set()
+    for _label, cmd, _sb, extra, shell in _all_cases():
+        produced.update(m.evaluate(cmd, extra, shell=shell))
+    for _label, cmd, shell, extra, _reason in MUST_BLOCK:
+        produced.update(m.evaluate(cmd, extra, shell=shell))
+    problems = []
+    for text, mode, line in literals:
+        if mode == "exact":
+            hit = text in produced
+        elif mode == "prefix":
+            hit = any(p.startswith(text) for p in produced)
+        else:
+            hit = any(text in p for p in produced)
+        if not hit:
+            problems.append(f"command_guard_match.py:{line} reason {text!r} ({mode}) is produced "
+                            f"by no fixture: add one that triggers it")
+    return problems
+
+
 # Helper-level checks: (label, thunk, expected). The table-gap and config forms of git,
 # and the exemptions, are pinned here on benign values rather than as block fixtures.
 STRUCT_CASES = [
@@ -1343,6 +1527,19 @@ if pytest is not None:
             f"allow-fixture count {n_allow} < floor {FP_FLOOR}: an allow fixture was "
             f"removed, eroding the no-false-positive guarantee.")
 
+    def test_block_floor():
+        n_block = sum(1 for _label, _cmd, sb, _extra, _sh in _all_cases() if sb)
+        assert n_block >= BLOCK_FLOOR, (
+            f"block-fixture count {n_block} < floor {BLOCK_FLOOR}: a block fixture was "
+            f"removed, which is how a disabled rule would pass.")
+
+    @pytest.mark.parametrize("label,cmd,shell,extra,reason", MUST_BLOCK)
+    def test_must_block(label, cmd, shell, extra, reason):
+        assert not _must_block_problem(cmd, shell, extra, reason), label
+
+    def test_reason_coverage():
+        assert not _reason_coverage_problems()
+
 
 def run():
     passed = failed = 0
@@ -1414,17 +1611,46 @@ def run():
         else:
             failed += 1
             print(f"  FAIL [struct: {label}] {problem}")
+    for label, cmd, shell, extra, reason in MUST_BLOCK:
+        problem = _must_block_problem(cmd, shell, extra, reason)
+        if not problem:
+            passed += 1
+        else:
+            failed += 1
+            print(f"  FAIL [must-block: {label}] {shell} {cmd[:80]!r}: {problem}")
+    coverage = _reason_coverage_problems()
+    if not coverage:
+        passed += 1
+    else:
+        failed += 1
+        for problem in coverage:
+            print(f"  FAIL [reason coverage] {problem}")
     n_allow = sum(1 for _label, _cmd, sb, _extra, _sh in cases if not sb)
     n_block = len(cases) - n_allow
     n_space = len(SPACE_CASES) + 2
     n_winpath = len(WINPATH_CASES) + 1
     total = (len(cases) + len(MAIN_CASES) + len(READING_CASES) + n_space + n_winpath
-             + len(GROUP_CASES) + len(STRUCT_CASES))
+             + len(GROUP_CASES) + len(STRUCT_CASES) + len(MUST_BLOCK) + 1)
     print(f"\ncommand-guard fixtures: {passed} passed, {failed} failed, "
           f"{total} total ({n_allow} allow / {n_block} block, "
           f"+{len(MAIN_CASES)} via main(), +{len(READING_CASES)} PowerShell readings, "
           f"+{n_space} PowerShell word separators, +{n_winpath} Windows-path readings, "
-          f"+{len(GROUP_CASES)} grouping/runner readings, +{len(STRUCT_CASES)} helper checks)")
+          f"+{len(GROUP_CASES)} grouping/runner readings, +{len(STRUCT_CASES)} helper checks, "
+          f"+{len(MUST_BLOCK)} must-block rows, +1 reason coverage over "
+          f"{len(_reason_literals())} reason literals)")
+    # Block-corpus floor: deleting a rule's block fixtures is how a disabled rule passes.
+    if n_block < BLOCK_FLOOR:
+        failed += 1
+        print(f"  FAIL [BLOCK_FLOOR] block-fixture count {n_block} < floor {BLOCK_FLOOR}: a "
+              f"block fixture was removed. Restore it, or lower BLOCK_FLOOR only under "
+              f"explicit review.")
+    elif n_block > BLOCK_FLOOR:
+        print(f"  note: block-floor stale by {n_block - BLOCK_FLOOR}; "
+              f"bump BLOCK_FLOOR to {n_block} before release.")
+    n_reasons = len(_reason_literals())
+    if n_reasons > REASON_FLOOR:
+        print(f"  note: reason-floor stale by {n_reasons - REASON_FLOOR}; "
+              f"bump REASON_FLOOR to {n_reasons} before release.")
     # FP-budget floor: the allow corpus must never shrink below the last release floor.
     if n_allow < FP_FLOOR:
         failed += 1

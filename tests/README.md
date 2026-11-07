@@ -24,13 +24,16 @@ on any failure. Runs under Linux, WSL, macOS, and Git Bash on Windows.
 | `test_latency.sh` | **Latency regression gate** (`run.sh` step 7). Installs the baseline into a throwaway repo and times the hot-path hooks — command-guard (every Bash call), the post-write dispatcher (every Write/Edit), scope-guard, and config-guard — failing if one exceeds its budget. |
 | `translation_sync.py` | **Hebrew-docs drift gate** (`run.sh` step 8). Fails when an English section of `ONBOARDING.md` or a translated section of `README.md` changed after its Hebrew counterpart was translated, or when a translation altered, dropped or invented a command, carries a bidi-control character, lacks its direction wrappers, links to a missing anchor, or quotes a hook message that no longer exists. Also the maintainer tool for `stamp` / `mark-stale` (below). |
 | `test_translation_sync.py` | Fixtures for the drift gate: each defect class above is planted in a throwaway repo and must fail; `mark-stale` → `stamp` round-trips. |
-| `policy-change-gate.sh` | **Release gate.** Fails if a change touches `command-guard.sh`, the matcher, `common.sh`, or `settings.template.json` (the deny-list) without also touching `tests/`. |
+| `policy-change-gate.sh` | **Release gate.** Fails a change to what the baseline enforces — `hooks/`, `lib/`, `tools/`, `managed/`, `examples/`, `tests/`, `.github/`, `install.sh`, `settings.template.json`, `baseline.config.json` (beyond its version line), the schema, `.gitattributes`, `.gitmodules`, matched in any case; root-level `*.md`, any `README*.md`, `hooks/VERSION` and `.github/CODEOWNERS` are exempt — unless an enforcement fixture file at the root `tests/` (`test_command_guard.py`, `test_hooks.sh`, `test_managed.sh`, `test_merge_settings.py`, `test_status.sh`, `test_policy_gate.sh`) was added or modified. Renames count on both sides. |
+| `test_policy_gate.sh` | Regression suite for the gate (`run.sh` step 9): scratch repositories, one kind of change per case — what is policy, what is exempt, what satisfies it, renames, deletions, and every way of not knowing the change set failing closed. |
 
 ## Adding a rule? Add a fixture.
 
 Any change to the matcher, the deny-list, or a guard hook **must** come with a
 fixture in `test_command_guard.py` (a `(label, command, B/A, extra)` row — in
-`PS_CASES` if it is a PowerShell-tool payload) and/or `test_hooks.sh`. The `policy-change-gate.sh` check (run in CI on PRs) enforces this.
+`PS_CASES` if it is a PowerShell-tool payload) and/or `test_hooks.sh`. The `policy-change-gate.sh` check (run in CI on PRs) enforces that a fixture file changed — only that: a one-line edit to any enforcement fixture file satisfies it. It makes a reviewer look at the fixtures; it does not prove they cover the change.
+
+A new rule site that emits a block reason also needs a `MUST_BLOCK` row (below).
 
 When you add a new blocked pattern, also add the matching **evasions** you expect
 it to resist and at least one **near-miss that must stay allowed**, so the
@@ -61,11 +64,30 @@ command-traffic denominator, so any percentage would be theater). The budget is 
    in `test_command_guard.py` (and bump `FP_FLOOR` to the new count in the same change).
 2. *Then* adjust `command_guard_match.py` so the case is allowed without regressing any
    `B` (block) fixture. The green run is the proof the boundary moved correctly.
-3. `policy-change-gate.sh` already forces any matcher change to ship with a `tests/` change,
-   so the fixture-first discipline is mechanically enforced on PRs.
+3. `policy-change-gate.sh` already forces any matcher change to ship with an added or
+   modified fixture file, so a fixture-free matcher change cannot pass a PR.
 
 A new *blocked* pattern is the mirror image: add the `B` fixture + its evasions + a
 near-miss `A`, never flipping an existing `A` to blocked.
+
+**The block side has the same floor, and more.** Deleting a rule's `B` fixtures together
+with the rule is how a disabled rule would pass, so `test_command_guard.py` also checks:
+
+- **`BLOCK_FLOOR`** — the block-fixture count in `CASES` + `PS_CASES` never shrinks (same
+  rules as `FP_FLOOR`: fails below, prints a bump note above).
+- **`MUST_BLOCK`** — a frozen list outside `CASES`: the original blocklist plus one row per
+  reason-producing site in the matcher, each with the reason it must block for. Several
+  sites share one reason string, so a row per *site*, not per rule family. Edit a row only
+  when the rule behind it is deliberately retired, under review.
+- **Reason coverage** — every block-reason literal the matcher builds must be produced
+  by some fixture. The literals are read with `ast` from the functions that build
+  reasons (`_rules_at`, `_git_rules`, `_git_push_config_reasons`, `_reasons_for`,
+  `evaluate`: a string appended, returned in a list or assigned to a name), plus every
+  `_Uninspectable` message. A rule switched off with its fixtures deleted leaves its
+  reason produced by nothing, and the run fails. `REASON_FLOOR` pins how many literals
+  the walk finds, so a reason moved into a module constant (which the walk cannot see)
+  fails the run instead of quietly leaving coverage; a new reason in another function
+  needs that function added to `_REASON_FUNCS`.
 
 ## Latency budgets (`test_latency.sh`)
 
@@ -137,5 +159,17 @@ source instead.
 
 ## CI
 
-`../.github/workflows/baseline-ci.yml` runs `run.sh` on every push/PR and the
-policy gate on PRs — active once this directory is its own repository.
+`../.github/workflows/baseline-ci.yml` runs `run.sh` on every push/PR, on Ubuntu and
+Windows. `../.github/workflows/policy-gate.yml` runs the policy gate on pull requests
+only — the **base branch's** copy of `policy-change-gate.sh`, so a PR that weakens the
+gate is judged by the gate it changes. It is its own workflow because a skipped job
+reports "Success": as a job in the push-and-PR workflow it posted a skipped "Success"
+under the same check name on every push. Branch protection on `main` requires both test
+suites and the gate.
+
+Limit: on `pull_request` GitHub runs the workflow from the PR's merge commit, so a PR
+that edits `.github/workflows/` can change or skip the job that judges it. The gate
+counts `.github/` as policy, so such a PR needs a fixture change and shows the workflow
+diff to the reviewer — but only that reviewer stops it. A dependabot, issue-template
+or pull-request-template change under `.github/`, or a change to only the translation
+checker under `tests/`, needs a fixture touch too; accepted.

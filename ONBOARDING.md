@@ -703,9 +703,12 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
 - **Gate baseline changes in CI.** *(Shipped — see `tests/`.)* `bash tests/run.sh`
   runs the versioned adversarial suite (`test_command_guard.py` matcher fixtures
   incl. evasions + `test_hooks.sh` end-to-end), and `tests/policy-change-gate.sh`
-  is a release gate that fails any change to the deny-list / matcher / `common.sh`
-  without updated fixtures. `.github/workflows/baseline-ci.yml` wires both into CI.
-  *(OWASP AI Agent Security Cheat Sheet.)*
+  is a release gate that fails any change to what the baseline enforces — hooks,
+  installer, config, managed profiles, CI workflows — that does not add or modify a
+  fixture file. `.github/workflows/baseline-ci.yml` runs the suite;
+  `.github/workflows/policy-gate.yml` runs the base branch's copy of the gate on every
+  pull request, as a required check. It catches mistakes, not a hostile pull request,
+  which can edit the workflow that runs it. *(OWASP AI Agent Security Cheat Sheet.)*
 
 ---
 

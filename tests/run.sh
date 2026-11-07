@@ -75,6 +75,16 @@ echo "== 8. Hebrew translations in sync with the English docs =="
 "$PY" "$ROOT/tests/test_translation_sync.py" || fail=1
 "$PY" "$ROOT/tests/translation_sync.py" check || fail=1
 
+echo "== 9. policy-change release gate =="
+# The gate itself runs in CI on pull requests, against the real base branch. Here its
+# regression suite runs it against scratch repositories: what counts as policy, what
+# satisfies it, and that every way of not knowing the change set fails closed.
+if command -v git >/dev/null 2>&1; then
+  bash "$ROOT/tests/test_policy_gate.sh" || fail=1
+else
+  echo "   SKIP (git not available)"
+fi
+
 echo ""
 if [ "$fail" -eq 0 ]; then echo "ALL GREEN"; else echo "FAILURES ABOVE"; fi
 exit $fail
