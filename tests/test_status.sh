@@ -67,6 +67,12 @@ PY
 then ok; else no "json shape / drift fields"; fi
 
 echo "== baseline-status: single source of truth (script == bcl_module_enabled) =="
+# NOTE: these probes source the SOURCE tree's common.sh, which has no INSTALL_SCOPE
+# marker, so it reads as a managed deployment: the managed keys (enforcement,
+# failClosed, guardrails.*.enabled, modules.runTests.enabled) would come from defaults,
+# not from repo A. fixTags and scopeGuard are not managed keys, so these stay valid.
+# Do not add a managed-key probe here without setting _BCL_CFG_PER_REPO=1 after the
+# source, as baseline-status.sh does.
 dfix="$(CLAUDE_PROJECT_DIR="$A" bash -c "source '$COMMON'; bcl_module_enabled fixTags && echo 1 || echo 0")"
 dscope="$(CLAUDE_PROJECT_DIR="$A" bash -c "source '$COMMON'; bcl_module_enabled scopeGuard && echo 1 || echo 0")"
 # The JSON above asserted fixTags present + scopeGuard absent; bcl must agree (iff).

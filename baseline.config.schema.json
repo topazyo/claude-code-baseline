@@ -73,7 +73,7 @@
             "enabled": { "type": "boolean", "default": false },
             "tagMarker": { "type": "string" },
             "fileRegex": { "type": "string" },
-            "requireWhenEnv": { "type": "string", "description": "If non-empty, only enforce when this environment variable is set." }
+            "requireWhenEnv": { "type": "string", "pattern": "^([A-Za-z_][A-Za-z0-9_]*)?$", "description": "If non-empty, only enforce when this environment variable is set. Must be an environment variable name; any other value makes fix-tags fail closed (control could not run)." }
           }
         },
         "scopeGuard": {

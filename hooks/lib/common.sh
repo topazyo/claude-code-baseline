@@ -60,6 +60,16 @@ for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@} ${!_BCL_NOTICE@}; do
 # value would be cached as "no interpreter".
 unset -v _BCL_PY BCL_READ_ERROR _BCL_LOOKUP _BCL_STDIN_TIMEOUT _BCL_STDIN_MAX _bcl_v
 
+# The hook tree this library belongs to: the parent of lib/, as this file was sourced.
+# Every hook sources "$HERE/../lib/common.sh" with HERE made absolute, so this is an
+# absolute path taken from the hook's own command line, never from anything in the
+# project. A relative or unknown path is left empty, which reads as managed (the safe
+# side; see _bcl_cfg_scope). Recorded now, because a hook may cd before a later lookup.
+case "${BASH_SOURCE[0]}" in
+  /*/*|[A-Za-z]:*/*) _BCL_CFG_ROOT="${BASH_SOURCE[0]%/*}/.." ;;
+  *)                 _BCL_CFG_ROOT="" ;;
+esac
+
 # Inherited values that `bash -p` does not neutralise for us. FUNCNEST still applies
 # under -p and caps function nesting, so a hook could not complete its checks.
 # POSIXLY_CORRECT (unsetting it leaves posix mode), BASH_COMPAT, EXECIGNORE, CDPATH
@@ -79,6 +89,9 @@ _BCL_PRIME_DIR=""       # CLAUDE_PROJECT_DIR as it stood when we primed
 _BCL_PRIME_KEY=""       # resolved baseline.config.json path we primed from
 _BCL_CFG_STATE=""       # ok | absent | malformed
 _BCL_CFG_ERROR=""       # why a malformed config could not be read (bcl_config_malformed)
+_BCL_CFG_BAD_FILE=""    # which one: repo | managed
+_BCL_CFG_MANAGED=""     # managed config path, set by _bcl_cfg_scope ("" = per-repo)
+_BCL_CFG_IS_MANAGED=1   # 1 when this hook tree is a managed deployment (safe default until _bcl_cfg_scope)
 _BCL_CFG_KEYS=(); _BCL_CFG_VALS=()
 _BCL_PL_STATE=""        # none | empty | ok | bad
 _BCL_PL_LEN=-1          # length of the payload bcl_prime was given
@@ -165,6 +178,62 @@ bcl_config_path() {
   printf '%s/.claude/baseline.config.json' "$(bcl_repo_root)"
 }
 
+# _bcl_cfg_scope -> sets _BCL_CFG_IS_MANAGED and _BCL_CFG_MANAGED in THIS shell (call it
+# plainly, not in $( )). A hook tree that install.sh put into a repo carries the marker
+# INSTALL_SCOPE; one without it is a managed deployment of the source hooks/ under
+# <BASELINE_PREFIX>, run by managed settings for every repo. There, the managed keys
+# (enforcement, failClosed, guardrails.<name>.enabled, modules.runTests.enabled — the
+# posture and every switch that can disarm the floor or run repo code) come ONLY from
+# <BASELINE_PREFIX>/managed.config.json, and the repo's values are ignored; with no
+# managed config each falls to its caller's default (block, fail closed, commandGuard
+# on, autoFormat and runTests off). Every other key still comes from the repo. The
+# decision reads only the hook's own tree, never a path inside the project, so a link
+# the repo plants cannot change it. tools/baseline-status.sh, which reports per-repo
+# installs from the source tree, sets _BCL_CFG_PER_REPO=1 after sourcing this file; the
+# environment cannot, because every _BCL_CFG_ name is unset when this file loads.
+_bcl_cfg_scope() {
+  if [[ "${_BCL_CFG_PER_REPO:-}" == 1 ]] \
+     || [[ -n "$_BCL_CFG_ROOT" && -f "$_BCL_CFG_ROOT/INSTALL_SCOPE" ]]; then
+    _BCL_CFG_IS_MANAGED=0; _BCL_CFG_MANAGED=""
+  else
+    _BCL_CFG_IS_MANAGED=1
+    _BCL_CFG_MANAGED="${_BCL_CFG_ROOT:+$_BCL_CFG_ROOT/managed.config.json}"
+  fi
+}
+
+# Python shared by every config reader (the prime, bcl_cfg, bcl_config_malformed), so
+# the managed-key rule and the file reading cannot drift apart between them.
+_BCL_CFG_RULE_SRC='
+import json, os
+
+
+def bcl_managed_key(path):
+    # Judged on the key as bash will see it: q() strips NUL, so a repo key spelled with
+    # one must not slip past as a different string and then shadow a managed key.
+    p = path.replace("\x00", "")
+    if p in ("enforcement", "failClosed", "modules.runTests.enabled"):
+        return True
+    parts = p.split(".")
+    return len(parts) == 3 and parts[0] == "guardrails" and parts[2] == "enabled"
+
+
+def bcl_read_cfg(path):
+    """(data, error): data None when absent or unreadable; error "" unless unreadable.
+    Bytes in, so UTF-8 with or without a BOM and UTF-16/32 all read."""
+    if not path or not os.path.isfile(path):
+        return None, ""
+    try:
+        with open(path, "rb") as fh:
+            data = json.loads(fh.read())
+    except json.JSONDecodeError as exc:
+        return None, "line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg)
+    except Exception as exc:
+        return None, type(exc).__name__
+    if not isinstance(data, dict):
+        return None, "the top level is not a JSON object"
+    return data, ""
+'
+
 # --- prime: ONE interpreter per hook process --------------------------------
 # Why this exists. Every helper here used to launch its own Python: bcl_cfg (per
 # key), bcl_module_enabled, bcl_payload_unparseable, bcl_config_malformed,
@@ -208,6 +277,10 @@ import json, os, shlex, sys
 
 CFG_PATH = sys.argv[1]
 WANT_PAYLOAD = len(sys.argv) > 2 and sys.argv[2] == "1"
+# Managed deployment (see _bcl_cfg_scope): "1" plus the managed config path ("" if the
+# hook tree's own path is unknown, which leaves only the callers' defaults).
+IS_MANAGED = len(sys.argv) > 3 and sys.argv[3] == "1"
+MANAGED_PATH = sys.argv[4] if len(sys.argv) > 4 else ""
 
 # Bounds. A repo-supplied config or a hostile payload must not be able to make this
 # emit a multi-megabyte eval string or spend the hook's budget walking itself. Going
@@ -247,31 +320,25 @@ def render(v):
     return str(v)
 
 
-cfg_state = "absent"
-cfg_data = None
-cfg_error = ""
-if os.path.isfile(CFG_PATH):
-    # Bytes, not text: json.loads detects UTF-8 (with or without a BOM) and UTF-16/32,
-    # the encodings Windows PowerShell 5.1 writes. Same reading as bcl_cfg,
-    # bcl_config_malformed and the command-guard matcher.
-    try:
-        with open(CFG_PATH, "rb") as fh:
-            cfg_data = json.loads(fh.read())
-        if isinstance(cfg_data, dict):
-            cfg_state = "ok"
-        else:
-            cfg_state, cfg_error = "malformed", "the top level is not a JSON object"
-    except json.JSONDecodeError as exc:
-        cfg_state = "malformed"
-        cfg_error = "line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg)
-    except Exception as exc:
-        cfg_state, cfg_error = "malformed", type(exc).__name__
+# bcl_read_cfg (from _BCL_CFG_RULE_SRC, prepended to this script) reads bytes, the
+# same reading as bcl_cfg, bcl_config_malformed and the command-guard matcher. A
+# managed config that cannot be read is malformed too: the managed floor fails closed.
+cfg_data, cfg_error = bcl_read_cfg(CFG_PATH)
+managed_data, managed_error = bcl_read_cfg(MANAGED_PATH) if IS_MANAGED else (None, "")
+cfg_bad_file = ""
+if managed_error:
+    cfg_state, cfg_error, cfg_bad_file = "malformed", managed_error, "managed"
+elif cfg_error:
+    cfg_state, cfg_bad_file = "malformed", "repo"
+else:
+    cfg_state = "ok" if cfg_data is not None else "absent"
 
 cfg_keys = []
 cfg_vals = []
 
 
-def flatten(node, prefix, depth):
+def flatten(node, prefix, depth, keep=lambda path: True):
+    # keep(path) decides which entries are emitted; the walk itself always descends.
     if depth > MAX_DEPTH:
         raise Overflow()
     for k, v in node.items():
@@ -285,12 +352,13 @@ def flatten(node, prefix, depth):
         # call site. Not emitting the key makes the lookup miss, which does the same.
         if v is None:
             continue
-        if len(cfg_keys) >= MAX_CFG_ENTRIES:
-            raise Overflow()
-        cfg_keys.append(path)
-        cfg_vals.append(render(v))
+        if keep(path):
+            if len(cfg_keys) >= MAX_CFG_ENTRIES:
+                raise Overflow()
+            cfg_keys.append(path)
+            cfg_vals.append(render(v))
         if isinstance(v, dict):
-            flatten(v, path, depth + 1)
+            flatten(v, path, depth + 1, keep)
 
 
 pl_state = "none"
@@ -347,7 +415,14 @@ def collect_keys(obj, acc, depth):
 
 
 try:
-    if isinstance(cfg_data, dict):
+    if IS_MANAGED:
+        # Managed entries FIRST (a lookup answers with the first match), and only the
+        # managed keys; then the repo's entries without any managed key.
+        if managed_data is not None:
+            flatten(managed_data, "", 0, bcl_managed_key)
+        if cfg_data is not None:
+            flatten(cfg_data, "", 0, lambda path: not bcl_managed_key(path))
+    elif cfg_data is not None:
         flatten(cfg_data, "", 0)
     if WANT_PAYLOAD:
         # Read BYTES and decode strictly: Windows Python would otherwise decode stdin
@@ -386,6 +461,7 @@ except RecursionError:
 emit("_BCL_PRIME_KEY", CFG_PATH)
 emit("_BCL_CFG_STATE", cfg_state)
 emit("_BCL_CFG_ERROR", cfg_error)
+emit("_BCL_CFG_BAD_FILE", cfg_bad_file)
 emit_arr("_BCL_CFG_KEYS", cfg_keys)
 emit_arr("_BCL_CFG_VALS", cfg_vals)
 emit("_BCL_PL_STATE", pl_state)
@@ -441,10 +517,13 @@ bcl_prime() {
   # Here-string rather than `printf ... | python`: a pipeline would fork a subshell
   # for the left-hand side. It appends a newline, which JSON parsing and the
   # empty-payload test both ignore.
+  _bcl_cfg_scope
   if [[ $want -eq 1 ]]; then
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_PRIME_SRC" "$_BCL_PRIME_KEY" 1 <<< "$1")" || rc=$?
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC" \
+      "$_BCL_PRIME_KEY" 1 "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED" <<< "$1")" || rc=$?
   else
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_PRIME_SRC" "$_BCL_PRIME_KEY" 0 </dev/null)" || rc=$?
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC" \
+      "$_BCL_PRIME_KEY" 0 "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED" </dev/null)" || rc=$?
   fi
   # No output at all, other than the script's own bounds exit (3) or a timeout
   # (124/137), and the interpreter cannot even import the modules the helpers use: it
@@ -523,6 +602,33 @@ _bcl_pl_lookup() {
   return 1
 }
 
+# The per-call lookup script (bcl_cfg), run after _BCL_CFG_RULE_SRC.
+_BCL_CFG_GET_SRC='
+import sys
+cfg, key = sys.argv[1], sys.argv[2]
+default = sys.argv[3] if len(sys.argv) > 3 else ""
+is_managed = len(sys.argv) > 4 and sys.argv[4] == "1"
+managed_path = sys.argv[5] if len(sys.argv) > 5 else ""
+if is_managed and bcl_managed_key(key):
+    data, _err = bcl_read_cfg(managed_path)
+else:
+    data, _err = bcl_read_cfg(cfg)
+if data is None:
+    print(default); raise SystemExit(0)
+cur = data
+for part in key.split("."):
+    if isinstance(cur, dict) and part in cur:
+        cur = cur[part]
+    else:
+        print(default); raise SystemExit(0)
+if isinstance(cur, bool):
+    print("true" if cur else "false")
+elif cur is None:
+    print(default)
+else:
+    print(cur)
+'
+
 # bcl_cfg <dotted.key> [default]
 # Echoes the config value at dotted.key, or [default] if absent/unreadable.
 # Booleans render as the literal strings "true"/"false".
@@ -542,32 +648,17 @@ bcl_cfg() {
     if _bcl_cfg_lookup "$key"; then printf '%s' "$_BCL_LOOKUP"; return 0; fi
     printf '%s' "$default"; return 0
   fi
+  # Per-call path: no prime, or a prime that failed. A repo can force the latter (a config
+  # past the prime's bounds), so it applies the same managed-key rule as the prime, from
+  # the same _BCL_CFG_RULE_SRC: a managed key is read only from the managed config.
   py="$(bcl_python)"; cfg="$(bcl_config_path)"
-  if [[ -z "$py" || ! -f "$cfg" ]]; then
+  _bcl_cfg_scope
+  if [[ -z "$py" ]] || [[ $_BCL_CFG_IS_MANAGED -eq 0 && ! -f "$cfg" ]]; then
     printf '%s' "$default"; return 0
   fi
-  val="$("$py" -I -S -X utf8 - "$cfg" "$key" "$default" <<'PY'
-import json, sys
-cfg, key, default = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "")
-try:
-    with open(cfg, "rb") as fh:          # bytes: UTF-8 with or without BOM, UTF-16/32
-        data = json.loads(fh.read())
-except Exception:
-    print(default); raise SystemExit(0)
-cur = data
-for part in key.split("."):
-    if isinstance(cur, dict) and part in cur:
-        cur = cur[part]
-    else:
-        print(default); raise SystemExit(0)
-if isinstance(cur, bool):
-    print("true" if cur else "false")
-elif cur is None:
-    print(default)
-else:
-    print(cur)
-PY
-)" || val="$default"   # the script itself always exits 0; non-zero = the interpreter failed
+  val="$("$py" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC$_BCL_CFG_GET_SRC" \
+    "$cfg" "$key" "$default" "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED")" \
+    || val="$default"   # the script itself always exits 0; non-zero = the interpreter failed
   printf '%s' "$val"
 }
 
@@ -776,32 +867,41 @@ bcl_config_malformed() {
     [[ "$_BCL_CFG_STATE" == "malformed" ]] && return 0
     return 1
   fi
-  _BCL_CFG_ERROR=""
+  _BCL_CFG_ERROR=""; _BCL_CFG_BAD_FILE=""
   py="$(bcl_python)"; cfg="$(bcl_config_path)"
-  [[ -z "$py" || ! -f "$cfg" ]] && return 1
+  _bcl_cfg_scope
+  [[ -z "$py" ]] && return 1
+  [[ ! -f "$cfg" && ( $_BCL_CFG_IS_MANAGED -eq 0 || ! -f "$_BCL_CFG_MANAGED" ) ]] && return 1
   # "fine" only on an explicit OK line: an interpreter that crashes is not a clean read.
-  out="$("$py" -I -S -X utf8 -c 'import json,sys
-try:
-    with open(sys.argv[1], "rb") as fh:
-        data = json.loads(fh.read())
-except json.JSONDecodeError as exc:
-    print("line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg))
-except Exception as exc:
-    print(type(exc).__name__)
-else:
-    print("OK" if isinstance(data, dict) else "the top level is not a JSON object")' "$cfg" 2>/dev/null)"
+  # The managed config is checked first: on a managed deployment it governs.
+  out="$("$py" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC"'
+import sys
+if len(sys.argv) > 2 and sys.argv[2] == "1":
+    _d, err = bcl_read_cfg(sys.argv[3] if len(sys.argv) > 3 else "")
+    if err:
+        print("managed\t" + err); raise SystemExit(0)
+_d, err = bcl_read_cfg(sys.argv[1])
+print("repo\t" + err if err else "OK")' "$cfg" "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED" 2>/dev/null)"
   out="${out%$'\r'}"
   [[ "$out" == "OK" ]] && return 1
-  _BCL_CFG_ERROR="${out:-the check could not run}"
+  if [[ "$out" == managed$'\t'* || "$out" == repo$'\t'* ]]; then
+    _BCL_CFG_BAD_FILE="${out%%$'\t'*}"; _BCL_CFG_ERROR="${out#*$'\t'}"
+  else
+    _BCL_CFG_BAD_FILE="repo"; _BCL_CFG_ERROR="the check could not run"
+  fi
   return 0
 }
 
 # bcl_config_malformed_text <hook label>
 # The message every hook gives for a config bcl_config_malformed refused (it must have
-# just returned 0, so _BCL_CFG_ERROR holds the reason).
+# just returned 0, so _BCL_CFG_ERROR and _BCL_CFG_BAD_FILE hold the reason).
 bcl_config_malformed_text() {
   local why="${_BCL_CFG_ERROR:-unreadable}"
-  printf '%s' "[$1] CONTROL COULD NOT RUN — .claude/baseline.config.json exists but cannot be read ($why), so this hook's settings are unknown and it fails closed. A human must fix or delete that file; Claude's edit tools are denied it."
+  if [[ "$_BCL_CFG_BAD_FILE" == managed ]]; then
+    printf '%s' "[$1] CONTROL COULD NOT RUN — the managed config managed.config.json beside the managed baseline hooks exists but cannot be read ($why), so this hook's settings are unknown and it fails closed. An administrator must fix or delete that file."
+  else
+    printf '%s' "[$1] CONTROL COULD NOT RUN — .claude/baseline.config.json exists but cannot be read ($why), so this hook's settings are unknown and it fails closed. A human must fix or delete that file; Claude's edit tools are denied it."
+  fi
 }
 
 # --- payload parsing --------------------------------------------------------
