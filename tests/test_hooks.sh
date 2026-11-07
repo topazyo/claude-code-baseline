@@ -197,6 +197,49 @@ run_out "command-guard failClosed:false, unparseable -> 0" guardrails/command-gu
 notice_ok "command-guard failClosed:false degraded is shown" PreToolUse '"CONTROL COULD NOT RUN" in m and "enforcement: block, failClosed: false" in m'
 resetcfg
 
+# command-guard's own matcher-failure branches: a matcher that is gone, empty, exits
+# non-zero, reports an error or overruns its 5s budget must block a CLEAN command, each
+# with its own message. A stand-in matcher replaces the installed one, then the real one
+# is restored. Each stand-in drains stdin first, so the hook's printf never hits SIGPIPE.
+MATCHER="$H/lib/command_guard_match.py"
+cp "$MATCHER" "$TMP/matcher.orig"
+plant_matcher() { printf '%s\n' "import sys; sys.stdin.buffer.read(); $1" > "$MATCHER"; }
+rm -f "$MATCHER"
+run_out "matcher deleted -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+quiet_ok "matcher deleted: nothing on stdout"
+err_has "matcher deleted is named" "matcher script not found"
+: > "$MATCHER"
+run_out "matcher empty -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+quiet_ok "matcher empty: nothing on stdout"
+err_has "matcher empty is named" "matcher script empty"
+plant_matcher "raise SystemExit(3)"
+run_out "matcher exits 3 -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+quiet_ok "matcher exits 3: nothing on stdout"
+err_has "matcher exit code is reported" "matcher failed (rc=3)"
+plant_matcher "print('__MATCHER_ERROR__ planted for the test')"
+run_out "matcher reports an error -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+quiet_ok "matcher error: nothing on stdout"
+err_has "matcher error is a control that could not run" "CONTROL COULD NOT RUN"
+err_has "matcher error text is passed on" "planted for the test"
+# The suite already needs timeout(1) (the installs above run under it); the guard is
+# belt-and-braces, and a skip is printed, never counted as a pass.
+if command -v timeout >/dev/null 2>&1; then
+  plant_matcher "import time; time.sleep(9)"
+  run_out "matcher over its 5s budget -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+  quiet_ok "matcher timeout: nothing on stdout"
+  err_has "matcher timeout is reported" "exceeded its 5s budget"
+else
+  echo "  SKIP [matcher over its 5s budget: no timeout(1) on PATH]"
+fi
+setcfg "c['failClosed']=False"
+plant_matcher "raise SystemExit(3)"
+run_out "matcher exits 3 under failClosed:false -> 0" guardrails/command-guard.sh 0 <<< "$(bash_payload 'git status')"
+notice_ok "matcher failure under failClosed:false is shown" PreToolUse '"CONTROL COULD NOT RUN" in m and "matcher failed (rc=3)" in m'
+resetcfg
+cp "$TMP/matcher.orig" "$MATCHER"
+if cmp -s "$TMP/matcher.orig" "$MATCHER"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [real matcher restored]"; fi
+run "restored matcher: rm -rf / blocks" guardrails/command-guard.sh "$(bash_payload 'rm -rf /')" 2
+
 # scope-guard: the definition refusal and the scope warning land in ONE object
 setcfg "c['modules']['scopeGuard']['enabled']=True"; setcfg "c['enforcement']='warn'"
 run_out "scope-guard warn, definition + out of scope -> 0" modules/scope-guard.sh 0 <<< "$(def_payload Write "$WT/.claude/agents/helper.md" content "$DEFTXT")"
