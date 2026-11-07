@@ -94,6 +94,7 @@ echo "== baseline-status: settings findings (risky env, hook launch) =="
 # fail --strict.
 OUT2="$(winpath "$TMP/out2.json")"
 findings() {
+  rm -f "$OUT2"   # a run that did not finish must not leave the previous report to be read
   timeout -k 5 60 bash "$STATUS" --json "$OUT2" "$A" >/dev/null 2>&1
   "$PY" -c "import json,sys; r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0]; print(r['settingsEnvRisk'], r['hookLaunchProblems'])" "$OUT2" 2>&1
 }
@@ -197,6 +198,81 @@ if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--stri
 cp "$TMP/settings.saved" "$A/.claude/settings.json"
 got="$(findings)"
 [ "$got" = "[] []" ] && ok || no "restored settings should have no settings finding: $got"
+
+echo "== baseline-status: the baseline deny-list in settings.json (M10) =="
+# The same rule as config-guard (3): every template permissions.deny entry, by exact
+# string, in settings.json as parsed (a duplicate key is last-wins, as in Claude Code).
+TPL="$(winpath "$SRC/settings.template.json")"
+# deny_check <python predicate over m (denyListMissing) and t (template deny)> <label>
+deny_check() {
+  rm -f "$OUT2"   # never read a report an earlier run left behind
+  timeout -k 5 60 bash "$STATUS" --json "$OUT2" "$A" >/dev/null 2>&1
+  if "$PY" -c "import json,sys
+m=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0]['denyListMissing']
+t=[d for d in json.load(open(sys.argv[2],encoding='utf-8'))['permissions']['deny'] if isinstance(d,str)]
+sys.exit(0 if ($1) else 1)" "$OUT2" "$TPL"; then ok; else no "$2"; fi
+}
+strict_fails() { if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL: $1"; else ok; fi; }
+deny_check 'm == []' "fresh install: no deny entry missing"
+case "$(timeout -k 5 60 bash "$STATUS" "$A" 2>&1)" in *"deny-list: ok"*) ok ;; *) no "fresh install: text report says deny-list ok" ;; esac
+rewire 's["permissions"]["deny"] = []'
+deny_check 'm == t and len(t) >= 30' "deny = [] lists every template entry, in template order"
+case "$(timeout -k 5 60 bash "$STATUS" "$A" 2>&1)" in *"deny-list: baseline entries missing"*"Edit(.env*)"*) ok ;; *) no "text report names the missing entries" ;; esac
+strict_fails "an empty deny-list"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+rewire 's["permissions"]["deny"].remove("Edit(.claude/settings.json)")'
+deny_check 'm == ["Edit(.claude/settings.json)"]' "one stripped entry is named exactly"
+strict_fails "one stripped deny entry"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+rewire 's["permissions"]["deny"] = [d for d in s["permissions"]["deny"] if "\\" not in d]'
+deny_check 'm == [d for d in t if chr(92) in d] and m' "Windows-path entries come back byte-exact, backslashes and all"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+"$PY" -c "import json,sys
+p=sys.argv[1]; txt=json.dumps(json.load(open(p,encoding='utf-8')))
+open(p,'w',encoding='utf-8').write(txt[:-1] + ', \"permissions\": {\"deny\": []}}')" "$(winpath "$A/.claude/settings.json")"
+deny_check 'm == t' "a duplicate permissions key is read last-wins, as Claude Code reads it"
+strict_fails "a stripped duplicate permissions key"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+rewire 's["permissions"] = ["Edit(.env*)"]'
+deny_check 'm == t' "permissions that is not an object holds no deny entry"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+rewire 's["permissions"]["deny"].append("Read(./private/**)"); s["permissions"]["deny"].append(7)'
+deny_check 'm == []' "a repo's own extra entries (and a non-string) beside the full list: nothing missing"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+# No readable settings.json holds no deny entry: never reported as "ok".
+rm -f "$A/.claude/settings.json"
+deny_check 'm == t' "an absent settings.json is missing every entry"
+case "$(timeout -k 5 60 bash "$STATUS" "$A" 2>&1)" in *"deny-list: ok"*) no "an absent settings.json must not read deny-list ok" ;; *) ok ;; esac
+printf '{"permissions": {"deny": [' > "$A/.claude/settings.json"
+deny_check 'm == t' "an unreadable settings.json is missing every entry"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
+# A deny check that cannot run is null in JSON, check-failed in the text, and fails
+# --strict: a copy of the tool whose template has no deny-list to compare with.
+CS="$TMP/src-nodeny"; mkdir -p "$CS"
+cp -R "$SRC/tools" "$SRC/lib" "$SRC/hooks" "$CS/"
+cp "$SRC/baseline.config.json" "$SRC/baseline.config.schema.json" "$CS/"
+"$PY" -c "import json,sys;t=json.load(open(sys.argv[1],encoding='utf-8'));t['permissions'].pop('deny');json.dump(t,open(sys.argv[2],'w',encoding='utf-8'))" "$TPL" "$(winpath "$CS/settings.template.json")"
+rm -f "$OUT2"
+CSOUT="$(timeout -k 5 60 bash "$CS/tools/baseline-status.sh" --json "$OUT2" "$A" 2>&1)"
+if "$PY" -c "import json,sys;r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0];sys.exit(0 if r['denyListMissing'] is None and 'check-failed' in r['hookLaunchProblems'] else 1)" "$OUT2"; then ok; else no "a deny check that could not run is null in JSON"; fi
+case "$CSOUT" in *"deny-list: check-failed"*) ok ;; *) no "a deny check that could not run says check-failed in the text" ;; esac
+if timeout -k 5 60 bash "$CS/tools/baseline-status.sh" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL when the deny check could not run"; else ok; fi
+# A check that exits 0 but prints only two fields (an older or broken copy) is a failed
+# check, not an intact deny-list: a copy of the tool patched to drop the third field.
+# The full template goes back first, whatever happens next: a patch that misses its
+# anchor must FAIL here, not pass because the no-deny template still fails the check.
+cp "$TPL" "$CS/settings.template.json"
+"$PY" -c "import sys
+p=sys.argv[1]; t=open(p,encoding='utf-8').read()
+old=' + \"\\\\x1f\" + json.dumps(deny_missing))'
+if t.count(old) != 1: sys.exit(1)
+open(p,'w',encoding='utf-8',newline='\n').write(t.replace(old, ')'))" "$(winpath "$CS/tools/baseline-status.sh")" \
+  || no "the two-field patch found its anchor in the copied tool"
+rm -f "$OUT2"
+timeout -k 5 60 bash "$CS/tools/baseline-status.sh" --json "$OUT2" "$A" >/dev/null 2>&1
+if "$PY" -c "import json,sys;r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0];sys.exit(0 if r['denyListMissing'] is None else 1)" "$OUT2"; then ok; else no "a two-field settings check reads as check-failed, never as an intact deny-list"; fi
+got="$(findings)"
+[ "$got" = "[] []" ] && ok || no "restored settings should have no settings finding after the deny cases: $got"
 
 echo "== baseline-status: guardrails read as the hooks read them; unreadable config (L11/L13) =="
 ACFG="$A/.claude/baseline.config.json"

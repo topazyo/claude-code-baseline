@@ -1721,6 +1721,154 @@ if [ -L "$IS/.claude" ]; then
 else
   echo "  note: linked-.claude case not run (no symlink or junction could be made here)"
 fi
+
+echo "== installer: no write through a link under .claude (M9) =="
+# mklink_file <target> <link>: a symbolic link to a file (or to a path that does not
+# exist). Git Bash's plain ln -s copies; a native symlink needs winsymlinks:nativestrict
+# (and the privilege, which GitHub's Windows runners have). nativestrict refuses a target
+# that does not exist, so a dangling link is made to a placeholder that is then removed
+# (with its directory, when this made it). True only for a real link.
+mklink_file() {
+  local mdir="" mfile=""
+  rm -f "$2"; ln -s "$1" "$2" 2>/dev/null
+  if [ ! -L "$2" ] && command -v cygpath >/dev/null 2>&1; then
+    rm -f "$2"
+    if [ ! -e "$1" ]; then
+      [ -d "$(dirname "$1")" ] || { mkdir -p "$(dirname "$1")" && mdir="$(dirname "$1")"; }
+      : > "$1"; mfile=1
+    fi
+    MSYS=winsymlinks:nativestrict ln -s "$1" "$2" 2>/dev/null
+    if [ -n "$mfile" ]; then rm -f "$1"; fi
+    if [ -n "$mdir" ]; then rmdir "$mdir"; fi
+  fi
+  [ -L "$2" ]
+}
+# mklink_dir <target-dir> <link>: a link to a directory; a junction where ln -s cannot.
+mklink_dir() {
+  ln -s "$1" "$2" 2>/dev/null
+  if [ ! -L "$2" ] && command -v cygpath >/dev/null 2>&1; then
+    rm -rf "$2"
+    MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
+  fi
+  [ -L "$2" ]
+}
+# A host that cannot make the link skips the case only on Windows. Elsewhere ln -s always
+# works, so failing to make one is a broken setup that would silently drop the coverage.
+no_link() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) echo "  SKIP [$1: no symbolic link could be made on this Windows host]" ;;
+    *) fail=$((fail + 1)); echo "  FAIL [$1: ln -s made no symbolic link on this host]" ;;
+  esac
+}
+m9repo() { local d="$TMP/m9-$1"; mkdir -p "$d/.claude"; ( cd "$d" && git init -q ); printf '%s' "$d"; }
+NOTHING='[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "Nothing was written" && [ ! -e "$R/.claude/hooks" ]'
+# One victim per case, so a write-through fails only the case that made it.
+newvictim() { VICTIM="$TMP/m9-victim-$1.txt"; printf 'victim\n' > "$VICTIM"; }
+victim_ok() { [ "$(cat "$VICTIM")" = victim ]; }
+
+# The schema is refreshed every run: a link there is replaced, never written through.
+R="$(m9repo schema)"; newvictim schema
+if mklink_file "$VICTIM" "$R/.claude/baseline.config.schema.json"; then
+  inst "$R" --dry-run
+  ok_if "dry run names the schema link, writes nothing through it (rc=$IRC)" '[ "$IRC" = 0 ] && victim_ok && [ -L "$R/.claude/baseline.config.schema.json" ] && printf "%s" "$IOUT" | grep -qF "would replace the symbolic link at .claude/baseline.config.schema.json"'
+  inst "$R"
+  ok_if "a schema link is replaced by the schema file, its target untouched (rc=$IRC)" '[ "$IRC" = 0 ] && victim_ok && [ ! -L "$R/.claude/baseline.config.schema.json" ] && cmp -s "$R/.claude/baseline.config.schema.json" "$SRC/baseline.config.schema.json" && printf "%s" "$IOUT" | grep -qF "replaced the symbolic link at .claude/baseline.config.schema.json"'
+else no_link "schema link"; fi
+R="$(m9repo schemadir)"; mkdir -p "$R/.claude/baseline.config.schema.json"
+inst "$R"; ok_if "a schema path that is a directory is refused (rc=$IRC)" "$NOTHING"' && [ -z "$(ls -A "$R/.claude/baseline.config.schema.json")" ]'
+
+# A config (created only when absent): dangling link refused, link to a file kept.
+R="$(m9repo cfgdangle)"
+if mklink_file "$TMP/m9-absent-cfg.json" "$R/.claude/baseline.config.json"; then
+  inst "$R" --dry-run; ok_if "dry run refuses a dangling config link (rc=$IRC)" "$NOTHING"
+  inst "$R"; ok_if "a dangling config link is refused, nothing created through it (rc=$IRC)" "$NOTHING"' && [ ! -e "$TMP/m9-absent-cfg.json" ] && printf "%s" "$IOUT" | grep -qF "to a path that does not exist"'
+else no_link "dangling config link"; fi
+R="$(m9repo cfgshared)"; printf '{"enforcement": "block"}\n' > "$TMP/m9-shared.json"; cp "$TMP/m9-shared.json" "$TMP/m9-shared.orig"
+if mklink_file "$TMP/m9-shared.json" "$R/.claude/baseline.config.json"; then
+  inst "$R"
+  ok_if "a config link to a file is kept, the file unchanged and named (rc=$IRC)" '[ "$IRC" = 0 ] && [ -L "$R/.claude/baseline.config.json" ] && cmp -s "$TMP/m9-shared.json" "$TMP/m9-shared.orig" && printf "%s" "$IOUT" | grep -qF "is a link to a file outside"'
+else no_link "shared config link"; fi
+# A link into .claude/hooks/ would dangle once step 1 replaces that tree, and the create
+# step would then write through it: refused up front, nothing replaced.
+R="$(m9repo cfghooks)"; mkdir -p "$R/.claude/hooks/baseline"; printf '{}\n' > "$R/.claude/hooks/baseline/x.json"
+if mklink_file "$R/.claude/hooks/baseline/x.json" "$R/.claude/baseline.config.json"; then
+  inst "$R"; ok_if "a config link into .claude/hooks/ is refused before the tree is replaced (rc=$IRC)" '[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "is a link into .claude/hooks/" && [ -f "$R/.claude/hooks/baseline/x.json" ] && [ ! -e "$R/.claude/hooks/baseline/VERSION" ]'
+else no_link "config link into .claude/hooks"; fi
+# ...however the chain gets there: a middle hop inside the tree, and `..` through a
+# directory link (judged where the link really points, not lexically).
+R="$(m9repo cfghop)"; mkdir -p "$R/.claude/hooks/baseline"; printf '{}\n' > "$TMP/m9-hop-end.json"
+# The case needs the config link to name the hop itself. MSYS's native symlinks store a
+# Windows path, and making one resolves links in its target, so on Windows the config
+# can come out pointing at the end of the chain — a different (and legitimate) shape.
+if mklink_file "$TMP/m9-hop-end.json" "$R/.claude/hooks/baseline/l" && mklink_file "$R/.claude/hooks/baseline/l" "$R/.claude/baseline.config.json" \
+   && case "$(readlink "$R/.claude/baseline.config.json")" in */hooks/baseline/l) true ;; *) false ;; esac; then
+  inst "$R"; ok_if "a config link whose chain passes through .claude/hooks/baseline/ is refused (rc=$IRC)" '[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "is a link into .claude/hooks/baseline/" && [ -L "$R/.claude/hooks/baseline/l" ] && [ "$(cat "$TMP/m9-hop-end.json")" = "{}" ]'
+else no_link "config link through a hop in .claude/hooks (no link naming the hop could be made)"; fi
+# Windows resolves `..` in a path lexically, whatever d links to, so these two shapes
+# exist only where `..` follows the link: Linux and macOS.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "  SKIP [config link through d/.. and through a replaced sub-directory: Windows resolves .. lexically]" ;;
+  *)
+    R="$(m9repo cfgdotdot)"; mkdir -p "$R/.claude/hooks/baseline/deep"; printf '{}\n' > "$R/.claude/hooks/baseline/x.json"
+    if mklink_dir "$R/.claude/hooks/baseline/deep" "$R/.claude/d" && mklink_file "$R/.claude/d/../x.json" "$R/.claude/baseline.config.json"; then
+      inst "$R"; ok_if "a config link reaching .claude/hooks/baseline/ through d/.. is refused (rc=$IRC)" '[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "is a link into .claude/hooks/baseline/" && [ -f "$R/.claude/hooks/baseline/x.json" ]'
+    else no_link "config link through d/.. into .claude/hooks"; fi
+    # A path that walks through a sub-directory of the hook tree and back out resolves at
+    # preflight (kept), then stops resolving once step 1 replaces the tree: the create
+    # step refuses it at write time rather than copying through it.
+    R="$(m9repo cfgthrough)"; mkdir -p "$R/.claude/hooks/baseline/sub"; printf '{"keep": 1}\n' > "$R/.claude/x.json"
+    if mklink_file "hooks/baseline/sub/../../../x.json" "$R/.claude/baseline.config.json"; then
+      inst "$R"; ok_if "a config link that stops resolving when the tree is replaced is not written through (rc=$IRC)" '[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "stopped resolving when the hook tree was" && [ "$(cat "$R/.claude/x.json")" = "{\"keep\": 1}" ] && [ -L "$R/.claude/baseline.config.json" ]'
+    else no_link "config link through a replaced sub-directory"; fi ;;
+esac
+# A repo's own .claude/hooks/<other>/ is never replaced: a link there is kept.
+R="$(m9repo cfgownhooks)"; mkdir -p "$R/.claude/hooks/team"; printf '{"enforcement": "block"}\n' > "$R/.claude/hooks/team/cfg.json"
+if mklink_file "$R/.claude/hooks/team/cfg.json" "$R/.claude/baseline.config.json"; then
+  inst "$R"; ok_if "a config link into the repo's own .claude/hooks/<other>/ is kept (rc=$IRC)" '[ "$IRC" = 0 ] && [ -L "$R/.claude/baseline.config.json" ] && ! printf "%s" "$IOUT" | grep -qF "is a link into" && ! printf "%s" "$IOUT" | grep -qF "is a link to a file outside"'
+else no_link "config link into the repo's own hooks"; fi
+R="$(m9repo cfgdir)"; mkdir -p "$TMP/m9-target-cfgdir"
+if mklink_dir "$TMP/m9-target-cfgdir" "$R/.claude/baseline.config.json"; then
+  inst "$R"; ok_if "a config link to a directory is refused, nothing written in it (rc=$IRC)" "$NOTHING"' && [ -z "$(ls -A "$TMP/m9-target-cfgdir")" ]'
+else no_link "config link to a directory"; fi
+R="$(m9repo sddangle)"
+if mklink_file "$TMP/m9-absent-sd.json" "$R/.claude/security-defaults.json"; then
+  inst "$R" --with-openclaw-rules; ok_if "a dangling security-defaults link is refused (rc=$IRC)" "$NOTHING"' && [ ! -e "$TMP/m9-absent-sd.json" ] && printf "%s" "$IOUT" | grep -qF "to a path that does not exist"'
+else no_link "dangling security-defaults link"; fi
+
+# settings.json: a link of any kind, or a non-file, is refused before anything is written.
+R="$(m9repo setlink)"; printf '{"model": "outside"}\n' > "$TMP/m9-outside.json"; cp "$TMP/m9-outside.json" "$TMP/m9-outside.orig"
+if mklink_file "$TMP/m9-outside.json" "$R/.claude/settings.json"; then
+  inst "$R"; ok_if "a settings.json link is refused, its target neither read in nor changed (rc=$IRC)" "$NOTHING"' && cmp -s "$TMP/m9-outside.json" "$TMP/m9-outside.orig" && [ "$(nbak "$R")" = 0 ]'
+else no_link "settings.json link"; fi
+R="$(m9repo setdirlink)"; mkdir -p "$TMP/m9-target-setdir"
+if mklink_dir "$TMP/m9-target-setdir" "$R/.claude/settings.json"; then
+  inst "$R"; ok_if "a settings.json link to a directory is refused, nothing moved into it (rc=$IRC)" "$NOTHING"' && [ -z "$(ls -A "$TMP/m9-target-setdir")" ]'
+else no_link "settings.json link to a directory"; fi
+R="$(m9repo setdir)"; mkdir -p "$R/.claude/settings.json"
+inst "$R"; ok_if "a settings.json that is a directory is refused (rc=$IRC)" "$NOTHING"' && [ -z "$(ls -A "$R/.claude/settings.json")" ]'
+
+# Temp files: never a fixed name a repo could plant as a link.
+R="$(m9repo cfgtmp)"; newvictim cfgtmp
+if mklink_file "$VICTIM" "$R/.claude/baseline.config.json.tmp"; then
+  inst "$R" --with-openclaw-rules --enable-security-defaults
+  ok_if "enabling securityDefaults never writes through a planted .tmp link (rc=$IRC)" '[ "$IRC" = 0 ] && victim_ok && [ -L "$R/.claude/baseline.config.json.tmp" ] && [ ! -L "$R/.claude/baseline.config.json" ] && "$PY" -c "import json,sys;c=json.load(open(sys.argv[1],encoding=\"utf-8\"));sys.exit(0 if c[\"modules\"][\"securityDefaults\"][\"enabled\"] is True else 1)" "$(winpath "$R/.claude/baseline.config.json")" && [ -z "$(ls -A "$R/.claude" | grep "^\.baseline\.config\.")" ]'
+else no_link "planted config .tmp link"; fi
+ok_if "the settings merge temp file is random (mktemp), not a fixed name" 'grep -qF "mktemp \"\$CLAUDE_DIR/.settings.merge.XXXXXX\"" "$SRC/install.sh" && ! grep -qF ".settings.merge.\$\$" "$SRC/install.sh"'
+R="$(m9repo mode)"; printf '{"model": "x"}\n' > "$R/.claude/settings.json"
+inst "$R"
+ok_if "no merge temp file is left behind (rc=$IRC)" '[ "$IRC" = 0 ] && [ -z "$(ls -A "$R/.claude" | grep "^\.settings\.merge\.")" ]'
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) echo "  SKIP [merged settings.json mode: Windows has no Unix modes]" ;;
+  *) ok_if "the merged settings.json gets a new file's mode, not mktemp's 0600" '[ "$("$PY" -c "import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))" "$R/.claude/settings.json")" = "$("$PY" -c "import os;u=os.umask(0);print(oct(0o666 & ~u))")" ]' ;;
+esac
+
+# The git exclude append never writes through a link.
+R="$(m9repo excl)"; newvictim excl; printf '{"model": "x"}\n' > "$R/.claude/settings.json"; rm -f "$R/.git/info/exclude"
+if mklink_file "$VICTIM" "$R/.git/info/exclude"; then
+  inst "$R"; ok_if "a linked git exclude file is left alone, with a warning (rc=$IRC)" '[ "$IRC" = 0 ] && victim_ok && printf "%s" "$IOUT" | grep -qF "is a link or not a regular file"'
+else no_link "linked git exclude"; fi
+
 # The installer refuses to delete a baseline source vendored inside the destination.
 IV="$TMP/inst-vendored"; VS="$IV/.claude/hooks/baseline/src"; mkdir -p "$VS"; ( cd "$IV" && git init -q )
 ( cd "$SRC" && tar cf - install.sh lib hooks settings.template.json baseline.config.json baseline.config.schema.json examples ) | ( cd "$VS" && tar xf - )

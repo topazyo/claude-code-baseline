@@ -65,6 +65,8 @@ LAUNCH_CASES = {"hooks": {"PreToolUse": [{"hooks": [
     ours('bash -p' + chr(11) + '"' + B + 'guardrails/auto-format.sh"'),  # VT: one word to sh
     USER,                                                         # not ours: ignored
 ]}]}}
+FULL_TEMPLATE = ms.strip_comments(ms.load(os.path.join(ROOT, "settings.template.json"), "baseline template"))
+DENY = ms.baseline_deny(FULL_TEMPLATE)
 MINS = ms.baseline_timeouts(ms.strip_comments(ms.load(os.path.join(ROOT, "settings.template.json"), "baseline template")))
 
 
@@ -349,6 +351,26 @@ checks = [
      and ms.baseline_wiring_problems({"hooks": ["x"]}, WIRING) == WIRING
      and ms.baseline_wiring_problems({"hooks": {"Stop": "x", "PreToolUse": [None, {"hooks": "x"}]}},
                                      WIRING) == WIRING),
+    # the baseline deny-list, as config-guard (3) checks it (tools/baseline-status.sh, M10)
+    ("baseline deny: the template's string entries, in order (config-guard's EXPECTED_DENY is pinned to them in test_hooks.sh)",
+     DENY == [d for d in FULL_TEMPLATE["permissions"]["deny"] if isinstance(d, str)]
+     and len(DENY) >= 30 and "Edit(.claude/settings.json)" in DENY),
+    ("baseline deny: none from a template without one, or with wrong shapes",
+     ms.baseline_deny({}) == [] and ms.baseline_deny({"permissions": []}) == []
+     and ms.baseline_deny({"permissions": {"deny": "x"}}) == []
+     and ms.baseline_deny({"permissions": {"deny": ["a", 1, None, "b"]}}) == ["a", "b"]),
+    ("missing deny: none for the full list, extra entries of the repo's own allowed",
+     ms.missing_deny({"permissions": {"deny": DENY}}, DENY) == []
+     and ms.missing_deny({"permissions": {"deny": ["Read(./x)"] + DENY + [7]}}, DENY) == []),
+    ("missing deny: the absent entries, exact strings, in template order",
+     ms.missing_deny({"permissions": {"deny": DENY[2:]}}, DENY) == DENY[:2]
+     and ms.missing_deny({"permissions": {"deny": [d.lower() for d in DENY]}}, DENY)
+     == [d for d in DENY if d.lower() != d]),
+    ("missing deny: every entry when permissions or deny is absent or not the right shape",
+     ms.missing_deny({}, DENY) == DENY and ms.missing_deny({"permissions": []}, DENY) == DENY
+     and ms.missing_deny({"permissions": {"deny": "Edit(.env*)"}}, DENY) == DENY
+     and ms.missing_deny({"permissions": {"deny": {"0": "Edit(.env*)"}}}, DENY) == DENY
+     and ms.missing_deny({"permissions": {"deny": {"Edit(.env*)": True}}}, DENY) == DENY),
 ]
 
 failed = [label for label, ok in checks if not ok]

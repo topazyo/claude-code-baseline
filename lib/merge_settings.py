@@ -319,6 +319,25 @@ def merge_deny(existing_perms: dict, template_perms: dict) -> list:
     return merged
 
 
+def baseline_deny(template: dict) -> list[str]:
+    """The template's permissions.deny string entries, in order: the deny-list the
+    installer merges into settings.json (config-guard's EXPECTED_DENY mirrors it)."""
+    perms = template.get("permissions")
+    deny = perms.get("deny") if isinstance(perms, dict) else None
+    return [d for d in deny if isinstance(d, str)] if isinstance(deny, list) else []
+
+
+def missing_deny(settings: dict, expected: list[str]) -> list[str]:
+    """The expected deny entries absent from settings' permissions.deny, in the order of
+    expected. The same rule as config-guard (3): exact strings, only string entries of a
+    list under an object (anything else holds none), the parsed object as is (a duplicate
+    key is last-wins, as in Claude Code). A rewritten but equivalent glob reads as missing."""
+    perms = settings.get("permissions")
+    deny = perms.get("deny") if isinstance(perms, dict) else None
+    have = {d for d in deny if isinstance(d, str)} if isinstance(deny, list) else set()
+    return [d for d in expected if d not in have]
+
+
 def risky_env_keys(settings: dict) -> list[str]:
     """The keys of settings["env"] that RISKY_ENV_* cover, whatever their value (an
     empty PATH breaks the hook command too), sorted."""

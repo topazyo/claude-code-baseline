@@ -77,7 +77,9 @@ PY
 SRC_VER="$(read_src_key baselineVersion)"
 SRC_MIN="$(read_src_key minClaudeCodeVersion)"
 
-# settings_check <repo> -> "<env findings>\x1f<launch findings>", each comma-separated.
+# settings_check <repo> -> "<env findings>\x1f<launch findings>\x1f<deny missing>"; the
+# first two comma-separated, the third a JSON list of the template's permissions.deny
+# entries settings.json lacks (exact strings, as config-guard (3); [] when none).
 # env: keys of the repo's settings.json / settings.local.json `env` that can run code
 # before the baseline hooks, redirect them or switch them off. launch: baseline scripts
 # the template wires that settings.json does not run exactly as `bash -p <script>`
@@ -117,25 +119,32 @@ def name(text):
 template = ms.strip_comments(read(os.path.join(src, "settings.template.json")) or {})
 mins, wiring = ms.baseline_timeouts(template), ms.baseline_wiring(template)
 guards = ms.baseline_blocking(template)
-if not mins or not wiring or not guards:   # no template to compare with: the check could not run
-    sys.exit("settings.template.json unreadable or wires no baseline hook")
-env, launch = [], set()
+expected_deny = ms.baseline_deny(template)
+if not mins or not wiring or not guards or not expected_deny:   # nothing to compare with: the check could not run
+    sys.exit("settings.template.json unreadable, or wires no baseline hook, or has no deny-list")
+env, launch, deny_missing = [], set(), []
 for fname in ("settings.json", "settings.local.json"):
     path = os.path.join(repo, ".claude", fname)
+    # No readable settings.json holds no deny entry: every one is missing, as config-guard
+    # (3) finds none in a file it cannot read — never an "ok" for a check that saw nothing.
     if not os.path.exists(path):
         if fname == "settings.json":
             launch.add("no settings.json")
+            deny_missing = list(expected_deny)
         continue
     data = read(path)
     if not isinstance(data, dict):
         env.append(fname + ":unreadable")
         if fname == "settings.json":
             launch.add("settings.json unreadable")
+            deny_missing = list(expected_deny)
         continue
     env += [fname + ":" + name(k) for k in ms.risky_env_keys(data)]
     if data.get("disableAllHooks", False) not in (False, 0, None, "", "false", "False", "0", "no", "off"):
         launch.add(fname + " disableAllHooks")   # same reading as config-guard (1)
     if fname == "settings.json":
+        # The baseline deny-list (secrets + self-protection) lives here: config-guard (3).
+        deny_missing = ms.missing_deny(data, expected_deny)
         launch |= {name(s) for s in ms.baseline_launch_problems(data, mins)}
         launch |= {name(s + " without onFailure block") for s in ms.baseline_soft_guards(data, guards)}   # config-guard (2b)
         unlaunched = set(mins) - ms.baseline_launches(data, mins)
@@ -192,7 +201,10 @@ for sub in ("agents", "skills"):
     for err in walk_errors:
         if getattr(err, "filename", None) and os.path.exists(err.filename):
             launch.add(name(rel(err.filename) + " unreadable"))
-print(",".join(env) + "\x1f" + ",".join(sorted(launch)))
+# The deny field is JSON (ensure_ascii: no tab, \x1f or newline can appear in it), so the
+# entries reach --json exactly as the template spells them, backslashes included.
+import json
+print(",".join(env) + "\x1f" + ",".join(sorted(launch)) + "\x1f" + json.dumps(deny_missing))
 PY
 }
 
@@ -208,7 +220,7 @@ echo
 
 for repo in "${REPOS[@]}"; do
   installed=0; enf=""; fc=""; guards=""; mods=""; minver=""; minok=0; instver=""; drift="not-installed"
-  envrisk=""; launch=""; cfg_bad=""
+  envrisk=""; launch=""; denymiss=""; cfg_bad=""
   hooks_dir="$repo/.claude/hooks/baseline"
   ver_file="$hooks_dir/VERSION"
 
@@ -248,12 +260,15 @@ for repo in "${REPOS[@]}"; do
     # A check that could not run is a finding, never a clean report.
     # \x1f, not a tab: read collapses a leading tab, which would shift an empty env
     # field's neighbour into it.
-    sc="$(settings_check "$repo")" || sc=$'check-failed\x1fcheck-failed'
+    # Three fields; fewer separators means the check did not finish, and an absent deny
+    # field must not read as an intact deny-list.
+    sc="$(settings_check "$repo")" || sc=$'check-failed\x1fcheck-failed\x1fcheck-failed'
     sc="${sc//$'\r'/}"   # Windows Python print() emits CRLF
-    [[ "$sc" == *$'\x1f'* ]] || sc=$'check-failed\x1fcheck-failed'
-    IFS=$'\x1f' read -r envrisk launch <<< "$sc"
+    [[ "$sc" == *$'\x1f'*$'\x1f'* ]] || sc=$'check-failed\x1fcheck-failed\x1fcheck-failed'
+    IFS=$'\x1f' read -r envrisk launch denymiss <<< "$sc"
     [[ -n "$cfg_bad" ]] && launch="${launch:+$launch,}baseline.config.json unreadable"
     [[ -n "$envrisk$launch" ]] && any_settings=1
+    [[ "$denymiss" == "[]" ]] || any_settings=1
   fi
 
   # Human-readable per-repo block (the report; --json is the machine form).
@@ -270,14 +285,19 @@ for repo in "${REPOS[@]}"; do
       echo "  guardrails: ${guards:-<none>}   modules: ${mods:-<none>}"
     fi
     echo "  settings: risky env=${envrisk:-none}   hook wiring=${launch:-ok}"
+    case "$denymiss" in
+      "[]") echo "  deny-list: ok (every baseline entry present in settings.json)" ;;
+      "check-failed") echo "  deny-list: check-failed" ;;
+      *) echo "  deny-list: baseline entries missing from settings.json permissions.deny: $denymiss" ;;
+    esac
   else
     echo "  installed=no   (no .claude/hooks/baseline/ — baseline not adopted here)"
   fi
   echo
 
-  RECORDS+="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+  RECORDS+="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
     "$repo" "$installed" "$enf" "$fc" "$guards" "$mods" "$minver" "$minok" "$instver" "$drift" \
-    "$envrisk" "$launch")"$'\n'
+    "$envrisk" "$launch" "$denymiss")"$'\n'
 done
 
 if [[ -n "$JSON_OUT" ]]; then
@@ -292,9 +312,15 @@ for line in sys.stdin.read().splitlines():
     if not line:
         continue
     f = line.split("\t")
-    while len(f) < 12:
+    while len(f) < 13:
         f.append("")
-    repo, installed, enf, fc, guards, mods, minver, minok, instver, drift, envrisk, launch = f[:12]
+    repo, installed, enf, fc, guards, mods, minver, minok, instver, drift, envrisk, launch, denymiss = f[:13]
+    # Not installed: nothing to check ([]). A check that did not run: null, and its
+    # hookLaunchProblems already say check-failed.
+    try:
+        deny_missing = json.loads(denymiss) if denymiss else []
+    except ValueError:
+        deny_missing = None
     recs.append({
         "repo": repo,
         "installed": installed == "1",
@@ -308,6 +334,7 @@ for line in sys.stdin.read().splitlines():
         "drift": drift,
         "settingsEnvRisk": [x for x in envrisk.split(",") if x],
         "hookLaunchProblems": [x for x in launch.split(",") if x],
+        "denyListMissing": deny_missing,
     })
 with open(out, "w", encoding="utf-8") as fh:
     json.dump({"sourceBaselineVersion": srcver or None,
@@ -323,7 +350,7 @@ if [[ $STRICT -eq 1 && $any_drift -eq 1 ]]; then
   exit 1
 fi
 if [[ $STRICT -eq 1 && $any_settings -eq 1 ]]; then
-  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks), or keep a subagent or skill definition naming the baseline hook directory, or have a baseline.config.json that cannot be read" >&2
+  echo "settings findings (--strict): one or more installed repos lack baseline deny-list entries in settings.json, or set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks), or keep a subagent or skill definition naming the baseline hook directory, or have a baseline.config.json that cannot be read" >&2
   exit 1
 fi
 exit 0

@@ -280,9 +280,14 @@ What it does (idempotent — safe to re-run):
    is replaced on each run, so removed hooks don't linger and nothing planted
    there survives; each file the baseline does not ship is named before it goes.
 2. Writes **`.claude/baseline.config.json`** *(only if absent — your toggles are
-   never clobbered)* and refreshes the JSON schema next to it.
+   never clobbered)* and refreshes the JSON schema next to it. A config that is a
+   link to a file is kept and only read; a dangling link, or a link to a directory,
+   is refused before anything is written. A link at the schema's path is replaced
+   by the schema file, never written through.
 3. **Merges** the baseline hook wiring + a security deny-list into
-   **`.claude/settings.json`**. When the merge changes the file, the previous
+   **`.claude/settings.json`**. A `settings.json` that is a link, or not a regular
+   file, is refused before anything is written: the merge would read the link's
+   target into this repo and its backup. When the merge changes the file, the previous
    one is saved first as `settings.json.bak.<timestamp>` (`.1`, `.2`, … if that
    name is taken), and in a git work tree the backups are added to the repo's local
    `.git/info/exclude` unless git already ignores them; a re-install that changes
