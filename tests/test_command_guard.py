@@ -1054,6 +1054,7 @@ def _flagged(text):
     """{tuple(words): the set of ps_script values} over the segments _segments gives
     for bash text (a set, so one wrongly marked copy among several shows)."""
     out = {}
+    m._RunnerBudget.used = 0             # evaluate() resets it; a direct call must too
     for s in m._segments(text):
         out.setdefault(tuple(s), set()).add(getattr(s, "ps_script", False))
     return out
@@ -1144,6 +1145,10 @@ STRUCT_CASES = [
         ["-c", "remote.origin.push=:feat/x"]), []),
     ("ps_script: an assignment's right-hand side is judged", lambda: bool(m._reasons_for(
         _seg(["$x", "=", "git", "reset", "--hard"], ps_script=True))), True),
+    ("ps_script: a chained assignment's command is judged", lambda: bool(m._reasons_for(
+        _seg(["$a", "=", "$b", "+=", "git", "reset", "--hard"], ps_script=True))), True),
+    ("ps_script: a 4 KB assignment chain is judged without recursion",
+     lambda: m.evaluate("pwsh -c '" + "$a = " * 800 + "x'"), []),
     ("ps_script: an assignment of a value is not", lambda: m._reasons_for(
         _seg(["$x", "=", "git", "status"], ps_script=True)), []),
     ("ps_script: a destructuring target", lambda: m._reasons_for(
@@ -1196,6 +1201,7 @@ def _struct_problem(thunk, expected):
 def _space_case_problem(shell, text, present, absent):
     """Why the words evaluate() judges for text do not match a SPACE_CASES row, or
     an empty string when they do."""
+    m._RunnerBudget.used = 0             # evaluate() resets it; a direct call must too
     segs = (m._powershell_segments(text) if shell == "powershell"
             else m._segments(text, shell=shell))
     words = [list(s) for s in segs]

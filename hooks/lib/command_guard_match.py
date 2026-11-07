@@ -119,7 +119,7 @@ _MAX_INSPECT_LEN = 4096
 _MAX_CHAIN_CHARS = 131072
 # Cap on the Windows-runner script text one evaluation may tokenize (the readings of
 # nested runners multiply; see _runner_segments). Past it: BLOCK.
-_MAX_RUNNER_CHARS = 262144
+_MAX_RUNNER_CHARS = 524288
 
 # Catastrophic delete "roots" (after canonicalization). Targeted paths are allowed.
 _DANGER_ROOTS = {"/", ".", "..", "*", "~", "$home", "${home}", "/*"}
@@ -721,10 +721,18 @@ def _rules_at(toks, idx, saw_xargs):
         if not (getattr(toks, "ps_script", False)
                 and (nxt is None or nxt in _PS_EXPR_NEXT or toks[idx].endswith(","))):
             out.append("uninspectable command word (shell expansion in command position)")
-        elif nxt in _PS_ASSIGN and idx + 2 < len(toks):
-            rhs = _new_seg(toks[idx + 2:], getattr(toks, "piped", False))
-            rhs.ps_script = True
-            out += [r for r in _reasons_for(rhs) if r not in out]
+        elif nxt in _PS_ASSIGN:
+            # `$a = $b = cmd`: step over the chained targets, then judge the command
+            # once. A loop, so a long chain cannot exhaust the stack: what is left
+            # never starts another assignment, so judging it does not come back here.
+            j = idx + 2
+            while (j + 1 < len(toks) and "$" in toks[j]
+                   and toks[j + 1].lower() in _PS_ASSIGN):
+                j += 2
+            if j < len(toks):
+                rhs = _new_seg(toks[j:], getattr(toks, "piped", False))
+                rhs.ps_script = True
+                out += [r for r in _reasons_for(rhs) if r not in out]
         return out
 
     if cmd == "rm":
@@ -1603,9 +1611,12 @@ def _runner_segments(script: str, depth: int, piped: bool, ps: bool):
     cache and the budget on entry.
 
     Budgeted: the readings multiply per nesting level, so a 4 KB chain of nested
-    runners can hand down thousands of distinct long scripts. Past _MAX_RUNNER_CHARS
-    tokenized in one evaluation the command is refused as uninspectable (a block),
-    like an over-long continuation chain, rather than run toward the hook timeout."""
+    runners can hand down thousands of distinct long scripts (~3 MB). Past
+    _MAX_RUNNER_CHARS tokenized in one evaluation the command is refused as
+    uninspectable (a block), like an over-long continuation chain, rather than run
+    toward the hook timeout. A dense 4 KB runner command uses about 64 KB, about
+    128 KB when cmd's caret reading doubles it; stacking a VT/FF break on top of that
+    can reach the cap."""
     _RunnerBudget.used += len(script)
     if _RunnerBudget.used > _MAX_RUNNER_CHARS:
         raise _Uninspectable(
