@@ -72,6 +72,13 @@ if [[ $read_rc -eq 0 && "$PAYLOAD" == *"/.claude/hooks/baseline/"* ]]; then
   fi
 fi
 
+# A config that exists but cannot be read would read scopeGuard as off. Whether it is
+# on is unknown, so fail closed before the enabled-gate (see _malformedConfigRationale).
+if bcl_config_malformed; then
+  bcl_say "$(bcl_config_malformed_text scope-guard)"
+  bcl_failclosed_exit; exit $?
+fi
+
 bcl_module_enabled scopeGuard || exit 0
 
 # Could not read stdin: `cat` blocked until EOF, so a caller that left stdin open

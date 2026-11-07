@@ -99,6 +99,7 @@ line starts with one is blocked the same way.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -1608,14 +1609,31 @@ def main() -> int:
     tool = data.get("tool_name") if isinstance(data, dict) else ""
     shell = "powershell" if str(tool or "").strip().lower() == "powershell" else "bash"
 
+    # A missing config means "no extraPatterns". One that exists but cannot be read as a
+    # JSON object (bytes in, so a BOM or UTF-16 is fine) is a control that cannot run:
+    # report it, so the hook fails closed instead of silently dropping the patterns.
+    # Below the top level, a wrong shape reads as "none", as the hooks' own reader
+    # (bcl_prime in common.sh) reads it.
     extra = []
-    try:
-        if cfg_path:
-            with open(cfg_path, encoding="utf-8") as fh:
-                cfg = json.load(fh)
-            extra = (((cfg.get("guardrails") or {}).get("commandGuard") or {}).get("extraPatterns") or [])
-    except Exception:
-        extra = []  # extraPatterns are optional; core rules still evaluated
+    if cfg_path and os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, "rb") as fh:
+                cfg = json.loads(fh.read())
+        except json.JSONDecodeError as exc:
+            reason = f"line {exc.lineno} column {exc.colno}: {exc.msg}"
+            cfg = None
+        except Exception as exc:
+            reason = type(exc).__name__
+            cfg = None
+        else:
+            reason = "" if isinstance(cfg, dict) else "the top level is not a JSON object"
+        if reason:
+            print(f"__MATCHER_ERROR__ {cfg_path} cannot be read ({reason}); repo "
+                  f"extraPatterns could not be applied.")
+            return 0
+        guard = cfg.get("guardrails")
+        guard = guard.get("commandGuard") if isinstance(guard, dict) else None
+        extra = (guard.get("extraPatterns") if isinstance(guard, dict) else None) or []
 
     reasons = evaluate(raw, extra, shell=shell)
     if reasons:

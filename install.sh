@@ -317,6 +317,24 @@ echo "› config"
 CFG_CREATED=0
 if [[ -f "$CLAUDE_DIR/baseline.config.json" ]]; then
   say "kept existing .claude/baseline.config.json (not overwritten)"
+  # The hooks read it the same way (common.sh bcl_config_malformed) and fail closed on
+  # one they cannot read, so say so now rather than at the first blocked call.
+  CFG_BAD="$("$PY" -I -S -X utf8 -c 'import json,sys
+try:
+    with open(sys.argv[1], "rb") as fh:
+        data = json.loads(fh.read())
+except json.JSONDecodeError as exc:
+    print("line %d column %d: %s" % (exc.lineno, exc.colno, exc.msg))
+except Exception as exc:
+    print(type(exc).__name__)
+else:
+    print("OK" if isinstance(data, dict) else "the top level is not a JSON object")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || true)"
+  CFG_BAD="${CFG_BAD%$'\r'}"
+  [[ -n "$CFG_BAD" ]] || CFG_BAD="the check could not run"
+  if [[ "$CFG_BAD" != "OK" ]]; then
+    echo "WARNING: the existing .claude/baseline.config.json cannot be read ($CFG_BAD)." >&2
+    echo "         The baseline hooks fail closed until it is fixed or deleted." >&2
+  fi
 else
   CFG_CREATED=1
   run cp "$SRC/baseline.config.json" "$CLAUDE_DIR/baseline.config.json"
@@ -495,7 +513,7 @@ if [[ $ENABLE_SD -eq 1 ]]; then
   echo "› securityDefaults module"
   if [[ $CFG_CREATED -eq 0 ]]; then
     SD_ON="$("$PY" -I -S -X utf8 -c 'import json,sys
-c=json.load(open(sys.argv[1],encoding="utf-8"))
+c=json.loads(open(sys.argv[1],"rb").read())
 sys.stdout.write("1" if ((c.get("modules") or {}).get("securityDefaults") or {}).get("enabled") is True else "0")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || echo 0)"
     if [[ "$SD_ON" == "1" ]]; then
       say "securityDefaults is already enabled in the existing .claude/baseline.config.json."

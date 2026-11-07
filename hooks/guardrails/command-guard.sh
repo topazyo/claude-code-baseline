@@ -56,6 +56,15 @@ bcl_read_payload PAYLOAD || read_rc=1
 # call, so this is the hook where a saved interpreter start is felt most.
 bcl_prime "$PAYLOAD"
 
+# A config that exists but cannot be read would answer every lookup with its default:
+# the guard would still run, but without the repo's extraPatterns. Fail closed before
+# the enabled-gate, as every wired hook does (see _malformedConfigRationale). On such a
+# file posture and failClosed read their defaults, so this is exit 2.
+if bcl_config_malformed; then
+  bcl_say "$(bcl_config_malformed_text command-guard)"
+  if bcl_failclosed_exit; then exit 0; else exit 2; fi
+fi
+
 bcl_guardrail_enabled commandGuard || exit 0
 
 # A guard that could not read its input must not wave the command through. `cat`

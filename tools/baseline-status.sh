@@ -203,19 +203,35 @@ echo
 
 for repo in "${REPOS[@]}"; do
   installed=0; enf=""; fc=""; guards=""; mods=""; minver=""; minok=0; instver=""; drift="not-installed"
-  envrisk=""; launch=""
+  envrisk=""; launch=""; cfg_bad=""
   hooks_dir="$repo/.claude/hooks/baseline"
   ver_file="$hooks_dir/VERSION"
 
   if [[ -d "$hooks_dir" ]]; then
     installed=1
     export CLAUDE_PROJECT_DIR="$repo"
-    enf="$(bcl_posture)"
-    fc="$(bcl_cfg failClosed true)"
-    minver="$(bcl_cfg minClaudeCodeVersion "")"
+    # A config that exists but cannot be read makes the hooks fail closed, so its
+    # defaults are not the repo's posture: report "unknown" and a finding instead.
+    cfg_bad=""
+    if bcl_config_malformed; then cfg_bad="${_BCL_CFG_ERROR:-unreadable}"; fi
+    if [[ -n "$cfg_bad" ]]; then
+      enf="unknown"; fc="unknown"; minver="unknown"
+    else
+      enf="$(bcl_posture)"
+      fc="$(bcl_cfg failClosed true)"
+      minver="$(bcl_cfg minClaudeCodeVersion "")"
+      # autoFormat runs repo code, so its hook reads it opt-in (default off); report it
+      # with the same reader. commandGuard is default-on.
+      for g in "${GUARDRAILS[@]}"; do
+        if [[ "$g" == autoFormat ]]; then
+          bcl_guardrail_opted_in "$g" && guards="${guards:+$guards,}$g"
+        else
+          bcl_guardrail_enabled "$g" && guards="${guards:+$guards,}$g"
+        fi
+      done
+      for m in "${MODULES[@]}"; do bcl_module_enabled "$m" && mods="${mods:+$mods,}$m"; done
+    fi
     [[ -n "$minver" && "$minver" == "$SRC_MIN" ]] && minok=1 || minok=0
-    for g in "${GUARDRAILS[@]}"; do bcl_guardrail_enabled "$g" && guards="${guards:+$guards,}$g"; done
-    for m in "${MODULES[@]}"; do bcl_module_enabled "$m" && mods="${mods:+$mods,}$m"; done
     if [[ -f "$ver_file" ]]; then
       instver="$(tr -d '\r\n' < "$ver_file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     fi
@@ -231,6 +247,7 @@ for repo in "${REPOS[@]}"; do
     sc="${sc//$'\r'/}"   # Windows Python print() emits CRLF
     [[ "$sc" == *$'\x1f'* ]] || sc=$'check-failed\x1fcheck-failed'
     IFS=$'\x1f' read -r envrisk launch <<< "$sc"
+    [[ -n "$cfg_bad" ]] && launch="${launch:+$launch,}baseline.config.json unreadable"
     [[ -n "$envrisk$launch" ]] && any_settings=1
   fi
 
@@ -238,8 +255,15 @@ for repo in "${REPOS[@]}"; do
   echo "$repo"
   if [[ $installed -eq 1 ]]; then
     echo "  installed=yes  posture=$enf  failClosed=$fc  version=${instver:-<none>}  drift=$drift"
+    if [[ -n "$cfg_bad" ]]; then
+      echo "  baseline.config.json cannot be read ($cfg_bad): the hooks fail closed until a human fixes or deletes it"
+    fi
     echo "  minClaudeCodeVersion=${minver:-<none>}  (canonical $SRC_MIN, ok=$([[ $minok -eq 1 ]] && echo yes || echo no))"
-    echo "  guardrails: ${guards:-<none>}   modules: ${mods:-<none>}"
+    if [[ -n "$cfg_bad" ]]; then
+      echo "  guardrails: unknown   modules: unknown"
+    else
+      echo "  guardrails: ${guards:-<none>}   modules: ${mods:-<none>}"
+    fi
     echo "  settings: risky env=${envrisk:-none}   hook wiring=${launch:-ok}"
   else
     echo "  installed=no   (no .claude/hooks/baseline/ — baseline not adopted here)"
@@ -294,7 +318,7 @@ if [[ $STRICT -eq 1 && $any_drift -eq 1 ]]; then
   exit 1
 fi
 if [[ $STRICT -eq 1 && $any_settings -eq 1 ]]; then
-  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks), or keep a subagent or skill definition naming the baseline hook directory" >&2
+  echo "settings findings (--strict): one or more installed repos set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks), or keep a subagent or skill definition naming the baseline hook directory, or have a baseline.config.json that cannot be read" >&2
   exit 1
 fi
 exit 0

@@ -192,6 +192,24 @@ cp "$TMP/settings.saved" "$A/.claude/settings.json"
 got="$(findings)"
 [ "$got" = "[] []" ] && ok || no "restored settings should have no settings finding: $got"
 
+echo "== baseline-status: guardrails read as the hooks read them; unreadable config (L11/L13) =="
+ACFG="$A/.claude/baseline.config.json"
+cp "$ACFG" "$TMP/acfg.keep"
+# autoFormat is opt-in (its hook reads it with bcl_guardrail_opted_in), commandGuard is
+# default-on: with both keys absent only commandGuard is enabled.
+"$PY" -c "import json;p=r'$ACFG';c=json.load(open(p));[c['guardrails'][g].pop('enabled',None) for g in ('autoFormat','commandGuard')];json.dump(c,open(p,'w'))"
+OUT="$(winpath "$TMP/g.json")"
+timeout -k 5 60 bash "$STATUS" --json "$OUT" "$A" >/dev/null 2>&1
+if "$PY" -c "import json,sys;r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0];g=r['enabledGuardrails'];sys.exit(0 if 'commandGuard' in g and 'autoFormat' not in g else 1)" "$OUT"; then ok; else no "absent enabled keys: commandGuard on, autoFormat off"; fi
+# A config that exists but cannot be read: the hooks fail closed, so status must not
+# show the defaults as the repo's posture, and --strict must fail.
+printf '{ "enforcement": "block", }\n' > "$ACFG"
+SOUT="$(timeout -k 5 60 bash "$STATUS" --json "$OUT" "$A" 2>&1)"
+case "$SOUT" in *"baseline.config.json cannot be read (line 1 column"*) ok ;; *) no "unreadable config is reported with its parse error" ;; esac
+if "$PY" -c "import json,sys;r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0];sys.exit(0 if r['enforcement']=='unknown' and r['failClosed'] is None and not r['enabledGuardrails'] and 'baseline.config.json unreadable' in r['hookLaunchProblems'] else 1)" "$OUT"; then ok; else no "unreadable config: posture unknown, a finding, no guardrails claimed"; fi
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on an unreadable config"; else ok; fi
+cp "$TMP/acfg.keep" "$ACFG"
+
 echo "== baseline-status: local-only (no network primitives in source) =="
 if grep -E '(curl|wget|nc |/dev/tcp|ssh |scp |https?://)' "$STATUS" >/dev/null 2>&1; then
   no "network primitive found in baseline-status.sh"
