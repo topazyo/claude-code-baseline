@@ -48,7 +48,12 @@ normalizer was defeated by ordinary shell quoting):
   * Wrappers are skipped WITH their option values (`sudo -u root`, `nice -n 10`,
     `timeout 5`, `xargs -n 1`), read both with and without consuming a value so
     a table gap cannot hide the command. `eval`, `watch "..."`, `env -S`,
-    `su/script/flock -c` and `bash <<< '...'` are inline scripts like `sh -c`.
+    `su/script/flock -c` and `bash <<< '...'` are inline scripts like `sh -c`, and
+    so is what a Windows runner at the command position runs: `cmd /c|/k`,
+    `pwsh|powershell -Command` (and Windows PowerShell's positional command), and
+    `wsl` (see _runner_rests); `pwsh -EncodedCommand` is uninspectable -> BLOCK.
+    git's global options are read under every reading of which take a value
+    (_git_candidates), and its -c push settings are judged.
     A redirection does not end a command (`>/dev/null rm -rf /` is rm), and a
     shell reading its script from a pipe, a here-string or a process substitution
     (`... | sh`, `bash - <<< ...`) is uninspectable -> BLOCK, as is `eval "$(...)"`.
@@ -84,8 +89,10 @@ top-level heredoc body, still fails to tokenize and is blocked.
 
 PowerShell payloads are also judged as the text PowerShell produces from its backtick
 escapes and typographic quotes, with PowerShell 7's and Windows PowerShell 5.1's
-escapes, and with the Unicode space characters PowerShell separates words on read as
-spaces (see _ps_unescape, _PS_SPACES and _powershell_segments). Limits: a $( )
+escapes, with the Unicode space characters PowerShell separates words on read as
+spaces, and with a ( ) / $( ) / @( ) group around one word and every { } read away, so
+`git reset ("--hard")` and `& {...}` are judged as the words they become (see
+_ps_unescape, _PS_SPACES, _ps_ungroup and _powershell_segments). Limits: a $( )
 subexpression holding a nested "..." string is scanned as if the inner quote closed
 the outer string (the context-free reading still decodes every escape in it); --%
 (stop-parsing) is not modelled, so the text after it is judged decoded as well as
@@ -98,6 +105,7 @@ line starts with one is blocked the same way.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -164,7 +172,29 @@ _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish"}
 _SQL_RUNNERS = {"psql", "mysql", "mariadb", "mysqlsh", "sqlite3", "sqlite", "sqlcmd",
                 "mongo", "mongosh", "cqlsh", "clickhouse-client", "cockroach", "duckdb"}
 _GIT_OPTS_WITH_ARG = {"-c", "-C", "--git-dir", "--work-tree", "--namespace",
-                      "--exec-path", "--super-prefix"}
+                      "--exec-path", "--super-prefix", "--config-env", "--attr-source"}
+# A remote's push refspec or mirror switch set for one command (`git -c KEY=VALUE push`).
+_GIT_REMOTE_CFG_RE = re.compile(r"^remote\..+\.(push|mirror)$")
+# Remote refs whose deletion (`git push --delete main`, `git push origin :main`) is blocked.
+# Best effort: the matcher cannot know a repo's default branch, so other names stay allowed.
+_PROTECTED_REFS = {"main", "master", "head"}
+
+# Windows runners that take a command line or a command (see _runner_rests).
+_PS_RUNNERS = {"pwsh", "powershell"}
+# Characters pwsh's command-line parser accepts as a switch prefix: -, /, and the dashes.
+_PS_SWITCH_CHARS = "-/–—―"
+# pwsh / powershell options that take a value, by full name; a switch matches by prefix.
+_PS_VALUE_OPTS = ("executionpolicy", "ep", "windowstyle", "inputformat", "outputformat",
+                  "configurationname", "configurationfile", "custompipename", "version",
+                  "psconsolefile", "workingdirectory", "wd", "settingsfile")
+# What may follow a $ word that starts a PowerShell expression statement.
+_PS_EXPR_NEXT = {"=", "+=", "-=", "*=", "/=", "%=", "??=", "-eq", "-ne", "-gt", "-lt", "-ge",
+                 "-le", "-like", "-notlike", "-match", "-notmatch", "-replace", "-contains",
+                 "-notcontains", "-in", "-notin", "-and", "-or", "-is", "-isnot", "-as",
+                 "-split", "-join"}
+# wsl options that take a value (`wsl -d Ubuntu -u root -- cmd`).
+_WSL_VALUE_OPTS = {"-d", "--distribution", "--distribution-id", "-u", "--user", "--cd",
+                   "--shell-type"}
 
 # Long options are matched by PREFIX: git accepts unambiguous abbreviations, so a
 # truncated --force-w or --har is the same request as the full flag (review S2).
@@ -374,6 +404,11 @@ def _effective_cmd_index(toks, consume: bool = True):
         base = _cmd_word(t)
         if re.match(r"^[a-z_][a-z0-9_]*=", t):      # VAR=val environment prefix
             i += 1; continue
+        # `. git push`: PowerShell's dot-source call operator (bash's `.` is source) runs
+        # the next word as the command. Not a _WRAPPERS entry, so _shell_index still sees
+        # `. /dev/stdin`. A `$` word after it stays behind the `.` (`. $PROFILE`).
+        if t == "." and i + 1 < n and "$" not in toks[i + 1]:
+            i += 1; continue
         if base in _WRAPPERS:
             saw_xargs = saw_xargs or base == "xargs"
             i = _skip_wrapper_args(base, toks, i + 1, consume); continue
@@ -389,15 +424,96 @@ def _effective_cmd_index(toks, consume: bool = True):
 
 
 def _git_subcommand(args):
+    """(subcommand, its args, the global options before it) of git's args, taking the
+    values of _GIT_OPTS_WITH_ARG. The first candidate of _git_candidates."""
     i = 0
     while i < len(args):
         a = args[i]
         if not a.startswith("-"):
-            return a, args[i + 1:]
+            return a, args[i + 1:], args[:i]
         if a in _GIT_OPTS_WITH_ARG:
             i += 2; continue
         i += 1
-    return None, []
+    return None, [], args
+
+
+def _git_candidates(args):
+    """Every (subcommand, its args, global options) git may be running: the table's
+    reading, then each word that could be the subcommand under any reading of which
+    global options take a value -- every word directly after an option, up to and
+    including the first word that does not follow one (no option can have taken that
+    as its value). So an option missing from _GIT_OPTS_WITH_ARG, or listed there
+    wrongly, costs a false positive, never a miss. Linear in the words."""
+    out = [_git_subcommand(args)]
+    after_opt = False
+    for i, a in enumerate(args):
+        if a.startswith("-"):
+            after_opt = "=" not in a                 # --opt=value takes no next word
+            continue
+        out.append((a, args[i + 1:], args[:i]))
+        if not after_opt:
+            break
+        after_opt = False
+    return out
+
+
+def _git_push_config_reasons(globals_):
+    """Reasons from git's global options that reconfigure a push for this command:
+    `-c remote.<name>.push=+<refspec>` (a forced refspec), `-c remote.<name>.mirror`
+    (any value; with no `=` git reads it as true), and `--config-env` naming either key,
+    whose value comes from an environment variable not in the payload."""
+    out = []
+    for j, a in enumerate(globals_):
+        nxt = globals_[j + 1] if j + 1 < len(globals_) else None
+        if a == "-c" and nxt is not None:
+            key, _eq, val = nxt.partition("=")
+            m = _GIT_REMOTE_CFG_RE.match(key)
+            if m and m.group(1) == "mirror":
+                out.append("mirror git push (force-updates and deletes remote refs) "
+                           "is forbidden")
+            elif m and val.startswith("+"):
+                out.append("forced git push via +refspec is forbidden")
+        env = nxt if a == "--config-env" else (
+            a.split("=", 1)[1] if a.startswith("--config-env=") else None)
+        if env is not None and _GIT_REMOTE_CFG_RE.match(env.partition("=")[0]):
+            out.append("git push reconfigured from an environment variable "
+                       "(remote push/mirror setting, uninspectable)")
+    return out
+
+
+def _ref_name(ref: str) -> str:
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+
+
+def _deletes_protected_ref(args) -> bool:
+    """`git push --delete <remote> main`, `git push -d …`, or a `:main` refspec. Only
+    the refs after the remote count (a remote may be called main); `HEAD:main` pushes."""
+    deleting = any(_matches_long(a, ("--delete",))
+                   or (a.startswith("-") and not a.startswith("--") and "d" in a[1:].lower())
+                   for a in args)
+    refs = [a for a in args if not a.startswith("-")][1:]
+    if deleting and any(_ref_name(r) in _PROTECTED_REFS for r in refs):
+        return True
+    return any(r.startswith(":") and _ref_name(r[1:]) in _PROTECTED_REFS for r in refs)
+
+
+def _git_rules(sub, sargs, globals_):
+    out = []
+    if sub == "push":
+        if _has_force_flag(sargs):
+            out.append("forced git push is forbidden")
+        elif _has_force_refspec(sargs):
+            out.append("forced git push via +refspec is forbidden")
+        if any(_matches_long(a, ("--mirror",)) for a in sargs):
+            out.append("mirror git push (force-updates and deletes remote refs) is forbidden")
+        if any(_matches_long(a, ("--prune",)) for a in sargs):
+            out.append("git push --prune (deletes remote refs) is forbidden")
+        if _deletes_protected_ref(sargs):
+            out.append("deleting a main/master/HEAD remote ref is forbidden")
+        out += _git_push_config_reasons(globals_)
+    elif sub == "reset" and any(_matches_long(a, _RESET_HARD_LONGS) for a in sargs):
+        out.append("hard git reset is forbidden")
+    return out
 
 
 def _subcommand(args, value_opts):
@@ -477,6 +593,8 @@ def _shell_reads_stdin(toks) -> bool:
             if rest and rest[0] in _STDIN_PATHS:
                 return True
             continue
+        if _runner_reads_stdin(base, rest):
+            return True
         if base not in _SHELLS:
             continue
         if any(len(t) > 1 and t[0] == "-" and t[1] != "-" and "s" in t[1:] for t in rest):
@@ -574,8 +692,16 @@ def _rules_at(toks, idx, saw_xargs):
     # in ARGUMENT position stays allowed -- see the "known limits" fixtures.)
     # A quoted substitution ("$(rm -rf /)") is one word now, and its basename can
     # hide the $, so also test the whole token for a leading substitution.
+    # In a script handed to pwsh/powershell (ps_script, see _runner_scripts) a $ word at
+    # statement start is an expression when it stands alone (`$PSVersionTable`,
+    # `$x="y"`) or an assignment or operator follows it (`$x = 1`, `$a -eq 2`).
+    # PowerShell refuses `$x <word>`, so that shape only runs after an OUTER shell
+    # expanded it (`pwsh -c "$CMD -rf /"` from bash): it stays uninspectable.
     if "$" in cmd or toks[idx].startswith(("$(", "`")):
-        out.append("uninspectable command word (shell expansion in command position)")
+        nxt = toks[idx + 1].lower() if idx + 1 < len(toks) else None
+        if not (getattr(toks, "ps_script", False)
+                and (nxt is None or nxt in _PS_EXPR_NEXT)):
+            out.append("uninspectable command word (shell expansion in command position)")
         return out
 
     if cmd == "rm":
@@ -600,13 +726,13 @@ def _rules_at(toks, idx, saw_xargs):
                        "(unknown scope)")
 
     elif cmd == "git":
-        sub, sargs = _git_subcommand(args)
-        if sub == "push" and _has_force_flag(sargs):
-            out.append("forced git push is forbidden")
-        elif sub == "push" and _has_force_refspec(sargs):
-            out.append("forced git push via +refspec is forbidden")
-        elif sub == "reset" and any(_matches_long(a, _RESET_HARD_LONGS) for a in sargs):
-            out.append("hard git reset is forbidden")
+        for cand in _git_candidates(args):
+            for r in _git_rules(*cand):
+                if r not in out:
+                    out.append(r)
+
+    elif cmd in _PS_RUNNERS and _ps_decisive_switch(args)[0] == "encoded":
+        out.append("PowerShell -EncodedCommand (uninspectable)")
 
     elif cmd == "find":
         # find deletes without ever naming a delete command word: -delete, or
@@ -730,6 +856,208 @@ def _split_inline_script(toks):
                 return toks, None                  # `sh script.sh`: not an inline -c
             return keep(toks[:j] + toks[j + 1:]), toks[j]
     return toks, None
+
+
+def _ps_switch_name(tok: str):
+    """The lowercased name of a pwsh/powershell switch (`-Command` -> command; `/c`,
+    `--command` and an en-dash `–c` too), up to a `:` value; None if tok is not one."""
+    if len(tok) < 2 or tok[0] not in _PS_SWITCH_CHARS:
+        return None
+    name = tok[2:] if tok[1] in _PS_SWITCH_CHARS else tok[1:]
+    name = name.split(":", 1)[0].lower()
+    return name or None
+
+
+def _ps_switch(tok: str):
+    """"command", "encoded", "file" or "other" for a pwsh/powershell switch; None if tok is
+    not a switch. Names match by prefix, as pwsh matches them (`-c`, `-com`, `-cwa`)."""
+    name = _ps_switch_name(tok)
+    if name is None:
+        return None
+    if "commandwithargs".startswith(name) or name == "cwa":
+        return "command"
+    if name in ("e", "ec", "ea") or (name.startswith("en") and (
+            "encodedcommand".startswith(name) or "encodedarguments".startswith(name))):
+        return "encoded"
+    if "file".startswith(name):
+        return "file"
+    return "other"
+
+
+def _ps_decisive_switch(args):
+    """(kind, index) of the first -Command / -EncodedCommand / -File switch in a
+    pwsh/powershell argument list, stepping over other switches and their values; else
+    (None, -1)."""
+    for j, a in enumerate(args):
+        kind = _ps_switch(a)
+        if kind in ("command", "encoded", "file"):
+            return kind, j
+    return None, -1
+
+
+def _ps_positionals(args, consume: bool):
+    """Windows PowerShell 5.1 runs its first positional word as a command: the words from
+    there on. consume: a switch named in _PS_VALUE_OPTS takes the next word as its value
+    (the other reading takes no value, so a table gap cannot hide the command)."""
+    j = 0
+    while j < len(args):
+        a = args[j]
+        name = _ps_switch_name(a)
+        if name is None:
+            return args[j:]
+        takes = consume and ":" not in a and any(v.startswith(name) for v in _PS_VALUE_OPTS)
+        j += 2 if takes else 1
+    return []
+
+
+def _cmd_run_switch(args):
+    """(index, glued text) of cmd's /c or /k switch, which may share a word with other
+    switches or with the command (`/d/c`, `/cgit`, `//c` from Git Bash); else None."""
+    for j, a in enumerate(args):
+        if not a.startswith("/"):
+            continue
+        start = 0
+        for part in a.split("/"):
+            if part[:1] in ("c", "k"):
+                return j, a[start + 1:]
+            start += len(part) + 1
+    return None
+
+
+def _wsl_rests(args):
+    """The command words wsl runs: after -e/--exec (no shell) or `--`, else from its first
+    non-option word (handed to the default shell). Read with and without the value of
+    _WSL_VALUE_OPTS consumed; a leading `~` (wsl's start-in-home shorthand) is also
+    stepped over."""
+    rests = []
+    for consume in (True, False):
+        j, rest = 0, []
+        while j < len(args):
+            a = args[j]
+            if a in ("-e", "--exec", "--"):
+                rest = args[j + 1:]
+                break
+            if a.startswith("-"):
+                j += 2 if consume and a in _WSL_VALUE_OPTS else 1
+                continue
+            rest = args[j:]
+            break
+        rests.append(rest)
+        if rest[:1] == ["~"]:
+            rests.append(rest[1:])
+    return rests
+
+
+def _runner_rests(toks):
+    """(kind, words) for each command a Windows runner at the command position would run:
+    `cmd /c|/k ...`, `pwsh|powershell -Command ...` (and 5.1's positional command), and
+    `wsl ...`. Both readings of wrapper options are tried. Empty commands are dropped."""
+    out = []
+    for consume in (True, False):
+        i = _shell_index(toks, consume)
+        if i is None:
+            continue
+        base, args = _cmd_word(toks[i]), list(toks[i + 1:])
+        if base == "cmd":
+            sw = _cmd_run_switch(args)
+            if sw is not None:
+                j, glued = sw
+                out.append(("cmd", ([glued] if glued else []) + args[j + 1:]))
+        elif base in _PS_RUNNERS:
+            kind, j = _ps_decisive_switch(args)
+            if kind == "command":
+                out.append(("ps", args[j + 1:]))
+            # 5.1's positional command too, whatever switch follows it: in
+            # `powershell git push -f` the -f is git's, not -File.
+            if base == "powershell":
+                out += [("ps", _ps_positionals(args, c)) for c in (True, False)]
+        elif base == "wsl":
+            out += [("wsl", r) for r in _wsl_rests(args)]
+    seen, uniq = set(), []
+    for kind, words in out:
+        if words and (kind, tuple(words)) not in seen:
+            seen.add((kind, tuple(words)))
+            uniq.append((kind, words))
+    return uniq
+
+
+def _runner_scripts(toks):
+    """(script text, ps) for every command a Windows runner in the segment would run.
+
+    A runner's words are joined with spaces, as a runner that hands a command LINE to a
+    parser sees them (cmd /c, pwsh -Command, wsl's default shell): `cmd /c "git reset
+    --hard"` is `git reset --hard`. (A quoted script for a shell later in the words,
+    `wsl -e bash -c '...'`, is still found whole by _split_inline_script.) cmd's text is
+    also read with its ^ escapes removed, and a pwsh/powershell script in its grouping
+    reading (_ps_ungroup). ps marks a PowerShell script (see ps_script in _rules_at).
+    """
+    out = []
+    for kind, words in _runner_rests(toks):
+        texts = [" ".join(words)]
+        if kind == "cmd":
+            texts.append(texts[0].replace("^", ""))
+        if kind == "ps":
+            texts += [_ps_ungroup(t) for t in texts]
+        out += [(t, kind == "ps") for t in texts]
+    return list(dict.fromkeys(out))
+
+
+def _lenient_runner(toks):
+    """In a quote-blind segment, the command words of each Windows runner, one segment
+    each (the counterpart of _lenient_inline): `echo "$(wsl rm -rf ~)"` is judged as
+    `rm -rf ~`."""
+    out = []
+    for kind, words in _runner_rests(toks):
+        variants = [words]
+        if kind == "cmd":
+            variants.append([w.replace("^", "") for w in words])
+        for v in variants:
+            seg = _new_seg(v, getattr(toks, "piped", False))
+            seg.ps_script = kind == "ps"
+            out.append(seg)
+    return out
+
+
+def _runner_reads_stdin(base: str, args) -> bool:
+    """A Windows runner taking its commands from stdin: cmd with no /c or /k; pwsh or
+    powershell with `-Command -`, `-File -`, or no command, file or positional word; wsl
+    with nothing but value options (its default shell then reads stdin)."""
+    if base == "cmd":
+        return _cmd_run_switch(args) is None
+    if base in _PS_RUNNERS:
+        kind, j = _ps_decisive_switch(args)
+        if kind in ("command", "file"):
+            return args[j + 1:j + 2] in ([], ["-"])
+        return kind is None and any(not _ps_positionals(args, c) for c in (True, False))
+    if base == "wsl":
+        j = 0
+        while j < len(args):
+            if args[j] not in _WSL_VALUE_OPTS:
+                return False
+            j += 2
+        return True
+    return False
+
+
+# PowerShell grouping: a ( ) / $( ) / @( ) around ONE word (a quoted string or a bare
+# word), and { } outside a ${name} variable. Both linear: no nested quantifier.
+_PS_GROUP_RE = re.compile(r"""[$@]?\([ \t]*('[^']*'|"[^"]*"|[^\s()'"]+)[ \t]*\)""")
+_PS_BRACE_RE = re.compile(r"(\$\{[^{}]*\})|[{}]")
+
+
+def _ps_ungroup(text: str) -> str:
+    """PowerShell's grouping read away: `git reset ("--hard")`, `$("--force")`, `& ('git')`
+    and `& {git reset --hard}` pass the grouped value on as the word itself. Only a group
+    around a single word is opened (nested up to 4 deep), so `(Join-Path $HOME x)` stays a
+    group; braces become spaces. A paren or brace inside a quoted string becomes a space
+    inside the same word, and no quote character changes, so quoting is unaffected."""
+    out = _PS_BRACE_RE.sub(lambda m: m.group(1) or " ", text)
+    for _ in range(4):
+        new = _PS_GROUP_RE.sub(lambda m: " " + m.group(1) + " ", out)
+        if new == out:
+            break
+        out = new
+    return out
 
 
 def _scan_line(line: str, state: str, ps_herestrings: bool = False):
@@ -963,10 +1291,12 @@ class _Seg(list):
 
     piped: something other than a terminal or a named file feeds its stdin (a | or
     |&, or a process substitution). redirs: the redirect targets dropped from the
-    tokens, kept so extraPatterns can still match them.
+    tokens, kept so extraPatterns can still match them. ps_script: the segment is part of
+    a script handed to pwsh/powershell (see _runner_scripts).
     """
     piped = False
     redirs = ()
+    ps_script = False
 
 
 def _new_seg(toks, piped, redirs=()):
@@ -1096,7 +1426,7 @@ _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
 
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
               piped: bool = False, lenient_on_error: bool = False,
-              windows_paths: bool = True):
+              windows_paths: bool = True, ps_script: bool = False):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -1104,16 +1434,19 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     operator tokens end a segment. A logical line that spans several physical lines
     is ALSO inspected line by line, leniently (see _lenient_words). Text holding a
     drive-letter or UNC path is also read without the path rewrite (windows_paths
-    False; see the end of this function).
+    False; see the end of this function). ps_script: raw is a script a Windows
+    runner hands to pwsh/powershell; its own segments are marked so (scripts nested
+    inside it are not).
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
-                  lenient_on_error=lenient_on_error, windows_paths=windows_paths)
+                  lenient_on_error=lenient_on_error, windows_paths=windows_paths,
+                  ps_script=ps_script)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
-    segments, lenient = [], []
+    segments, lenient, lenient_runs = [], [], []
     slashed = _slashify_windows_paths(raw) if windows_paths else raw
     text = _expand_ifs(slashed)
     if shell == "powershell" and ps_slashes:
@@ -1143,6 +1476,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                 for toks in _words_to_segments(_lenient_words(line)):
                     lenient.append(toks)
                     lenient.extend(_lenient_inline(toks))
+                    lenient_runs.extend(_lenient_runner(toks))
                 # The quote-blind pass resolves backslashes and splits on spaces,
                 # which shreds a quoted Windows path ("C:\Program Files\Git\bin\
                 # bash.exe" -c ...). Also read the line on its own with quotes kept
@@ -1155,9 +1489,13 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                 except ValueError:
                     pass
     if piped:                      # this is the inline script of a piped segment
-        for seg in segments + lenient:
+        for seg in segments + lenient + lenient_runs:
             if isinstance(seg, _Seg):
                 seg.piped = True
+    if ps_script:                  # not lenient_runs: a runner's command is not PowerShell
+        for seg in segments + lenient:
+            if isinstance(seg, _Seg):
+                seg.ps_script = True
     # Re-tokenize inline `sh -c` scripts. Depth-bounded so a nested
     # `sh -c 'sh -c "..."'` chain cannot recurse without limit.
     if _depth < 3:
@@ -1171,12 +1509,19 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                 # the script, so the script's segments start out piped.
                 expanded.extend(_segments(inline, _depth + 1,
                                           piped=getattr(toks, "piped", False)))
+            # A Windows runner's command (`cmd /c`, `pwsh -Command`, `wsl`), judged in
+            # addition to the inline split above, from the segment's own tokens. Lenient:
+            # a runner's command line re-split on spaces can leave an odd quote
+            # (`cmd /c git commit -m "don't"`); such a line is judged piecewise.
+            for script, ps in _runner_scripts(toks):
+                expanded.extend(_runner_segments(script, _depth + 1,
+                                                 getattr(toks, "piped", False), ps))
         segments = expanded
     # Lenient segments skip the inline split: with the quotes deleted, the script
     # of `bash -c "rm -rf ~"` is already bare tokens. Splitting would take only its
     # first word as the script and strand the arguments; _lenient_inline judges
-    # every word after the -c instead.
-    segments += lenient
+    # every word after the -c instead, and _lenient_runner a Windows runner's words.
+    segments += lenient + lenient_runs
     # The drive-letter/UNC rewrite above reads `C:\dir\x` as a path; a POSIX shell
     # reads those backslashes as it reads any other. So when the rewrite changed the
     # text, ALSO judge the text as the shell itself reads it and add those segments:
@@ -1192,8 +1537,20 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     # work doubles per nesting level of inline scripts.
     if slashed != raw and not (shell == "powershell" and ps_slashes):
         segments += _segments(raw, _depth, shell=shell, ps_slashes=ps_slashes,
-                              piped=piped, lenient_on_error=True, windows_paths=False)
+                              piped=piped, lenient_on_error=True, windows_paths=False,
+                              ps_script=ps_script)
     return segments
+
+
+@functools.lru_cache(maxsize=4096)
+def _runner_segments(script: str, depth: int, piped: bool, ps: bool):
+    """_segments() of a Windows runner's script (see _runner_scripts), memoized: the
+    PowerShell readings and nested runners hand the same script text down many times
+    (a 4 KB payload of nested runners otherwise costs ~15x). The arguments are all the
+    result depends on, and no segment is changed after the call that made it returns,
+    so sharing the result is safe. evaluate() clears the cache on entry."""
+    return tuple(_segments(script, depth, piped=piped, lenient_on_error=True,
+                           ps_script=ps))
 
 
 def _lenient_inline(toks):
@@ -1514,10 +1871,16 @@ def _ps_unescape_everywhere(text: str, legacy: bool = False) -> str:
 def _powershell_segments(raw: str):
     """Every segment evaluate() judges for a PowerShell payload: the readings below of
     the raw text and, when it holds one of _PS_SPACES, the same readings of the text
-    with each of them a space, as PowerShell reads them outside a string. The raw
-    readings stay, so this only adds segments. Raises as _segments() does."""
+    with each of them a space, as PowerShell reads them outside a string; and the same
+    again with PowerShell's grouping read away (_ps_ungroup: `git reset ("--hard")`,
+    `& ('git') ...`, `& {...}`), so a grouped value is judged as the argument or command
+    word it becomes. The raw readings stay, so this only adds segments. Raises as
+    _segments() does."""
     segments = []
-    for text in dict.fromkeys((raw, raw.translate(_PS_AS_SPACE))):
+    texts = [raw, raw.translate(_PS_AS_SPACE)]
+    if "(" in raw or "{" in raw:
+        texts += [_ps_ungroup(t) for t in texts]
+    for text in dict.fromkeys(texts):
         segments += _segments(text, shell="powershell")
         # PowerShell reads `\` as a path separator, but a script it hands to bash
         # (`bash -c "git push \` + newline + `--force"`) reads it as an escape or a
@@ -1563,6 +1926,7 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     if not raw.strip():
         return []
 
+    _runner_segments.cache_clear()
     try:
         segments = (_powershell_segments(raw) if shell == "powershell"
                     else _segments(raw, shell=shell))
@@ -1573,6 +1937,18 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
         # must not be waved through. Fail closed, like the hook's other
         # "CONTROL COULD NOT RUN" paths.
         return [f"uninspectable command (unbalanced quoting: {exc})"]
+
+    # The readings overlap heavily; judge each distinct segment once. The key holds
+    # everything a rule reads, ps_script included, so an exempt copy of a segment
+    # never stands in for one that is not.
+    seen, unique = set(), []
+    for toks in segments:
+        key = (tuple(toks), getattr(toks, "piped", False),
+               tuple(getattr(toks, "redirs", ())), getattr(toks, "ps_script", False))
+        if key not in seen:
+            seen.add(key)
+            unique.append(toks)
+    segments = unique
 
     reasons = []
     for toks in segments:
