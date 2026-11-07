@@ -1149,6 +1149,14 @@ STRUCT_CASES = [
         _seg(["$a", "=", "$b", "+=", "git", "reset", "--hard"], ps_script=True))), True),
     ("ps_script: a 4 KB assignment chain is judged without recursion",
      lambda: m.evaluate("pwsh -c '" + "$a = " * 800 + "x'"), []),
+    ("ps_script: an assignment chain behind skipped words is judged without recursion",
+     lambda: [m.evaluate("pwsh -c '$a = " + link * n + "x'") for link, n in
+              (("- $b = ", 580), ("- $ = ", 670), ("sh $b = ", 500), ("a= $b = ", 500))],
+     [[], [], [], []]),
+    ("ps_script: the same chain in a PowerShell payload", lambda: m.evaluate(
+        "pwsh -c '$a = " + "- $b = " * 580 + "x'", shell="powershell"), []),
+    ("ps_script: a command behind a skipped word after =", lambda: bool(m.evaluate(
+        "pwsh -c '$a = - $b = git reset --hard'")), True),
     ("ps_script: an assignment of a value is not", lambda: m._reasons_for(
         _seg(["$x", "=", "git", "status"], ps_script=True)), []),
     ("ps_script: a destructuring target", lambda: m._reasons_for(

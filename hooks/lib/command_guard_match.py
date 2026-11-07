@@ -678,27 +678,42 @@ def _fetch_targets(cmd: str, args):
 
 
 def _reasons_for(toks):
-    out = []
-    # `echo "rm -rf /" | sh`: the shell's script arrives on stdin, so it is not in
-    # the payload to inspect. Fail closed (the curl | sh shape, without the curl).
-    if getattr(toks, "piped", False) and _shell_reads_stdin(toks):
-        out.append("shell reading its commands from a pipe (uninspectable)")
-    # Judge the command word under both readings of wrapper options (see
-    # _WRAPPER_VALUE_SHORTS): a rule that fires on either one blocks.
-    seen = set()
-    for consume in (True, False):
-        idx, saw_xargs = _effective_cmd_index(toks, consume)
-        if idx is None or idx in seen:
-            continue
-        seen.add(idx)
-        for r in _rules_at(toks, idx, saw_xargs):
+    """The block reasons for one segment. A PowerShell assignment in it (`$out = cmd`)
+    hands back the command after the `=` (see _rules_at), judged here in turn: a
+    worklist, not a recursion, so a long chain of assignments cannot exhaust the stack.
+    Each remainder is a strict suffix of the segment, and a suffix is judged once, so
+    the loop ends."""
+    out, work, queued = [], [toks], {len(toks)}
+    while work:
+        seg = work.pop()
+        # `echo "rm -rf /" | sh`: the shell's script arrives on stdin, so it is not in
+        # the payload to inspect. Fail closed (the curl | sh shape, without the curl).
+        if getattr(seg, "piped", False) and _shell_reads_stdin(seg):
+            r = "shell reading its commands from a pipe (uninspectable)"
             if r not in out:
                 out.append(r)
+        # Judge the command word under both readings of wrapper options (see
+        # _WRAPPER_VALUE_SHORTS): a rule that fires on either one blocks.
+        seen, rest = set(), []
+        for consume in (True, False):
+            idx, saw_xargs = _effective_cmd_index(seg, consume)
+            if idx is None or idx in seen:
+                continue
+            seen.add(idx)
+            for r in _rules_at(seg, idx, saw_xargs, rest):
+                if r not in out:
+                    out.append(r)
+        for r in rest:
+            if len(r) not in queued:
+                queued.add(len(r))
+                work.append(r)
     return out
 
 
-def _rules_at(toks, idx, saw_xargs):
-    """The block reasons for the segment, taking toks[idx] as its command word."""
+def _rules_at(toks, idx, saw_xargs, rest=None):
+    """The block reasons for the segment, taking toks[idx] as its command word. A
+    PowerShell assignment's right-hand side is appended to rest, for the caller to
+    judge (see _reasons_for); with rest None it is not judged."""
     out = []
     seg = " ".join(toks)
     cmd = _cmd_word(toks[idx])
@@ -721,18 +736,12 @@ def _rules_at(toks, idx, saw_xargs):
         if not (getattr(toks, "ps_script", False)
                 and (nxt is None or nxt in _PS_EXPR_NEXT or toks[idx].endswith(","))):
             out.append("uninspectable command word (shell expansion in command position)")
-        elif nxt in _PS_ASSIGN:
-            # `$a = $b = cmd`: step over the chained targets, then judge the command
-            # once. A loop, so a long chain cannot exhaust the stack: what is left
-            # never starts another assignment, so judging it does not come back here.
-            j = idx + 2
-            while (j + 1 < len(toks) and "$" in toks[j]
-                   and toks[j + 1].lower() in _PS_ASSIGN):
-                j += 2
-            if j < len(toks):
-                rhs = _new_seg(toks[j:], getattr(toks, "piped", False))
-                rhs.ps_script = True
-                out += [r for r in _reasons_for(rhs) if r not in out]
+        elif nxt in _PS_ASSIGN and idx + 2 < len(toks) and rest is not None:
+            # `$out = cmd`: the caller judges the command after the `=` (a chained
+            # `$a = $b = cmd` comes back here for `$b`, one link per worklist item).
+            rhs = _new_seg(toks[idx + 2:], getattr(toks, "piped", False))
+            rhs.ps_script = True
+            rest.append(rhs)
         return out
 
     if cmd == "rm":
