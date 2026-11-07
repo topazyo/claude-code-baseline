@@ -1797,9 +1797,13 @@ else no_link "config link into .claude/hooks"; fi
 # ...however the chain gets there: a middle hop inside the tree, and `..` through a
 # directory link (judged where the link really points, not lexically).
 R="$(m9repo cfghop)"; mkdir -p "$R/.claude/hooks/baseline"; printf '{}\n' > "$TMP/m9-hop-end.json"
-if mklink_file "$TMP/m9-hop-end.json" "$R/.claude/hooks/baseline/l" && mklink_file "$R/.claude/hooks/baseline/l" "$R/.claude/baseline.config.json"; then
+# The case needs the config link to name the hop itself. MSYS's native symlinks store a
+# Windows path, and making one resolves links in its target, so on Windows the config
+# can come out pointing at the end of the chain — a different (and legitimate) shape.
+if mklink_file "$TMP/m9-hop-end.json" "$R/.claude/hooks/baseline/l" && mklink_file "$R/.claude/hooks/baseline/l" "$R/.claude/baseline.config.json" \
+   && case "$(readlink "$R/.claude/baseline.config.json")" in */hooks/baseline/l) true ;; *) false ;; esac; then
   inst "$R"; ok_if "a config link whose chain passes through .claude/hooks/baseline/ is refused (rc=$IRC)" '[ "$IRC" = 2 ] && printf "%s" "$IOUT" | grep -qF "is a link into .claude/hooks/baseline/" && [ -L "$R/.claude/hooks/baseline/l" ] && [ "$(cat "$TMP/m9-hop-end.json")" = "{}" ]'
-else no_link "config link through a hop in .claude/hooks"; fi
+else no_link "config link through a hop in .claude/hooks (no link naming the hop could be made)"; fi
 # Windows resolves `..` in a path lexically, whatever d links to, so these two shapes
 # exist only where `..` follows the link: Linux and macOS.
 case "$(uname -s)" in
