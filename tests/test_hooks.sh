@@ -628,6 +628,13 @@ run_m "repo warn with no managed config still blocks" guardrails/command-guard.s
 resetcfg; setcfg "$REPOSET; c['pad']={str(i): i for i in range(5000)}"
 probe_is "managed tree, oversized repo config (per-call readers)" "$MH" "$SAFE"
 run_m "managed command-guard, oversized repo config, blocks" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git push --force origin main')"
+# ...and the per-call readers honour the managed config, and fail closed on a bad one.
+printf '{"enforcement":"warn","modules":{"runTests":{"enabled":true}}}\n' > "$MH/managed.config.json"
+probe_is "per-call readers read managed.config.json" "$MH" "posture=warn fc=true cg=on af=off rt=on"
+printf '[]\n' > "$MH/managed.config.json"
+run_m "per-call readers, unreadable managed config -> 2" guardrails/command-guard.sh 2 <<< "$(bash_payload 'git status')"
+err_has "per-call readers name the managed config" "the managed config managed.config.json"
+rm -f "$MH/managed.config.json"
 # A repo key that differs from a managed key only by a character the eval stripping
 # drops (NUL) must not come out as that key.
 resetcfg
@@ -639,7 +646,7 @@ mv "$WT/.claude/hooks/baseline" "$TMP/mprefix/installed.keep"
 ln -s "$MH" "$WT/.claude/hooks/baseline" 2>/dev/null
 if [ ! -L "$WT/.claude/hooks/baseline" ] && command -v cygpath >/dev/null 2>&1; then
   rm -rf "$WT/.claude/hooks/baseline"
-  cmd //c mklink /J "$(cygpath -w "$WT/.claude/hooks/baseline")" "$(cygpath -w "$MH")" >/dev/null 2>&1
+  MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$WT/.claude/hooks/baseline")" "$(cygpath -w "$MH")" >/dev/null 2>&1
 fi
 if [ -e "$WT/.claude/hooks/baseline/lib/common.sh" ]; then
   probe_is "a repo link to the managed tree leaves it managed" "$MH" "$SAFE"
@@ -671,7 +678,10 @@ OUT="$(printf '%s' "$(bash_payload 'git push --force origin main')" | _BCL_CFG_P
 resetcfg
 
 echo "== fix-tags: requireWhenEnv must be a variable name (M6) =="
-printf 'x = 1\n' > "$WT/ft.py"
+# A committed file with an untagged added line: the tag check WOULD fail it, so a gate
+# that passes is visible as rc 0 and a gate that is ignored as rc 2.
+printf 'x = 1  # FIX: T-1\n' > "$WT/ft.py"; git add ft.py; git commit -q -m "ft fixture" </dev/null
+printf 'x = 1  # FIX: T-1\ny = 2\n' > "$WT/ft.py"
 for v in 'NOT A NAME' 'arr[0]' '1x'; do
   setcfg "c['modules']['fixTags'].update(enabled=True, requireWhenEnv='$v')"
   run_out "requireWhenEnv='$v' -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/ft.py")"
@@ -681,10 +691,12 @@ done
 setcfg "c['modules']['fixTags'].update(enabled=True, requireWhenEnv='BCL_TEST_UNSET_GATE')"
 run_out "a valid, unset requireWhenEnv still gates the check off -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/ft.py")"
 err_lacks "a valid name is not reported" "requireWhenEnv must be"
+run_out "the same name, set: the tag check runs and fails the untagged line -> 2" dispatcher/post-write.sh 2 BCL_TEST_UNSET_GATE=1 <<< "$(write_payload "$WT/ft.py")"
+err_lacks "a set gate is not reported as invalid" "requireWhenEnv must be"
 resetcfg; setcfg "c['enforcement']='warn'; c['modules']['fixTags'].update(enabled=True, requireWhenEnv='arr[0]')"
 run_out "invalid requireWhenEnv under warn -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/ft.py")"
 notice_ok "invalid requireWhenEnv under warn is shown" PostToolUse '"requireWhenEnv must be an environment variable name" in m'
-resetcfg; rm -f "$WT/ft.py"
+resetcfg; git checkout -q -- ft.py
 
 echo "== common.sh load guard ignores the environment =="
 # The library's double-source guard must not be settable from outside. An inherited

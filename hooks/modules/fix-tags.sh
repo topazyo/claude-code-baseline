@@ -32,8 +32,7 @@ bcl_prime
 bcl_module_enabled fixTags || exit 0
 
 # Optional env gate. The value comes from the repo's config and is used as a variable
-# NAME (${!GATE_VAR}), so it must be one: bash evaluates anything else it is handed
-# there (an array subscript, say) as an expression. Empty means "no gate".
+# NAME (${!GATE_VAR}), so it must be one; anything else is refused. Empty means "no gate".
 GATE_VAR="$(bcl_cfg modules.fixTags.requireWhenEnv "")"
 GATE_VAR="${GATE_VAR%$'\r'}"   # the unprimed bcl_cfg fallback can keep Windows' CR
 # Explicit ASCII lists, not ranges: what a range matches depends on the locale.

@@ -250,8 +250,9 @@ machine, e.g. `/opt/claude-code-baseline/hooks` (POSIX) or
    { "enforcement": "warn" }
    ```
    Every other key still comes from the repo's `.claude/baseline.config.json`. Those
-   keys can only add checks: the inspect-only modules (`securityDefaults`, `fixTags`),
-   `commandGuard.extraPatterns`, and the rules file and tag settings. So the managed
+   keys add checks or run no repo code: the inspect-only modules (`securityDefaults`,
+   `fixTags`), `commandGuard.extraPatterns`, the rules file and tag settings, and
+   `autoStage` (which stages the edited file in the repo's git index). So the managed
    config sets no org-wide `extraPatterns` and cannot force `securityDefaults` on. A
    `managed.config.json` that exists but cannot be read (invalid JSON, not an object,
    or not readable by the user running Claude Code) makes the managed hooks refuse
@@ -263,9 +264,12 @@ machine, e.g. `/opt/claude-code-baseline/hooks` (POSIX) or
    deny rules cover `.claude/hooks/baseline` path text in the repo, not
    `<BASELINE_PREFIX>`. Whoever can write the prefix can replace the scripts, or drop in
    an `INSTALL_SCOPE` that makes them obey each repo again. Deploy the prefix as
-   root/administrator-owned and read-only to users. Add
-   `Bash(*<BASELINE_PREFIX>*)` and `PowerShell(*<BASELINE_PREFIX>*)` deny rules if you
-   want the agent's shell refused there too.
+   root/administrator-owned and read-only to users; that file-system permission is the
+   control. `Bash(*<BASELINE_PREFIX>*)` and `PowerShell(*<BASELINE_PREFIX>*)` deny rules
+   can be added as a second layer, but they match command text, so another spelling of
+   the same path (`/c/…` for `C:\…`, an 8.3 short name, a variable) gets past them. As
+   a recurring check, confirm from a non-administrator account that the prefix is not
+   writable (`test ! -w <BASELINE_PREFIX>`).
 
 > Repos that *also* ran `install.sh` will have their own per-repo command-guard in
 > addition; the duplicate run is harmless (both block the same things). For a single

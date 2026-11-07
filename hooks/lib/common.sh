@@ -91,7 +91,7 @@ _BCL_CFG_STATE=""       # ok | absent | malformed
 _BCL_CFG_ERROR=""       # why a malformed config could not be read (bcl_config_malformed)
 _BCL_CFG_BAD_FILE=""    # which one: repo | managed
 _BCL_CFG_MANAGED=""     # managed config path, set by _bcl_cfg_scope ("" = per-repo)
-_BCL_CFG_IS_MANAGED=0   # 1 when this hook tree is a managed deployment
+_BCL_CFG_IS_MANAGED=1   # 1 when this hook tree is a managed deployment (safe default until _bcl_cfg_scope)
 _BCL_CFG_KEYS=(); _BCL_CFG_VALS=()
 _BCL_PL_STATE=""        # none | empty | ok | bad
 _BCL_PL_LEN=-1          # length of the payload bcl_prime was given
@@ -203,7 +203,7 @@ _bcl_cfg_scope() {
 
 # Python shared by every config reader (the prime, bcl_cfg, bcl_config_malformed), so
 # the managed-key rule and the file reading cannot drift apart between them.
-IFS='' read -r -d '' _BCL_CFG_RULE_SRC <<'RULEPY' || true
+_BCL_CFG_RULE_SRC='
 import json, os
 
 
@@ -232,7 +232,7 @@ def bcl_read_cfg(path):
     if not isinstance(data, dict):
         return None, "the top level is not a JSON object"
     return data, ""
-RULEPY
+'
 
 # --- prime: ONE interpreter per hook process --------------------------------
 # Why this exists. Every helper here used to launch its own Python: bcl_cfg (per
@@ -603,7 +603,7 @@ _bcl_pl_lookup() {
 }
 
 # The per-call lookup script (bcl_cfg), run after _BCL_CFG_RULE_SRC.
-IFS='' read -r -d '' _BCL_CFG_GET_SRC <<'GETPY' || true
+_BCL_CFG_GET_SRC='
 import sys
 cfg, key = sys.argv[1], sys.argv[2]
 default = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -627,7 +627,7 @@ elif cur is None:
     print(default)
 else:
     print(cur)
-GETPY
+'
 
 # bcl_cfg <dotted.key> [default]
 # Echoes the config value at dotted.key, or [default] if absent/unreadable.
