@@ -581,8 +581,9 @@ bcl_posture() {
 # bcl_module_enabled <name>    -> 0 if modules.<name>.enabled == true
 bcl_module_enabled() { [[ "$(bcl_cfg "modules.$1.enabled" false)" == "true" ]]; }
 # bcl_guardrail_enabled <name> -> 0 unless guardrails.<name>.enabled is false (default
-# true). Only a literal false turns a default-on guardrail off: any other value, of any
-# type or case ("TRUE", 1, "", null), leaves it on, as bcl_failclosed reads failClosed.
+# true). Only JSON false (or the string "false", which renders the same) turns a
+# default-on guardrail off: any other value ("TRUE", "False", 1, 0, "", null) leaves it
+# on, as bcl_failclosed reads failClosed.
 bcl_guardrail_enabled() { [[ "$(bcl_cfg "guardrails.$1.enabled" true)" != "false" ]]; }
 # bcl_guardrail_opted_in <name> -> 0 ONLY if guardrails.<name>.enabled is LITERALLY
 # true in a readable baseline.config.json. Unlike bcl_guardrail_enabled it defaults
@@ -799,8 +800,8 @@ else:
 # The message every hook gives for a config bcl_config_malformed refused (it must have
 # just returned 0, so _BCL_CFG_ERROR holds the reason).
 bcl_config_malformed_text() {
-  printf '[%s] CONTROL COULD NOT RUN — .claude/baseline.config.json exists but cannot be read (%s), so this hook'"'"'s settings are unknown and it fails closed. A human must fix or delete that file; Claude cannot edit it.' \
-    "$1" "${_BCL_CFG_ERROR:-unreadable}"
+  local why="${_BCL_CFG_ERROR:-unreadable}"
+  printf '%s' "[$1] CONTROL COULD NOT RUN — .claude/baseline.config.json exists but cannot be read ($why), so this hook's settings are unknown and it fails closed. A human must fix or delete that file; Claude's edit tools are denied it."
 }
 
 # --- payload parsing --------------------------------------------------------

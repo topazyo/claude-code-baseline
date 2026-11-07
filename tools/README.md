@@ -24,13 +24,13 @@ For each repo it reports:
 | Column | Meaning |
 |--------|---------|
 | `installed` | Is `.claude/hooks/baseline/` present? (Has the baseline been adopted at all.) This says the hook *files* are on disk; whether `settings.json` runs them is the `settings` row below. |
-| `posture` | `enforcement` (`block`/`warn`), resolved via `common.sh`'s `bcl_posture`. |
+| `posture` | `enforcement` (`block`/`warn`), resolved via `common.sh`'s `bcl_posture`. `unknown` when `.claude/baseline.config.json` exists but cannot be read (`bcl_config_malformed`): the hooks then fail closed, so the defaults are not the repo's posture. The report prints the parse error, `failClosed` and `minClaudeCodeVersion` read `unknown` too, `guardrails` / `modules` read `unknown`, and `hookLaunchProblems` gains `baseline.config.json unreadable`. |
 | `failClosed` | The global fail-closed toggle. |
 | `version` | The repo's **installed** `.claude/hooks/baseline/VERSION` (the baseline revision its hooks came from). |
 | `drift` | `OK` (matches the source `baselineVersion`), `DRIFT` (on an older/different baseline), `no-version` (installed but pre-`VERSION` baseline), or `not-installed`. |
 | `minClaudeCodeVersion` + `ok` | The repo's pinned min Claude Code version, and whether it equals this source tree's canonical pin (a config-drift signal). |
-| `guardrails` / `modules` | Which are **enabled**, resolved via `common.sh`'s `bcl_guardrail_enabled` / `bcl_module_enabled` — the *same* readers the hooks use. |
-| `settings` (JSON `settingsEnvRisk`, `hookLaunchProblems`) | `risky env`: keys of `.claude/settings.json` / `.claude/settings.local.json` `env` that can run code before the baseline hooks, redirect them or switch them off (the installer's list, `lib/merge_settings.py`). `hook wiring`: baseline scripts the template wires that `settings.json` does not run exactly as `bash -p "<project>/.claude/hooks/baseline/<script>"` with the template's keys beside it (no `args`, a bash `shell`, not `async`, at least the template's `timeout`), including ones not wired at all; a guard a `PreToolUse` entry runs without `onFailure: block`, as config-guard reports (`<script> without onFailure block`); ones not wired under the template's event, in a group whose matcher covers the template's (match-all, or names joined by `|` that include the template's; a regex never counts), as a direct entry with no `if` (`<script> not under <event> [<matcher>]`, with no matcher for a template group without one); a hook entry in `settings.local.json` that names a baseline script in its command or args (`settings.local.json runs <script>`; the installer never writes one there); a file under the repo's `.claude/agents/` or `.claude/skills/` that names the baseline hook directory (`<path> names the baseline hook directory`, or `<path> unreadable`; scope-guard refuses writing one); plus a `disableAllHooks` in either file. A check that cannot run reports `check-failed`. This tool runs outside Claude Code, so the shell those env values reach does not start it. |
+| `guardrails` / `modules` | Which are **enabled**, resolved via `common.sh`'s `bcl_guardrail_enabled` (default on, for `commandGuard`), `bcl_guardrail_opted_in` (default off, for `autoFormat`, which runs repo code) and `bcl_module_enabled` — the *same* readers the hooks use. |
+| `settings` (JSON `settingsEnvRisk`, `hookLaunchProblems`) | `risky env`: keys of `.claude/settings.json` / `.claude/settings.local.json` `env` that can run code before the baseline hooks, redirect them or switch them off (the installer's list, `lib/merge_settings.py`). `hook wiring`: baseline scripts the template wires that `settings.json` does not run exactly as `bash -p "<project>/.claude/hooks/baseline/<script>"` with the template's keys beside it (no `args`, a bash `shell`, not `async`, at least the template's `timeout`), including ones not wired at all; a guard a `PreToolUse` entry runs without `onFailure: block`, as config-guard reports (`<script> without onFailure block`); ones not wired under the template's event, in a group whose matcher covers the template's (match-all, or names joined by `|` that include the template's; a regex never counts), as a direct entry with no `if` (`<script> not under <event> [<matcher>]`, with no matcher for a template group without one); a hook entry in `settings.local.json` that names a baseline script in its command or args (`settings.local.json runs <script>`; the installer never writes one there); a file under the repo's `.claude/agents/` or `.claude/skills/` that names the baseline hook directory (`<path> names the baseline hook directory`, or `<path> unreadable`; scope-guard refuses writing one); plus a `disableAllHooks` in either file, and `baseline.config.json unreadable` (see `posture`). A check that cannot run reports `check-failed`. This tool runs outside Claude Code, so the shell those env values reach does not start it. |
 
 Modes:
 
@@ -60,8 +60,9 @@ value.
 ### Single source of truth (why it sources `common.sh`)
 
 The script does **not** re-parse `baseline.config.json` itself. It sources
-`hooks/lib/common.sh` and calls `bcl_module_enabled` / `bcl_posture` /
-`bcl_guardrail_enabled` — the exact functions the hooks call. So if the config schema or
+`hooks/lib/common.sh` and calls `bcl_config_malformed` / `bcl_module_enabled` /
+`bcl_posture` / `bcl_guardrail_enabled` / `bcl_guardrail_opted_in` — the exact
+functions the hooks call. So if the config schema or
 the "enabled" logic ever changes, the report changes in lockstep and can never report a
 posture the hooks don't actually enforce. (A second, independent parser was rejected for
 exactly this reason.)

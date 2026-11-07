@@ -529,6 +529,8 @@ open(sys.argv[2],'wb').write(json.dumps(c).encode(sys.argv[3]))" "$WT/.claude/_p
   run_out "$codec config: git status -> 0" guardrails/command-guard.sh 0 <<< "$(bash_payload 'git status')"
   run_out "$codec config: scope-guard reads scopeGuard on" modules/scope-guard.sh 2 <<< "$(write_payload "$WT/src/other.py")"
   err_lacks "$codec config: scope-guard is not degraded" "CONTROL COULD NOT RUN"
+  printf 'src/in-scope.py\n' > "$WT/.claude/active-issue-scope.txt"
+  run_out "$codec config: scope-guard allows an in-scope path" modules/scope-guard.sh 0 <<< "$(write_payload "src/in-scope.py")"
   run_out "$codec config: dispatcher clean write -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/notes.txt")"
 done
 resetcfg

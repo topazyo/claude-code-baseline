@@ -57,7 +57,7 @@ time budget), the hook says so loudly and — under `block` — refuses the call
 rather than waving it through as clean. A `.claude/baseline.config.json` that
 exists but cannot be read (invalid JSON, or not a JSON object) is one of these:
 its own `enforcement` and `failClosed` are unknown, so every guard refuses every
-call it watches until a human fixes or deletes the file (Claude cannot edit it),
+call it watches until a human fixes or deletes the file (Claude's edit tools are denied it),
 and tracker-reminder reports it. A byte order mark or UTF-16 text is read normally.
 
 ### Guardrails

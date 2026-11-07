@@ -213,9 +213,9 @@ for repo in "${REPOS[@]}"; do
     # A config that exists but cannot be read makes the hooks fail closed, so its
     # defaults are not the repo's posture: report "unknown" and a finding instead.
     cfg_bad=""
-    if bcl_config_malformed; then cfg_bad="$_BCL_CFG_ERROR"; fi
+    if bcl_config_malformed; then cfg_bad="${_BCL_CFG_ERROR:-unreadable}"; fi
     if [[ -n "$cfg_bad" ]]; then
-      enf="unknown"; fc="unknown"
+      enf="unknown"; fc="unknown"; minver="unknown"
     else
       enf="$(bcl_posture)"
       fc="$(bcl_cfg failClosed true)"

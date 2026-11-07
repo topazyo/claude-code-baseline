@@ -328,9 +328,10 @@ except json.JSONDecodeError as exc:
 except Exception as exc:
     print(type(exc).__name__)
 else:
-    print("" if isinstance(data, dict) else "the top level is not a JSON object")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || echo "the check could not run")"
+    print("OK" if isinstance(data, dict) else "the top level is not a JSON object")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || true)"
   CFG_BAD="${CFG_BAD%$'\r'}"
-  if [[ -n "$CFG_BAD" ]]; then
+  [[ -n "$CFG_BAD" ]] || CFG_BAD="the check could not run"
+  if [[ "$CFG_BAD" != "OK" ]]; then
     echo "WARNING: the existing .claude/baseline.config.json cannot be read ($CFG_BAD)." >&2
     echo "         The baseline hooks fail closed until it is fixed or deleted." >&2
   fi
@@ -512,7 +513,7 @@ if [[ $ENABLE_SD -eq 1 ]]; then
   echo "› securityDefaults module"
   if [[ $CFG_CREATED -eq 0 ]]; then
     SD_ON="$("$PY" -I -S -X utf8 -c 'import json,sys
-c=json.load(open(sys.argv[1],encoding="utf-8"))
+c=json.loads(open(sys.argv[1],"rb").read())
 sys.stdout.write("1" if ((c.get("modules") or {}).get("securityDefaults") or {}).get("enabled") is True else "0")' "$CLAUDE_DIR/baseline.config.json" 2>/dev/null || echo 0)"
     if [[ "$SD_ON" == "1" ]]; then
       say "securityDefaults is already enabled in the existing .claude/baseline.config.json."
