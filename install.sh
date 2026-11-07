@@ -235,11 +235,103 @@ done
 # ignores case (Windows), so two spellings of one directory compare equal.
 real_dir() {
   local p
-  p="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  # cd -P: a plain cd drops `..` lexically, so link/.. would read as the link's parent
+  # rather than the parent of where the link really points.
+  p="$(cd -P "$1" 2>/dev/null && pwd -P)" || return 1
   p="$p/"
   case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')" ;; esac
   printf '%s' "$p"
 }
+
+# Files under .claude/ that this run writes or creates must not be links (or other
+# non-files) that aim the write somewhere else — a repo can ship any of them. Checked
+# here, before anything is written, and in a dry run too:
+#   settings.json — refused if it is a link: the merge would read the link's target
+#     (a file outside the repo, say) into this repo's settings.json and into its backup.
+#     Refused if it exists and is not a regular file: `mv` onto a directory moves the
+#     merge INTO it, which may be outside the target.
+#   baseline.config.json, security-defaults.json — created only when absent. A dangling
+#     link is refused (cp would create a file wherever it points), and so is anything
+#     else that is not a regular file (a link to a directory: cp writes inside it). A link
+#     to a regular file is kept — a shared config the installer only reads, as the hooks
+#     do — and named when it resolves outside the target.
+#   baseline.config.schema.json — baseline-owned and refreshed every run: a link is
+#     replaced by a regular file in step 2; anything else not a regular file is refused.
+refuse_write() {
+  echo "ERROR: $1" >&2; shift
+  local l; for l in "$@"; do echo "       $l" >&2; done
+  echo "       Nothing was written." >&2
+  exit 2
+}
+# link_dirs <path>: the physical directory (real_dir form) of every hop of a chain of
+# links at <path> — each link after the first, and the file the chain ends at — one per
+# line, the final one last. Fails when the chain is longer than 40 links or unresolvable.
+link_dirs() {
+  local p="$1" t n=0
+  while [[ -L "$p" ]]; do
+    n=$((n + 1)); [[ $n -le 40 ]] || return 1
+    t="$(readlink "$p")" || return 1
+    case "$t" in /*|?:*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+    real_dir "$(dirname "$p")" || return 1
+    echo
+  done
+}
+# check_created <rel>: the rules for a file created only when absent (see above).
+check_created() {
+  local p="$CLAUDE_DIR/$1" d dirs hooks_real
+  if [[ -L "$p" && ! -e "$p" ]]; then
+    refuse_write "$p is a symbolic link to a path that does not exist." \
+      "Creating .claude/$1 would create a file wherever it points. Remove the link."
+  elif [[ -e "$p" && ! -f "$p" ]]; then
+    refuse_write "$p exists and is not a regular file (or a link to one)." \
+      "The installer would write inside it. Remove it, or replace it with the file."
+  elif [[ -L "$p" ]]; then
+    dirs="$(link_dirs "$p")" || refuse_write "$p is a symbolic link that cannot be resolved." \
+      "Remove the link, or replace it with the file."
+    # Step 1 replaces .claude/hooks/baseline/ wholesale: a chain with any hop in it
+    # would dangle by step 2, and the create step would then write through it.
+    hooks_real="$(real_dir "$CLAUDE_DIR")hooks/baseline/"
+    while IFS= read -r d; do
+      case "$d" in
+        "$hooks_real"*)
+          refuse_write "$p is a link into .claude/hooks/baseline/, which the installer replaces." \
+            "Remove the link, or replace it with the file." ;;
+      esac
+    done <<< "$dirs"
+    case "${dirs##*$'\n'}" in
+      "$(real_dir "$TARGET")"*) ;;
+      *) say "note: .claude/$1 is a link to a file outside $TARGET; kept, and only read" ;;
+    esac
+  fi
+}
+# refuse_dangled <rel>: the write-time half of check_created. Every link the preflight
+# kept resolved to a file, so a link still at <rel> when a create step is about to copy
+# there can only be one that stopped resolving since (a path running through the hook
+# tree step 1 replaced, say). Never copy through it — whatever path shape got it there.
+refuse_dangled() {
+  if [[ -L "$CLAUDE_DIR/$1" ]]; then
+    echo "ERROR: $CLAUDE_DIR/$1 is a link that stopped resolving when the hook tree was" >&2
+    echo "       replaced; not writing through it. The hook tree under .claude/hooks/baseline/" >&2
+    echo "       was replaced; settings.json was not changed. Replace the link with the file," >&2
+    echo "       then re-run." >&2
+    exit 2
+  fi
+}
+if [[ -L "$CLAUDE_DIR/settings.json" ]]; then
+  refuse_write "$CLAUDE_DIR/settings.json is a symbolic link." \
+    "The installer merges into it and backs it up, which would copy the link's target" \
+    "into this repository. Replace the link with a regular file, then re-run."
+elif [[ -e "$CLAUDE_DIR/settings.json" && ! -f "$CLAUDE_DIR/settings.json" ]]; then
+  refuse_write "$CLAUDE_DIR/settings.json exists and is not a regular file." \
+    "Remove it, then re-run."
+fi
+check_created baseline.config.json
+if [[ $WITH_OPENCLAW -eq 1 ]]; then check_created security-defaults.json; fi
+if [[ -e "$CLAUDE_DIR/baseline.config.schema.json" && ! -L "$CLAUDE_DIR/baseline.config.schema.json" \
+      && ! -f "$CLAUDE_DIR/baseline.config.schema.json" ]]; then
+  refuse_write "$CLAUDE_DIR/baseline.config.schema.json exists and is not a regular file." \
+    "Remove it, then re-run."
+fi
 
 # --enable-security-defaults preflight, before anything is written. An enabled
 # securityDefaults module whose rules file is missing fails closed and blocks every
@@ -344,6 +436,7 @@ else:
   fi
 else
   CFG_CREATED=1
+  refuse_dangled baseline.config.json
   run cp "$SRC/baseline.config.json" "$CLAUDE_DIR/baseline.config.json"
   if [[ $DRY -eq 1 ]]; then
     say "would write default .claude/baseline.config.json"
@@ -360,6 +453,16 @@ except Exception: pass' "$SRC/baseline.config.json" 2>/dev/null || true)"
     say "would stamp baselineVersion: $BLV"
   elif [[ -n "$BLV" ]]; then
     say "stamped baselineVersion: $BLV"
+  fi
+fi
+# A link here would have cp write the schema through it, over whatever it points at.
+# The schema is the baseline's own file, so the link is replaced, never followed.
+if [[ -L "$CLAUDE_DIR/baseline.config.schema.json" ]]; then
+  run rm -f "$CLAUDE_DIR/baseline.config.schema.json"
+  if [[ $DRY -eq 1 ]]; then
+    say "would replace the symbolic link at .claude/baseline.config.schema.json with the schema file"
+  else
+    say "replaced the symbolic link at .claude/baseline.config.schema.json with the schema file"
   fi
 fi
 run cp "$SRC/baseline.config.schema.json" "$CLAUDE_DIR/baseline.config.schema.json"
@@ -381,7 +484,14 @@ if [[ $DRY -eq 1 ]]; then
   MERGE_TMP="$(mktemp 2>/dev/null)" || {
     echo "ERROR: cannot create a temp file for the dry-run settings merge." >&2; exit 1; }
 else
-  MERGE_TMP="$CLAUDE_DIR/.settings.merge.$$"
+  # A random name, created exclusively: a fixed one ($$) could be a link the repo ships,
+  # and the merge would be written through it. mktemp makes it 0600, which the mv would
+  # carry onto settings.json, so give it the mode a plain new file gets.
+  MERGE_TMP="$(mktemp "$CLAUDE_DIR/.settings.merge.XXXXXX" 2>/dev/null)" || {
+    echo "ERROR: cannot create a temp file under $CLAUDE_DIR for the settings merge." >&2
+    echo "       Hook files were written; settings.json was not changed." >&2
+    exit 1; }
+  chmod "$(printf '%o' $(( 0666 & ~0$(umask) )))" "$MERGE_TMP" 2>/dev/null || true
 fi
 trap 'rm -f "${MERGE_TMP:-}" 2>/dev/null || true' EXIT
 
@@ -441,6 +551,14 @@ ignore_backups() {
   [[ -n "$excl" ]] || return 0
   case "$excl" in /*|?:*) ;; *) excl="$TARGET/$excl" ;; esac
   line="/.claude/settings.json.bak.*"
+  # Do not append through a link at the exclude file or its info/ directory, which
+  # would write wherever it points (a clone cannot plant one in .git, an unpacked
+  # archive can). Where git itself keeps the file (a .git link, a gitfile) is git's
+  # own resolution and is not second-guessed here; the line written is fixed text.
+  if [[ -L "$excl" || -L "${excl%/*}" || ( -e "$excl" && ! -f "$excl" ) ]]; then
+    echo "  WARNING: $excl is a link or not a regular file; not adding $line to it." >&2
+    return 0
+  fi
   # Already there (a negation elsewhere can make check-ignore say "not ignored"): once.
   if [[ -f "$excl" ]] && grep -qF -- "$line" "$excl" 2>/dev/null; then return 0; fi
   if [[ $DRY -eq 1 ]]; then
@@ -502,6 +620,7 @@ if [[ $WITH_OPENCLAW -eq 1 ]]; then
   if [[ -f "$CLAUDE_DIR/security-defaults.json" ]]; then
     say "kept existing .claude/security-defaults.json"
   else
+    refuse_dangled security-defaults.json
     run cp "$SRC/examples/security-defaults.openclaw.json" "$CLAUDE_DIR/security-defaults.json"
     if [[ $DRY -eq 1 ]]; then
       say "would write .claude/security-defaults.json"
@@ -531,13 +650,23 @@ sys.stdout.write("1" if ((c.get("modules") or {}).get("securityDefaults") or {})
   elif [[ $DRY -eq 1 ]]; then
     say "would set modules.securityDefaults.enabled = true in .claude/baseline.config.json"
   else
-    "$PY" -I -S -X utf8 -c 'import json,os,sys
+    # The temp file is random and created exclusively (mkstemp): a fixed name such as
+    # baseline.config.json.tmp could be a link the repo ships, written through and then
+    # renamed over the config. It takes the config's mode before the rename.
+    "$PY" -I -S -X utf8 -c 'import json,os,sys,tempfile
 p=sys.argv[1]
 c=json.load(open(p,encoding="utf-8"))
 c.setdefault("modules",{}).setdefault("securityDefaults",{})["enabled"]=True
-with open(p+".tmp","w",encoding="utf-8",newline="\n") as fh:
-    json.dump(c,fh,indent=2,ensure_ascii=False); fh.write("\n")
-os.replace(p+".tmp",p)' "$CLAUDE_DIR/baseline.config.json"
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p),prefix=".baseline.config.",suffix=".tmp")
+try:
+    with os.fdopen(fd,"w",encoding="utf-8",newline="\n") as fh:
+        json.dump(c,fh,indent=2,ensure_ascii=False); fh.write("\n")
+    os.chmod(tmp,os.stat(p).st_mode & 0o777)
+    os.replace(tmp,p)
+except BaseException:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise' "$CLAUDE_DIR/baseline.config.json"
     say "enabled modules.securityDefaults (post-write checks of infra files)"
   fi
 fi
