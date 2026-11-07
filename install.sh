@@ -308,12 +308,13 @@ check_created() {
 # kept resolved to a file, so a link still at <rel> when a create step is about to copy
 # there can only be one that stopped resolving since (a path running through the hook
 # tree step 1 replaced, say). Never copy through it — whatever path shape got it there.
+# A dry run cannot see this case: it does not replace the tree, so the link still resolves.
+# refuse_dangled <rel> <what this run already wrote>
 refuse_dangled() {
   if [[ -L "$CLAUDE_DIR/$1" ]]; then
     echo "ERROR: $CLAUDE_DIR/$1 is a link that stopped resolving when the hook tree was" >&2
-    echo "       replaced; not writing through it. The hook tree under .claude/hooks/baseline/" >&2
-    echo "       was replaced; settings.json was not changed. Replace the link with the file," >&2
-    echo "       then re-run." >&2
+    echo "       replaced; not writing through it. Already written: $2." >&2
+    echo "       Replace the link with the file, then re-run." >&2
     exit 2
   fi
 }
@@ -436,7 +437,7 @@ else:
   fi
 else
   CFG_CREATED=1
-  refuse_dangled baseline.config.json
+  refuse_dangled baseline.config.json "the hook tree under .claude/hooks/baseline/ (settings.json was not changed)"
   run cp "$SRC/baseline.config.json" "$CLAUDE_DIR/baseline.config.json"
   if [[ $DRY -eq 1 ]]; then
     say "would write default .claude/baseline.config.json"
@@ -620,7 +621,7 @@ if [[ $WITH_OPENCLAW -eq 1 ]]; then
   if [[ -f "$CLAUDE_DIR/security-defaults.json" ]]; then
     say "kept existing .claude/security-defaults.json"
   else
-    refuse_dangled security-defaults.json
+    refuse_dangled security-defaults.json "the hook tree, the schema (and the config, where it was absent), and the settings.json merge"
     run cp "$SRC/examples/security-defaults.openclaw.json" "$CLAUDE_DIR/security-defaults.json"
     if [[ $DRY -eq 1 ]]; then
       say "would write .claude/security-defaults.json"
