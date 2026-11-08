@@ -131,7 +131,7 @@ the floor depends on, and it is the core verified fact here.
 > on `allowManagedDomainsOnly`.
 >
 > - After deploying, run `/status` and read **Setting sources** (the source in use) and
->   **Skipped sources** (v2.1.242+, within the 2.1.295 pin), which names a source that
+>   **Skipped sources** (v2.1.242+, within the 2.1.314 pin), which names a source that
 >   a higher one overrode.
 > - To combine sources, set `managedSourcesBehavior: "merge"` (v2.1.242+) in the
 >   highest-ranked source you deploy — not in this file: `managed-settings.json` is the
@@ -513,15 +513,16 @@ the R6 guardrail hooks alongside.
 
 | Feature | Minimum Claude Code |
 |---------|---------------------|
-| Managed `deny` / managed hooks / `managed-settings.json` | the baseline pin, **2.1.295** (see [`../RELEASING.md`](../RELEASING.md)) |
+| Managed `deny` / managed hooks / `managed-settings.json` | the baseline pin, **2.1.314** (see [`../RELEASING.md`](../RELEASING.md)) |
+| Shell commands started by the Monitor tool reach command-guard | **2.1.314** (documented minimum; below it a Monitor command bypasses command-guard) |
 | `"onFailure": "block"` on command-guard | **2.1.295** (documented minimum; below it the key is unsupported and its handling is unverified) |
 | `strictPluginOnlyCustomization` | exact introduction **not documented** — no changelog section introduces the key; verified present in the settings docs and the official JSON schema as of 2026-08-12. Re-confirm before relying on the strict profile. |
 | `allowManagedHooksOnly` / `allowManagedPermissionRulesOnly` | operational by **2.1.140**; exact introduction not documented — re-confirm before relying on the strict profile |
 | `permissions.defaultMode: "dontAsk"` (R7 allowlist) | confirm against the permission-modes docs for your release |
 | `sandbox` (filesystem/network) — R7 | **macOS / Linux / WSL2 only** (native Windows unsupported); confirm schema against the sandboxing docs for your release |
 | `sandbox.network.strictAllowlist` — R7 | honored from **user / managed / `--settings`** scope only; no effect in a repo's own `settings.json` (documented as of v2.1.219+). Confirm before claiming egress is blocked. |
-| `wslInheritsWindowsSettings` (WSL reads the Windows policy chain) | **v2.1.282+** (within the 2.1.295 pin). |
-| `managedSourcesBehavior: "merge"`, `/status` **Skipped sources** | **v2.1.242+** (within the 2.1.295 pin). Under the default `"first-wins"` only the highest-ranked managed source applies; see "Where managed settings live". |
+| `wslInheritsWindowsSettings` (WSL reads the Windows policy chain) | **v2.1.282+** (within the 2.1.314 pin). |
+| `managedSourcesBehavior: "merge"`, `/status` **Skipped sources** | **v2.1.242+** (within the 2.1.314 pin). Under the default `"first-wins"` only the highest-ranked managed source applies; see "Where managed settings live". |
 
 Windows `C:\Program Files\ClaudeCode\` path requires **v2.1.75+**; Claude Code does not
 read the legacy `ProgramData` path.

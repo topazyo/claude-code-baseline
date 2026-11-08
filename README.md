@@ -233,6 +233,12 @@ limit — not a bug. Read it before you rely on any of the above.
   `settings.local.json` from outside Claude Code. None of them removes the value, and
   `~/.claude/settings.json` and the environment Claude Code is launched with are not
   checked: set values you need, such as `CLAUDE_CODE_GIT_BASH_PATH`, there.
+- **Below Claude Code v2.1.314, Monitor commands skip command-guard.** A shell
+  command Claude starts with the Monitor tool reaches the `Bash`-matched guards only
+  from 2.1.314; below it command-guard never sees the command. (The current tools
+  reference says Monitor follows the same permission rules as Bash; that is not
+  verified here for older releases.) A Monitor WebSocket watch reaches no
+  `Bash`-matched hook, so no baseline guard, on any version.
 - **Below Claude Code v2.1.295, a hook that cannot start most likely fails
   open.** From 2.1.295 the two guards' `"onFailure": "block"` refuses the call
   when the hook can't start, times out, or exits with anything but 0 or 2. Older
@@ -330,8 +336,9 @@ defensively.
 It also runs an **advisory version check**: it compares your live `claude --version`
 against `minClaudeCodeVersion` in `baseline.config.json` and prints a warning if
 older. This never blocks the install. The floor is the documented minimum for
-the behaviours this baseline depends on: `"onFailure": "block"` on the guards
-(Claude Code 2.1.295), which also covers a `PreToolUse` hook that returns
+the behaviours this baseline depends on: shell commands started by the Monitor tool
+reaching command-guard (Claude Code 2.1.314), which also covers
+`"onFailure": "block"` on the guards (2.1.295) and a `PreToolUse` hook that returns
 `"allow"` no longer bypassing a `deny` rule (fixed in 2.1.77). A mod is the
 exception: see *What this does not protect against*. See [`RELEASING.md`](RELEASING.md) for the per-release
 re-verification checklist behind the pin. On Git Bash/MSYS/Cygwin and WSL hosts
@@ -340,7 +347,7 @@ it also prints an advisory note about the Git Bash requirement above.
 An existing install keeps its old `.claude/baseline.config.json` (the installer
 never rewrites it), so `tools/baseline-status.sh` prints `ok=no` beside its
 `minClaudeCodeVersion` (informational; `--strict` does not fail on it); set it
-to `"2.1.295"` in that file to clear it. Re-running `install.sh`
+to `"2.1.314"` in that file to clear it. Re-running `install.sh`
 does refresh `settings.json` and adds `onFailure` to the guards.
 
 ---
