@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=a70d5191d3b6d315 -->
+<!-- he-sync: what-this-does-not-protect-against sha256=fce6574651b6ec52 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -108,6 +108,10 @@
   ב-`settings.local.json` מחוץ ל-Claude Code. אף אחד מהם לא מסיר את הערך, והקובץ
   `~/.claude/settings.json` והסביבה ש-Claude Code מופעל בה לא נבדקים: הגדירו שם ערכים
   שאתם צריכים, כמו `CLAUDE_CODE_GIT_BASH_PATH`.
+- **בגרסאות Claude Code שמתחת ל-v2.1.314, פקודות של Monitor עוקפות את ה-command-guard.**
+  פקודת מעטפת ש-Claude מפעיל בכלי Monitor מגיעה ל-guards שמתאימים ל-`Bash` רק מגרסה
+  2.1.314; מתחת לה כללי ה-deny של `Bash` עדיין חלים, אבל ה-command-guard לא רואה את
+  הפקודה בכלל. מעקב WebSocket של Monitor לא מגיע לאף hook בשום גרסה.
 - **בגרסאות Claude Code שמתחת ל-v2.1.295, hook שלא מצליח לעלות כנראה נכשל פתוח.**
   מגרסה 2.1.295, ההגדרה `"onFailure": "block"` של שני ה-guards דוחה את הקריאה כשה-hook
   לא מצליח לעלות, חורג מזמן ההמתנה, או יוצא עם כל קוד חוץ מ-0 או 2. גרסאות ישנות יותר

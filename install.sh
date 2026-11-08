@@ -194,9 +194,10 @@ sys.exit(0 if p(sys.argv[1]) >= p(sys.argv[2]) else 1)' "$CC_VER" "$MIN_CC" 2>/d
     say "Claude Code v$CC_VER detected (>= required v$MIN_CC)."
   else
     echo "  WARNING: Claude Code v$CC_VER is older than the baseline's required v$MIN_CC." >&2
-    echo "           Some controls behave differently below the pin: the guards' onFailure:block" >&2
-    echo "           is unsupported before v2.1.295, so a guard that cannot start or times out" >&2
-    echo "           may let the call through instead of blocking it." >&2
+    echo "           Some controls behave differently below the pin: shell commands started by" >&2
+    echo "           the Monitor tool do not reach command-guard before v2.1.314, and the guards'" >&2
+    echo "           onFailure:block is unsupported before v2.1.295, so a guard that cannot start" >&2
+    echo "           or times out may let the call through instead of blocking it." >&2
     echo "           Upgrade Claude Code, or review RELEASING.md first." >&2
   fi
 fi

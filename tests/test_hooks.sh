@@ -1949,9 +1949,13 @@ vcheck() {
   out="$(PATH="$VBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1 </dev/null)"
   if printf '%s' "$out" | grep -qF "$want"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] missing: $want"; fi
 }
+# The floor is read from baseline.config.json, so raising the pin cannot leave these rows
+# testing an old boundary (or failing on it).
+PIN="$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['minClaudeCodeVersion'])" "$(winpath "$SRC/baseline.config.json")" | tr -d '\r')"
+PIN_BELOW="$("$PY" -c "import sys;a,b,c=map(int,sys.argv[1].split('.'));print(f'{a}.{b}.{c-1}' if c else f'{a}.{b-1}.999')" "$PIN" | tr -d '\r')"
 vcheck "old version warns"        "2.0.0" "is older than the baseline's required"
-vcheck "patch below pin warns"    "2.1.294" "is older than the baseline's required"
-vcheck "equal version ok"         "2.1.295" ">= required v"
+vcheck "patch below pin warns"    "$PIN_BELOW" "is older than the baseline's required"
+vcheck "equal version ok"         "$PIN" ">= required v"
 vcheck "newer minor ok"           "2.9.0"  ">= required v"
 # The warn/ok cases above would FAIL if the stub couldn't execute on this platform
 # (they assert a version-specific path), so they prove the stub is invocable — which
@@ -1959,11 +1963,11 @@ vcheck "newer minor ok"           "2.9.0"  ">= required v"
 vcheck "unparseable version skips" "none"  "could not detect a 'claude' CLI"
 # Marker anchoring (R4 review): a misleading leading semver on an earlier line must
 # not win over the version tied to the '(Claude Code)' marker. Without anchoring the
-# first-semver grep would pick 0.0.1 and warn; with anchoring it picks 2.1.295 and OKs.
-printf '#!/usr/bin/env bash\necho "node v0.0.1 runtime"\necho "2.1.295 (Claude Code)"\n' > "$VBIN/claude"; chmod +x "$VBIN/claude"
+# first-semver grep would pick 0.0.1 and warn; with anchoring it picks the pin and OKs.
+printf '#!/usr/bin/env bash\necho "node v0.0.1 runtime"\necho "%s (Claude Code)"\n' "$PIN" > "$VBIN/claude"; chmod +x "$VBIN/claude"
 rm -rf "$VTARGET"; mkdir -p "$VTARGET"; ( cd "$VTARGET" && git init -q )
 out="$(PATH="$VBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1 </dev/null)"
-if printf '%s' "$out" | grep -qF "Claude Code v2.1.295 detected"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [marker anchoring picks Claude Code semver]"; fi
+if printf '%s' "$out" | grep -qF "Claude Code v$PIN detected"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [marker anchoring picks Claude Code semver]"; fi
 
 echo ""
 echo "test_hooks: $pass passed, $fail failed"

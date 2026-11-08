@@ -93,6 +93,23 @@ def doc_claims():
     return bad
 
 
+def pin_sites():
+    """The sites that name the version pin (RELEASING "Every site that names the pin")
+    must name baseline.config.json's minClaudeCodeVersion: RELEASING's Current pin, the
+    README's instruction for clearing ok=no, and the managed README's version table."""
+    import json
+    import re
+    with open(os.path.join(ROOT, "baseline.config.json"), encoding="utf-8") as fh:
+        pin = json.load(fh)["minClaudeCodeVersion"]
+    def flat(rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+            return re.sub(r"\s+", " ", fh.read())
+    wanted = (("RELEASING.md", "Current pin: **`%s`**" % pin),
+              ("README.md", 'set it to `"%s"` in that file' % pin),
+              ("managed/README.md", "the baseline pin, **%s**" % pin))
+    return [rel + " does not name the pin " + pin for rel, text in wanted if text not in flat(rel)]
+
+
 FULL_TEMPLATE = ms.strip_comments(ms.load(os.path.join(ROOT, "settings.template.json"), "baseline template"))
 DENY = ms.baseline_deny(FULL_TEMPLATE)
 MINS = ms.baseline_timeouts(ms.strip_comments(ms.load(os.path.join(ROOT, "settings.template.json"), "baseline template")))
@@ -399,6 +416,8 @@ checks = [
      and ms.missing_deny({"permissions": {"deny": "Edit(.env*)"}}, DENY) == DENY
      and ms.missing_deny({"permissions": {"deny": {"0": "Edit(.env*)"}}}, DENY) == DENY
      and ms.missing_deny({"permissions": {"deny": {"Edit(.env*)": True}}}, DENY) == DENY),
+    # the version pin is named the same everywhere it is named (review L18)
+    ("docs: every pin site names baseline.config.json's minClaudeCodeVersion", pin_sites() == []),
     # shipped docs (review M3, M11)
     ("docs: no command-guard 'tamper rule', no deny 'enforced unconditionally'", doc_claims() == []),
     ("template deny comment states the cd / variable gap and that command-guard does not cover it",

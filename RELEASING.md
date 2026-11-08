@@ -18,12 +18,17 @@
 records what was re-verified and on which version. `install.sh` detects the live
 `claude --version` and prints an **advisory warning** (never blocks) when it is older.
 
-Current pin: **`2.1.295`** — the documented minimum for `"onFailure": "block"` on the
-guards (hooks docs: *"Requires Claude Code v2.1.295 or later"*; CHANGELOG 2.1.295: *"a
-hook that can't start, times out, or exits with an unexpected code blocks the action
-instead of letting it through"*). It also covers the v2.1.77 `deny`-bypass fix below.
-Raised from `2.1.80` on 2026-10-28. That change re-verified **only** the `onFailure`
-behavior, on 2.1.312 (see the ledger); the full checklist below was **not** re-walked.
+Current pin: **`2.1.314`** — the documented minimum for shell commands Claude starts
+with the **Monitor** tool reaching a `Bash`-matched `PreToolUse` hook, command-guard
+included (hooks docs, "Match Monitor commands": *"Requires Claude Code v2.1.314 or
+later"*). Below it a Monitor command bypasses command-guard; `Bash` deny rules still
+apply. It also covers `"onFailure": "block"` on the guards (hooks docs: *"Requires
+Claude Code v2.1.295 or later"*; CHANGELOG 2.1.295: *"a hook that can't start, times
+out, or exits with an unexpected code blocks the action instead of letting it
+through"*) and the v2.1.77 `deny`-bypass fix below. Raised from `2.1.295` on
+2026-11-08; that change re-verified **only** the Monitor behavior, on 2.1.319 (see the
+ledger); the full checklist below was **not** re-walked. Raised from `2.1.80` to
+`2.1.295` on 2026-10-28, re-verifying only `onFailure`, on 2.1.312.
 
 **Why a pin at all:** the entire deny-list — the secrets rules and the
 tamper-protection rules (`Edit(.claude/settings.json)`,
@@ -43,17 +48,24 @@ revisions of this file attributed a broader "`allow` can no longer bypass `deny`
 **v2.1.80**; no changelog entry supports that, and the claim is withdrawn. The pin then
 stayed at 2.1.80 as the floor the baseline's behavior had been walked through — a
 *"verified at"* number. Since 2026-10-28 the pin is the documented minimum instead
-(2.1.295, which sits above 2.1.77), with verification recorded per row in the ledger.
+(2.1.295, then 2.1.314 from 2026-11-08, both above 2.1.77), with verification recorded
+per row in the ledger.
 
 Bump the pin only after re-verifying, on a real build, the behavior the new pin is
 for, and recording that in the ledger below. Say in the ledger row whether the full
-checklist was re-walked; for the 2.1.295 bump it was not.
+checklist was re-walked; for the 2.1.295 and 2.1.314 bumps it was not.
 
-> **Eight sites carry this pin or its rationale and must move together:**
-> `baseline.config.json` (`minClaudeCodeVersion` + `_minClaudeCodeVersionRationale`),
-> `hooks/modules/config-guard.sh`, `install.sh` (two sites), `README.md`,
-> `managed/README.md`, this file, and `ROADMAP.md` (two sites). Changing one produces a repo that contradicts itself,
-> which is worse than the stale number.
+> **Every site that names the pin moves with it.** Find them with
+> `git grep -n '<old pin>'` and sort each hit: a sentence that names *the pin* moves; a
+> sentence stating when a feature arrived (e.g. *"`onFailure` needs 2.1.295"*) stays.
+> For the 2.1.314 bump the pin sites were `baseline.config.json`
+> (`minClaudeCodeVersion` + `_minClaudeCodeVersionRationale`), `README.md`,
+> `managed/README.md`, this file, `ROADMAP.md`, and the version-check rows in
+> `tests/test_hooks.sh`; `ONBOARDING.md`, `ONBOARDING.he.md` and `README.he.md` mention
+> 2.1.295 only as the `onFailure` version. `tests/test_merge_settings.py` fails if this
+> file's *Current pin* or the README's clearing instruction stops naming the config's
+> pin. Changing one site alone produces a repo that contradicts itself, which is worse
+> than the stale number.
 
 ---
 
@@ -249,7 +261,8 @@ it, and when we last re-confirmed it against live docs.
 | Behavior | Established in | Last re-verified | Notes |
 |----------|----------------|------------------|-------|
 | PreToolUse hook `"allow"` no longer bypasses `deny` | v2.1.77 | 2026-08-12 | The documented `deny`-bypass fix. Corrected 2026-08-12: this was previously recorded as a broader "`allow` rule" fix in v2.1.80, which no changelog entry supports. The pin stayed 2.1.80 as a *verified* floor above it until 2026-10-28, when it moved to 2.1.295 (the `onFailure` row below), which still covers this fix. |
-| `onFailure: "block"` makes a guard that can't start, times out, or exits other than 0/2 block the call | v2.1.295 | 2026-10-28 (on 2.1.312) | The current pin. Real `claude -p` runs on a throwaway install: `command-guard.sh` deleted → Bash `ls` blocked ("blocking because onFailure is "block"" plus the hook's "No such file or directory"); `onFailure: "continue"` (negative control) → the same `ls` ran; `scope-guard.sh` deleted → Write blocked, no file created. Only this row was re-verified for the bump; the full checklist was not re-walked. Below v2.1.295 the key's handling is unverified. Not set on the `ConfigChange` config-guard by design. |
+| Monitor-tool shell commands reach `Bash`-matched `PreToolUse` hooks (command-guard included); the hook gets a Bash call, and its `allow`/`updatedInput` have no effect on them | v2.1.314 | 2026-11-08 (on 2.1.319) | The current pin. Hooks docs, "Match Monitor commands": *"Requires Claude Code v2.1.314 or later"*; `Bash\|PowerShell` counts as a `Bash` matcher. Real `claude -p` run on a throwaway install (project settings only, no remote): the Monitor tool ran `git push --force origin main` and got *"PreToolUse:Monitor hook error: [bash -p "${CLAUDE_PROJECT_DIR}/.claude/hooks/baseline/guardrails/command-guard.sh"]: Blocked by Claude Code baseline command-guard: forced git push is forbidden"*, recorded in `permission_denials`. That below 2.1.314 a Monitor command does not reach the hook is docs-sourced, not run (no older build was at hand). A `PostToolUse` Bash hook does not run for Monitor, and a WebSocket watch reaches no Bash hook. No `baselineVersion` bump: no `hooks/` byte changed, and a re-install never rewrites an existing config, so `baselineVersion` 2026-11-07.2 now labels two config templates (pin 2.1.295 before, 2.1.314 after); existing installs show `ok=no` beside the pin until it is edited. |
+| `onFailure: "block"` makes a guard that can't start, times out, or exits other than 0/2 block the call | v2.1.295 | 2026-10-28 (on 2.1.312) | The pin from 2026-10-28 to 2026-11-08, now below it. Real `claude -p` runs on a throwaway install: `command-guard.sh` deleted → Bash `ls` blocked ("blocking because onFailure is "block"" plus the hook's "No such file or directory"); `onFailure: "continue"` (negative control) → the same `ls` ran; `scope-guard.sh` deleted → Write blocked, no file created. Only this row was re-verified for the bump; the full checklist was not re-walked. Below v2.1.295 the key's handling is unverified. Not set on the `ConfigChange` config-guard by design. |
 | `strictPluginOnlyCustomization` available | not documented | 2026-08-12 | Present in the settings docs and the official JSON schema; no changelog section introduces it, so no version is claimed. Same treatment as `allowManaged*Only`. Surfaces are `skills`/`agents`/`hooks`/`mcp` — an unrecognized name is silently ignored. |
 | Managed sources: `"first-wins"` by default, `managedSourcesBehavior: "merge"` opt-in; `/status` Skipped sources | v2.1.242 (merge, Skipped sources) | 2026-10-30 | Docs only (managed-settings, settings-reference); not re-run on a real deploy. Under first-wins the highest-ranked source with a policy key applies and the rest are ignored without warning; `permissions` and `hooks` are not read from lower sources. `"merge"` has no effect in `managed-settings.json`, the lowest admin source. |
 | `Read` deny rules merged into the sandbox configuration; `./` sandbox paths defined for project and user settings only | (longstanding) | 2026-10-30 | Docs only (sandboxing, settings-reference). Why `allowlist.example.json`, deployed as managed settings, lists no `./` path; its `Read(.env*)` deny is expected to cover the repo's `.env` for sandboxed commands (unverified; the allowlist profile's Verify step 3 in `managed/README.md` checks it). |

@@ -179,6 +179,10 @@ fix; treat it as a verified floor, not as the release that changed something.
 "block"` on the guards, and RELEASING.md now defines the pin as the documented minimum
 plus a ledger of what was re-verified where. Only the `onFailure` behavior was
 re-verified, on 2.1.312; the full checklist was not re-walked.)*
+*(2026-11-08: the pin moved to **2.1.314**, the documented minimum for shell commands
+started by the Monitor tool reaching the `Bash`-matched guards. Only that behavior was
+re-verified, on 2.1.319, by a real `claude -p` Monitor run that command-guard blocked;
+the full checklist was not re-walked.)*
 `install.sh` step 0 now reads the pin, detects the live `claude --version`, compares
 numerically in Python (int-tuple semver, so `2.10` > `2.9`), and prints an
 **advisory** line — `>= required` when ok, a loud multi-line `WARNING` when older,
