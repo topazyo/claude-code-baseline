@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=11ca880defe80cd7 -->
+<!-- he-sync: what-this-does-not-protect-against sha256=06147dd3cdc5a2d3 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -108,6 +108,18 @@
   ב-`settings.local.json` מחוץ ל-Claude Code. אף אחד מהם לא מסיר את הערך, והקובץ
   `~/.claude/settings.json` והסביבה ש-Claude Code מופעל בה לא נבדקים: הגדירו שם ערכים
   שאתם צריכים, כמו `CLAUDE_CODE_GIT_BASH_PATH`.
+- **ה-git שה-hooks עצמם מריצים עדיין מפעיל filter driver של הריפו.** fix-tags,
+  auto-stage ו-tracker-reminder מריצים את git כש-`core.fsmonitor`, ה-hook
+  `post-index-change` (מתיקיית hooks או מרשומת `hook.<name>`) וכל אמצעי ה-fetch כבויים,
+  ו-fix-tags מריץ diff בלי תוכנת diff חיצונית ובלי textconv, כך שהגדרות ה-git של הריפו
+  לא יכולות לגרום לקריאות האלה להפעיל תוכנה בדרכים האלה (גם hook `post-index-change`
+  משלכם לא רץ בהן). filter driver (`filter.<name>.clean` או `.process`
+  ב-`.git/config`, שנבחר לפי `.gitattributes`) עדיין רץ בתוך `git add` של auto-stage
+  ובתוך `git diff` של fix-tags, כמו שהוא רץ ב-`git add` שלכם, ול-command-guard אין כלל
+  עבור `git config`, כך שהסוכן יכול להגדיר אחד. השאירו את `autoStage` ואת `fixTags`
+  כבויים בריפו שאין לכם שליטה בהגדרות ה-git שלו. ערך `env` בהגדרות עבור `HOME`,
+  `XDG_CONFIG_HOME`, `USERPROFILE`, `HOMEDRIVE` או `HOMEPATH`, שמעביר למקום אחר את
+  הגדרות ה-git שהקריאות האלה קוראות, מדווח כמו הערכים שלמעלה.
 - **בגרסאות Claude Code שמתחת ל-v2.1.314, פקודות של Monitor עוקפות את ה-command-guard.**
   פקודת מעטפת ש-Claude מפעיל בכלי Monitor מגיעה ל-guards שמתאימים ל-`Bash` רק מגרסה
   2.1.314; מתחת לה ה-command-guard לא רואה את הפקודה בכלל. (לפי מדריך הכלים הנוכחי,

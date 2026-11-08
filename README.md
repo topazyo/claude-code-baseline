@@ -234,6 +234,20 @@ limit — not a bug. Read it before you rely on any of the above.
   `settings.local.json` from outside Claude Code. None of them removes the value, and
   `~/.claude/settings.json` and the environment Claude Code is launched with are not
   checked: set values you need, such as `CLAUDE_CODE_GIT_BASH_PATH`, there.
+- **The hooks' own git still runs a repository's filter driver.** fix-tags,
+  auto-stage and tracker-reminder run git with `core.fsmonitor`, the
+  `post-index-change` hook (from a hooks directory or a `hook.<name>` entry) and
+  every fetch transport switched off, and fix-tags diffs with no external diff
+  or textconv program, so a repository's git config cannot make those calls
+  start a program in those ways (a `post-index-change` hook of your own does not
+  run for them either). A filter driver (`filter.<name>.clean` or `.process` in
+  `.git/config`, picked by `.gitattributes`) still runs inside auto-stage's
+  `git add` and fix-tags' `git diff`, as it does in your own `git add`, and
+  command-guard has no rule for `git config`, so the agent can set one. Keep
+  `autoStage` and `fixTags` off in a repository whose git config you do not
+  control. A settings `env` value for `HOME`, `XDG_CONFIG_HOME`, `USERPROFILE`,
+  `HOMEDRIVE` or `HOMEPATH`, which moves the git config those calls read, is
+  reported like the values above.
 - **Below Claude Code v2.1.314, Monitor commands skip command-guard.** A shell
   command Claude starts with the Monitor tool reaches the `Bash`-matched guards only
   from 2.1.314; below it command-guard never sees the command. (The current tools

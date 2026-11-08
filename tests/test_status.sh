@@ -112,6 +112,11 @@ got="$(findings)"
 [ "$got" = "['settings.local.json:BASH_ENV'] ['guardrails/command-guard.sh', 'settings.local.json disableAllHooks']" ] && ok || no "settings findings not reported: $got"
 if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on a settings finding"; else ok; fi
 cp "$TMP/settings.saved" "$A/.claude/settings.json"; rm -f "$A/.claude/settings.local.json"
+# HOME pointed elsewhere moves the user's git config under the hooks' git.
+printf '{"env": {"HOME": "/tmp/h"}}\n' > "$A/.claude/settings.local.json"
+got="$(findings)"
+[ "$got" = "['settings.local.json:HOME'] []" ] && ok || no "a HOME env value not reported: $got"
+rm -f "$A/.claude/settings.local.json"
 if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else no "--strict should PASS once the settings are restored"; fi
 # Where the template wires each hook: a command-guard group whose matcher no longer
 # covers the template's is reported as such and fails --strict; a scope-guard that is

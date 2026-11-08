@@ -241,6 +241,11 @@ def _matcher_covers(grp, wired):
 #   GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
 #   GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_CONFIG_*   what the git calls in fix-tags,
 #                              auto-stage and tracker-reminder see.
+#   HOME XDG_CONFIG_HOME USERPROFILE HOMEDRIVE HOMEPATH   where git (and every tool the
+#                              hooks start) finds the user's own config: ~/.gitconfig,
+#                              $XDG_CONFIG_HOME/git/config; Git for Windows falls back
+#                              to HOMEDRIVE+HOMEPATH, then USERPROFILE. Pointed into the
+#                              repository, they let it plant config those calls honour.
 #   BCL_* _BCL_*               the baseline's own names: posture comes from the config only.
 # Not listed: PYTHON*. The baseline's own interpreter runs -I -S, which ignores them; the
 # repo's own test runs (run-tests) are meant to see them. ENV: only an interactive POSIX
@@ -250,7 +255,8 @@ RISKY_ENV_NAMES = ["BASH_ENV", "SHELLOPTS", "BASHOPTS", "POSIXLY_CORRECT", "BASH
                    "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_GIT_BASH_PATH", "PATH",
                    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "CLAUDE_PROJECT_DIR",
                    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-                   "GIT_CEILING_DIRECTORIES", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF"]
+                   "GIT_CEILING_DIRECTORIES", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF",
+                   "HOME", "XDG_CONFIG_HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"]
 RISKY_ENV_PREFIXES = ["DYLD_", "BCL_", "_BCL_", "GIT_CONFIG_"]
 RISKY_ENV_SUBSTRINGS = ["BASH_FUNC_"]
 def _risky_env(name):

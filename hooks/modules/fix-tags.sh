@@ -50,16 +50,31 @@ MARKER="$(bcl_cfg modules.fixTags.tagMarker "FIX:")"
 FILE_REGEX="$(bcl_cfg modules.fixTags.fileRegex '\.(py|sh|bash|ps1|yml|yaml)$|Dockerfile|Makefile')"
 
 cd "$(bcl_repo_root)" || { echo "[fix-tags] could not enter repo root — tag check skipped." >&2; exit 0; }
+bcl_git_init
 
-CHANGED="$(git diff --name-only 2>/dev/null || true)"
-[[ -z "$CHANGED" ]] && exit 0
+# The diff is read as git's plain text, whatever the repository configures: no colour
+# codes in front of the `+` (color.ui=always), and no external diff or textconv program
+# (which would also run code; see bcl_git). A file a textconv driver covers diffs as
+# binary and is not checked. Names come NUL-separated (-z), exactly as stored: in the
+# line form git quotes a name holding a newline, a quote, a backslash or (core.quotePath)
+# a non-ASCII byte, and the quoted name matches no file.
+DIFF_OPTS=(--no-color --no-ext-diff --no-textconv)
+CHANGED=()
+while IFS= read -r -d '' FILE; do
+  CHANGED+=("$FILE")
+done < <(bcl_git diff "${DIFF_OPTS[@]}" --name-only -z 2>/dev/null)
+(( ${#CHANGED[@]} )) || exit 0
 
 VIOLATIONS=0
-while IFS= read -r FILE; do
+for FILE in "${CHANGED[@]}"; do
   [[ -z "$FILE" ]] && continue
-  echo "$FILE" | grep -qE -- "$FILE_REGEX" || continue
+  printf '%s\n' "$FILE" | grep -qE -- "$FILE_REGEX" || continue
 
-  ADDED_LINES="$(git diff -- "$FILE" 2>/dev/null | grep -E '^\+' | grep -v '^+++' || true)"
+  # Added lines are the `+` lines after the first hunk header. The file header before it
+  # (`+++ b/name`, or another prefix a repository's diff config picks) is not one, and an
+  # added line that itself begins with `++` is.
+  ADDED_LINES="$(bcl_git diff "${DIFF_OPTS[@]}" -- "$FILE" 2>/dev/null \
+    | awk 'h && /^\+/ { print } /^@@/ { h = 1 }' || true)"
   [[ -z "$ADDED_LINES" ]] && continue
 
   UNTAGGED="$(echo "$ADDED_LINES" \
@@ -76,7 +91,7 @@ while IFS= read -r FILE; do
     echo "   Add a '$MARKER <id>' tag to each changed line." >&2
     VIOLATIONS=$((VIOLATIONS + 1))
   fi
-done <<< "$CHANGED"
+done
 
 if [[ $VIOLATIONS -gt 0 ]]; then
   echo "" >&2
