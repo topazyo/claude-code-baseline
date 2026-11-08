@@ -558,7 +558,10 @@ echo '{"session_id":"demo"}' | CLAUDE_PROJECT_DIR="$PWD" bash .claude/hooks/base
 The second run prints nothing. The memory is `.git/baseline/tracker-reminder/demo`.
 (Disable the module again when done.)
 
-**Exercise 4 — Author a security rule.** Create `.claude/security-defaults.json`:
+**Exercise 4 — Author a security rule.** Create `.claude/security-defaults.json`
+yourself, in your editor (scope-guard refuses Claude's edit tools on this file, and the
+deny rules refuse its edit tools and any shell command that names the path, so the
+policy it is checked against is not one it can rewrite):
 ```json
 { "infraPattern": "docker-compose",
   "rules": [ { "id": "no-root", "appliesWhen": "^\\s*user:\\s",

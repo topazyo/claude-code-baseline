@@ -25,6 +25,7 @@ done
 echo "== 3. command-guard matcher + settings merge fixtures =="
 "$PY" "$ROOT/tests/test_command_guard.py" || fail=1
 "$PY" "$ROOT/tests/test_merge_settings.py" || fail=1
+"$PY" "$ROOT/tests/test_definition_path.py" || fail=1
 
 echo "== 4. hook integration suite =="
 if command -v git >/dev/null 2>&1; then

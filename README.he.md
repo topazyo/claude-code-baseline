@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=06147dd3cdc5a2d3 -->
+<!-- he-sync: what-this-does-not-protect-against sha256=99eeb471bf53c507 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -71,6 +71,34 @@
   לא מקבל הגנה כזו בלי הגדרות מנוהלות. ארגונים שפורסים הגדרות מנוהלות יכולים לחסום את ה-mods של המשתמשים עצמם בעזרת
   `allowManagedModsOnly` (או `allowManagedHooksOnly`, שהפרופיל המחמיר מגדיר); ראו
   [managed/README.md](managed/README.md).
+- **קובצי הגדרה (definitions) נערכים רק בידי אדם, ויש לזה מחיר.** קובץ הגדרה של subagent,
+  של skill או של פקודה יכול להריץ פקודות שאף guard לא רואה: `hooks` ו-`mcpServers`
+  ב-frontmatter שלו, `allowed-tools` של skill עם שורות `` !`cmd` `` שרצות כשה-skill נטען,
+  קובץ `.claude-plugin/plugin.json` בתיקייה של skill, או הסקריפטים שהוא קורא להם. אותו
+  דבר נכון לסקריפטים של hooks תחת `.claude/hooks/`, ל-plugins, להגדרות המשתמש,
+  ל-`.claude.json` ול-`.mcp.json`. לכן ה-scope-guard שופט את **הנתיב**, לא את התוכן,
+  ודוחה שם כל Write/Edit של Claude: לפי הנתיב כפי שנכתב, לפי הצורה הקנונית שלו ב-Windows
+  (קידומות `\\?\`, `\\.\`, `\??\`, `GLOBALROOT` ו-GUID של כרך (volume), ונקודות ורווחים
+  בסוף השם; זרמי NTFS כמו `::$DATA` ונתיבים יחסיים לכונן נדחים מראש בלי בדיקה), לפי הנתיב
+  שהוא מתפענח אליו (קישורים, junctions, שמות מקוצרים בפורמט 8.3), מתחת לתיקיות המוגנות
+  האמיתיות, ודרך קישורים קשיחים (hard links) לקובץ מוגן. נתיב UNC למארח loopback או לכתובת
+  מפורשת (`\\127.1\…`, `\\[::1]\…`, `\\10.0.0.5\…`) לא נשפט, והבדיקה נכשלת סגור.
+  `permissions.deny` מוסיף רשומות בסגנון `Edit(//**/.claude/<dir>/**)` ורשומות Bash/PowerShell שמתאימות
+  לטקסט של הנתיב, כהגנה לעומק. ערכו את הקבצים האלה בעצמכם. מה שמפסיק לעבוד: ה-`/verify`
+  המובנה, ששומר את המתכון שלו ב-`.claude/skills/verify/`; `/run-skill-generator`; skills
+  בסגנון skill-creator שכותבים ל-`~/.claude/skills`; הסוכן `statusline-setup` ו-skills
+  שעורכים הגדרות (`update-config`, `fewer-permission-prompts`, ה-skills של הגדרת plugins
+  ושל HUD); Claude שמוסיף שרתי MCP ל-`.mcp.json`; וכל פקודת Bash/PowerShell שה*טקסט* שלה
+  מזכיר אחת מהתיקיות האלה (הודעת commit, `gh pr --body`, `grep`). פערים שנשארים: כתיבים
+  של מעטפת שכללי טקסט הנתיב לא רואים (כמו בכל כלל deny כאן); שיתוף UNC מרוחק שקובצי
+  ההגדרה של הריפו הזה נמצאים בו דרך קישור, או השם של המחשב עצמו תחת כינוי DNS אחר; קישור
+  ליעד UNC מרוחק שנוצר מראש (הפענוח עוקב אחריו); סקריפטים שקובץ הגדרות מפנה אליהם מחוץ
+  לתיקיות האלה (פקודת `statusLine`, פקודת hook שמצביעה למקום אחר); בלי Python נבדק רק
+  הטקסט של המטען; שם 8.3 מותאם אישית שהוגדר עם `fsutil` במקום שבו אי אפשר לפענח את
+  הנתיב; חיפוש קישורים קשיחים ב-POSIX שנעצר אחרי 20 000 רשומות (ואז קובץ עם קישור קשיח
+  נכשל סגור); פענוח של נתיב `\\wsl$` מפעיל את ה-VM של WSL לפני בקשת האישור; והרשומות
+  הישנות בסגנון `Edit(.claude/settings.json)`, שמעוגנות לתיקייה הנוכחית (cwd). ריפו שלא צריך שורות
+  `` !`cmd` `` ב-skills יכול גם להגדיר `disableSkillShellExecution: true`.
 - **PostToolUse לא יכול לבטל כתיבה.** המודולים `securityDefaults`, `fixTags`
   ו-`runTests` מדווחים על הפרה *אחרי* שהקובץ כבר השתנה בדיסק. הם נותנים ל-Claude הזדמנות
   לתקן; הם לא מונעים את השינוי.
@@ -90,8 +118,9 @@
   של מנהל גרסאות (pyenv, asdf, mise) בוחר אותו לפי קובץ בפרויקט כמו `.python-version`,
   הוא אמין רק כמו התיקייה שלו. מפרש שנמצא אבל לא רץ גורם ל-command-guard ולבדיקות שאחרי
   הכתיבה להיכשל סגור; ה-scope-guard וה-config-guard (שניהם לבחירה) מפסיקים לפעול, כמו
-  שקורה כשאין Python בכלל, חוץ מזה שה-scope-guard עדיין דוחה Write או Edit שהמטען שלהם
-  מזכיר את תיקיית ה-hooks של ה-baseline. `autoFormat`
+  שקורה כשאין Python בכלל, חוץ מזה שה-scope-guard עדיין דוחה (נכשל סגור על) Write או Edit
+  שטקסט המטען שלהם מזכיר נתיב שרק אדם עורך; בלי Python הוא לא יכול לפענח קישורים או
+  שמות מקוצרים. `autoFormat`
   ו-`runTests`, שמופעלים רק לפי בחירה, מריצים בכוונה את כלי העיצוב ואת הבדיקות של הריפו בלי הבידוד הזה.
 - **סביבת ה-hook מהימנה רק עד המעטפת שמריצה את ה-hook.** כל hook של ה-baseline, וכל
   תהליך צאצא שה-dispatcher מפעיל, רץ כ-`bash -p`, וה-hooks מנקים בזמן הטעינה את ערכי

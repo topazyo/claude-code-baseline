@@ -533,6 +533,422 @@ emit_arr("_BCL_PL_PATHS", pl_paths)
 sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
 PRIMEPY
 
+# >>> definition paths (scope-guard) >>>
+# _BCL_DEFPATH_SRC decides whether a Write/Edit target is a path only a human may write:
+# subagent, skill and command definitions, plugins, user settings, .claude.json and
+# .mcp.json (see scope-guard.sh for why). It is source text, never an imported module:
+# an import would read and write __pycache__ inside the installed hook tree, which the
+# drift check skips, so a planted .pyc could run in place of this reviewed code.
+# Two tails run it: _BCL_DEFPATH_PRIME_TAIL is appended to the payload prime only when
+# a hook asks (bcl_prime "$PAYLOAD" definition) and reuses the parsed payload;
+# _BCL_DEFPATH_MAIN_TAIL runs it standalone, payload on stdin and the project root as
+# argv[1], when the prime failed. Each prints a verdict and the resolved path.
+IFS='' read -r -d '' _BCL_DEFPATH_SRC <<'DEFPATHPY' || true
+# --- _BCL_DEFPATH_SRC: is a Write/Edit target a path only a human may write? ---
+# Human-only targets (see scope-guard.sh): subagent/skill/command definitions, hook
+# scripts, plugins, user settings, .claude.json, .mcp.json and the default
+# securityDefaults rules file. Path-only: no file content is read.
+# Verdicts: "yes" protected, "no" not, "nopath" the payload names no file_path,
+# "unparsed" the payload is not a JSON object, "cannot" could not judge (fail closed).
+import os as _d_os
+import re as _d_re
+
+_D_NT = _d_os.name == "nt"
+# Under <project>/.claude and the user's config home.
+_D_DIRS = ("agents", "skills", "commands", "hooks")
+# main's rule: a ../ below .claude/ may step back into a protected directory.
+_D_RAW_RE = _d_re.compile(
+    r"/\.claude/(?:agents|skills|commands|plugins|hooks)/|/\.claude/[^/]+/\.\./"
+    r"|/\.mcp\.json$|/\.claude\.json$|/\.claude/security-defaults\.json$")
+# Generated 8.3 names for .claude, .claude.json and .mcp.json (CLAUDE~1, CL3F2A~1, MCP~1.JSO).
+_D_SHORT_RE = _d_re.compile(r"(?:cl[0-9a-z]{0,4}|mcp[0-9a-z]{0,3})~[0-9]+(?:\.[0-9a-z]{1,3})?")
+_D_DRIVE_RE = _d_re.compile(r"[A-Za-z]:")
+_D_HDV_RE = _d_re.compile(r"globalroot\\device\\harddiskvolume[0-9]+(?:\\|$)")
+# A host Windows may read as an address: dotted or bare numbers, hex, IPv6 (a `:` is
+# refused before this), or the IPv6 literal form. Any of them may be this machine.
+_D_ADDR_RE = _d_re.compile(r"[0-9.]+|0x[0-9a-f.x]*|.*\.ipv6-literal\.net")
+_D_WALK_BOUND = 20000
+_D_MAX_DEPTH = 64
+
+
+class _DCannot(Exception):
+    pass
+
+
+def _d_norm(path):
+    """`\\` as `/`, `//` and `/./` collapsed, casefolded, with a leading `/`."""
+    p = "/" + path.replace("\\", "/")
+    while "//" in p:
+        p = p.replace("//", "/")
+    while "/./" in p:
+        p = p.replace("/./", "/")
+    return p.casefold()
+
+
+def _d_raw_hit(path):
+    return bool(_D_RAW_RE.search(_d_norm(path)))
+
+
+def _d_short_hit(path):
+    return any(_D_SHORT_RE.fullmatch(c) for c in _d_norm(path).split("/"))
+
+
+def _d_trim(p):
+    """Win32 drops trailing dots and spaces from each path component (`x.json.`)."""
+    return "\\".join(c if c in (".", "..") else c.rstrip(". ") for c in p.split("\\"))
+
+
+def _d_win(path, trim=True):
+    """The canonical Windows reading of a path: (kind, path).
+    "local": a drive path (X:\\...) or a relative one; "unc": \\\\host\\share...;
+    "volume": a volume with no drive letter (\\\\?\\Volume{...}, GLOBALROOT\\Device\\
+    HarddiskVolumeN), resolvable but never equal to a drive path; "cannot": any other
+    device namespace (pipes, \\Device\\Mup, ...), an NTFS stream (`x::$DATA`), a
+    drive-relative path (`C:x`). Every prefix Windows accepts is peeled first:
+    \\\\?\\, \\\\.\\, \\??\\, \\\\?\\UNC\\, GLOBALROOT\\??\\; any two leading
+    separators are a UNC or device prefix (`\\/h` and `/\\h` too)."""
+    p = path.replace("/", "\\")
+    kind = None
+    for _ in range(8):
+        if p[:4] not in ("\\\\?\\", "\\\\.\\", "\\??\\"):
+            break
+        ns = p[4:]
+        low = ns.casefold()
+        if _D_DRIVE_RE.match(ns) and ns[2:3] in ("", "\\"):
+            p = ns
+        elif low.startswith("unc\\"):
+            p = "\\\\" + ns[4:]
+        elif low.startswith("globalroot\\??\\"):
+            p = "\\??\\" + ns[14:]
+        elif low.startswith("volume{") or _D_HDV_RE.match(low):
+            kind = "volume"
+            break
+        else:
+            return "cannot", None
+    else:
+        return "cannot", None
+    if kind == "volume":
+        body = p[4:]
+    elif p[:2] == "\\\\":
+        kind, body = "unc", p[2:]
+    elif _D_DRIVE_RE.match(p):
+        if p[2:3] not in ("", "\\"):
+            return "cannot", None
+        kind, body = "local", p[2:]
+    else:
+        kind, body = "local", p
+    if ":" in body:
+        return "cannot", None
+    return kind, (_d_trim(p) if trim else p)
+
+
+def _d_loopback(host):
+    h = host.strip("[]")
+    if h in ("", "localhost", "localhost.", ".", "?") or _D_ADDR_RE.fullmatch(h):
+        return True
+    try:
+        import socket
+        name = socket.gethostname().casefold()
+    except Exception:
+        return True
+    return h == name or h.split(".")[0] == name.split(".")[0]
+
+
+def _d_classify(path, nt, trim=True):
+    """("local" | "volume", path to resolve) | ("remote", path) | ("cannot", None).
+    A remote UNC path is never touched: resolving it opens an SMB connection before
+    the permission prompt. A loopback or address-literal host could alias any local
+    file, so it is not judged. WSL's \\\\wsl$ and \\\\wsl.localhost are local."""
+    if not nt:
+        return "local", path
+    kind, p = _d_win(path, trim)
+    if kind != "unc":
+        return kind, p
+    host = p[2:].split("\\", 1)[0].casefold()
+    if host in ("wsl$", "wsl.localhost"):
+        return "local", p
+    if _d_loopback(host):
+        return "cannot", None
+    return "remote", p
+
+
+def _d_real(path):
+    try:
+        return _d_os.path.realpath(path)
+    except (OSError, ValueError):
+        raise _DCannot()
+
+
+def _d_key(path, nt=_D_NT):
+    """A comparison key: the canonical Windows reading on nt, `/`, casefolded."""
+    if nt:
+        kind, p = _d_win(path)
+        if p is not None:
+            path = p
+    return path.replace("\\", "/").casefold().rstrip("/")
+
+
+def _d_protected(project, env, nt=_D_NT):
+    """Keys of the protected directories and files, for comparing, and their real
+    paths, for the POSIX hard-link checks (a key need not exist on disk)."""
+    home = _d_os.path.expanduser("~")
+    cfg = env.get("CLAUDE_CONFIG_DIR") or _d_os.path.join(home, ".claude")
+    plugins = env.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or _d_os.path.join(cfg, "plugins")
+    dirs = [_d_os.path.join(project, ".claude", d) for d in _D_DIRS]
+    dirs += [_d_os.path.join(cfg, d) for d in _D_DIRS] + [plugins]
+    files = [_d_os.path.join(cfg, "settings.json"), _d_os.path.join(cfg, "settings.local.json"),
+             _d_os.path.join(home, ".claude.json"), _d_os.path.join(project, ".mcp.json"),
+             _d_os.path.join(project, ".claude", "security-defaults.json")]
+    if env.get("CLAUDE_CONFIG_DIR"):
+        files.append(_d_os.path.join(cfg, ".claude.json"))
+    dreals = [_d_real(d) for d in dirs]
+    freals = [_d_real(f) for f in files]
+    return ([_d_key(d, nt) for d in dreals], [_d_key(f, nt) for f in freals], dreals, freals)
+
+
+def _d_contained(real, dirs, files, nt=_D_NT):
+    k = _d_key(real, nt)
+    return k in files or any(k == d or k.startswith(d + "/") for d in dirs)
+
+
+def _d_link_names(real):
+    """Every name of a Windows file (its hard links), as full paths."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.FindFirstFileNameW.restype = wintypes.HANDLE
+    k32.FindFirstFileNameW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                       ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR]
+    k32.FindNextFileNameW.restype = wintypes.BOOL
+    k32.FindNextFileNameW.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+                                      wintypes.LPWSTR]
+    k32.FindClose.argtypes = [wintypes.HANDLE]
+    size = 32768
+    buf = ctypes.create_unicode_buffer(size)
+    n = wintypes.DWORD(size)
+    h = k32.FindFirstFileNameW(real, 0, ctypes.byref(n), buf)
+    if h in (None, wintypes.HANDLE(-1).value, -1):
+        raise _DCannot()
+    drive = _d_os.path.splitdrive(real)[0]
+    names = []
+    try:
+        while True:
+            names.append(drive + buf.value)          # names are volume-relative
+            if len(names) > 1024:
+                raise _DCannot()
+            n = wintypes.DWORD(size)
+            if not k32.FindNextFileNameW(h, ctypes.byref(n), buf):
+                if ctypes.get_last_error() != 38:     # ERROR_HANDLE_EOF
+                    raise _DCannot()
+                break
+    finally:
+        k32.FindClose(h)
+    return names
+
+
+def _d_hardlinked(real, prot, nt, link_names):
+    """Is the existing file at real also reachable under a protected name? Only a file
+    with more than one link is looked at, so ordinary edits pay nothing."""
+    import stat as _d_stat
+    dirs, files, dreals, freals = prot
+    try:
+        st = _d_os.stat(real)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        raise _DCannot()
+    if not _d_stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
+        return False
+    if nt:
+        try:
+            names = link_names(real)
+        except _DCannot:
+            raise
+        except Exception:
+            raise _DCannot()
+        return any(_d_raw_hit(n) or _d_contained(n, dirs, files, nt) for n in names if n)
+    for f in freals:
+        try:
+            fs = _d_os.stat(f)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            raise _DCannot()
+        if (fs.st_dev, fs.st_ino) == (st.st_dev, st.st_ino):
+            return True
+    seen = 0
+    stack = [(d, 0) for d in dreals]
+    while stack:
+        top, depth = stack.pop(0)
+        try:
+            it = _d_os.scandir(top)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            raise _DCannot()
+        with it:
+            for e in it:
+                seen += 1
+                if seen > _D_WALK_BOUND:
+                    raise _DCannot()
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if depth < _D_MAX_DEPTH:
+                            stack.append((e.path, depth + 1))
+                    elif e.inode() == st.st_ino and e.stat(follow_symlinks=False).st_dev == st.st_dev:
+                        return True
+                except OSError:
+                    raise _DCannot()
+    return False
+
+
+def _d_literal(p):
+    """The \\\\?\\ spelling of a canonical Windows path, which Win32 does not trim: a drive
+    path gets the prefix, a UNC one (WSL) becomes \\\\?\\UNC\\..., a volume path already
+    has it. None for a relative path."""
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + p[2:]
+    if _D_DRIVE_RE.match(p):
+        return "\\\\?\\" + p
+    return None
+
+
+def _d_resolved(local, project, env, nt, link_names, literal=False):
+    """(verdict, real path) for an absolute local path. literal: judge the spelling as
+    written (a \\\\?\\ path), not Win32's trimmed one -- see _d_judge."""
+    real = _d_real(local)
+    probe = real
+    if nt:
+        # What it resolved to is classified again: a link may lead to a network or
+        # loopback path, and a volume with no drive letter (mounted as a folder)
+        # matches no key, so it is not judged (fails closed).
+        rkind, rp = _d_classify(real, True, trim=not literal)
+        if rkind in ("cannot", "volume"):
+            return "cannot", ""
+        if rkind == "remote":
+            return ("yes" if _d_raw_hit(rp) or _d_short_hit(rp) else "no"), rp
+        real = rp
+        probe = _d_literal(rp) if literal else real
+        if probe is None:
+            probe = real
+    if _d_raw_hit(real):
+        return "yes", real
+    prot = _d_protected(project, env, nt)
+    if _d_contained(real, prot[0], prot[1], nt):
+        return "yes", real
+    if _d_hardlinked(probe, prot, nt, link_names or _d_link_names):
+        return "yes", real
+    return "no", real
+
+
+def _d_judge(path, project, env, nt=_D_NT, link_names=None):
+    """(verdict, real path or "") for one file_path."""
+    if not path:
+        return "no", ""
+    if "\x00" in path:
+        return "cannot", ""
+    if _d_raw_hit(path):
+        return "yes", ""
+    kind, local = _d_classify(path, nt)
+    if kind == "cannot":
+        return "cannot", ""
+    if _d_raw_hit(local):
+        return "yes", ""
+    if kind == "remote":
+        return ("yes" if _d_short_hit(local) else "no"), ""
+    try:
+        if not _d_os.path.isabs(local):
+            local = _d_os.path.join(project, local)
+        v, real = _d_resolved(local, project, env, nt, link_names)
+        if nt and kind in ("local", "volume") and v == "no":
+            # Win32 drops trailing dots and spaces, but a runtime that writes through
+            # \\?\ (Node, Bun) keeps them: an existing link named `ag.` or `h.md.` is
+            # another file. When trimming changed the path -- a drive, volume or WSL
+            # path alike -- judge the literal \\?\ spelling too; yes or cannot wins.
+            lkind, lit = _d_classify(path, nt, trim=False)
+            if lkind == kind and lit is not None:
+                if not _d_os.path.isabs(lit):
+                    lit = _d_os.path.join(project, lit)
+                lit_ns = _d_literal(lit)
+                if lit != local and lit_ns is not None:
+                    v2, r2 = _d_resolved(lit_ns, project, env, nt, link_names, True)
+                    if v2 != "no":
+                        return v2, r2
+    except _DCannot:
+        return "cannot", ""
+    return v, real
+
+
+def _d_paths(obj, acc, depth):
+    if depth > _D_MAX_DEPTH:
+        raise _DCannot()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "file_path":
+                acc.append(v)
+            _d_paths(v, acc, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj:
+            _d_paths(v, acc, depth + 1)
+
+
+def bcl_definition_verdict(obj, project, env=None, nt=_D_NT, link_names=None):
+    """The verdict for a parsed payload (None when it did not parse)."""
+    env = _d_os.environ if env is None else env
+    if not isinstance(obj, dict):
+        return "unparsed", ""
+    try:
+        acc = []
+        _d_paths(obj, acc, 0)
+    except (_DCannot, RecursionError):
+        return "cannot", ""
+    if any(not isinstance(p, str) for p in acc):
+        return "cannot", ""
+    acc = [p for p in acc if p]
+    if not acc:
+        return "nopath", ""
+    out, shown = "no", ""
+    for p in acc:
+        try:
+            v, real = _d_judge(p, project, env, nt, link_names)
+        except Exception:
+            v, real = "cannot", ""
+        if v == "yes":
+            return "yes", real or p
+        if v != "no":
+            out = "cannot"
+        shown = shown or real
+    return out, shown
+DEFPATHPY
+
+IFS='' read -r -d '' _BCL_DEFPATH_PRIME_TAIL <<'DEFPATHPY' || true
+try:
+    _d_obj = pdata if globals().get("pl_state") == "ok" else None
+    _d_v, _d_r = bcl_definition_verdict(_d_obj, os.path.dirname(os.path.dirname(CFG_PATH)))
+except Exception:
+    _d_v, _d_r = "cannot", ""
+sys.stdout.buffer.write(("_BCL_PL_DEFINITION=" + q(_d_v) + "\n_BCL_PL_DEFREAL=" + q(_d_r) + "\n")
+                        .encode("utf-8", "backslashreplace"))
+DEFPATHPY
+
+IFS='' read -r -d '' _BCL_DEFPATH_MAIN_TAIL <<'DEFPATHPY' || true
+import json as _d_json
+import sys as _d_sys
+try:
+    _d_obj = _d_json.loads(_d_sys.stdin.buffer.read().decode("utf-8"))
+except Exception:
+    _d_obj = None
+try:
+    _d_v, _d_r = bcl_definition_verdict(_d_obj, _d_sys.argv[1])
+except Exception:
+    _d_v, _d_r = "cannot", ""
+_d_sys.stdout.buffer.write((_d_v + "\n" + _d_r.replace("\n", " ") + "\n")
+                           .encode("utf-8", "backslashreplace"))
+DEFPATHPY
+# <<< definition paths (scope-guard) <<<
+
 # bcl_prime [payload]
 # Call it plainly — `bcl_prime "$PAYLOAD"`, NOT `eval "$(bcl_prime ...)"`. A shell
 # function body runs in the caller's shell, so it can set these globals directly;
@@ -547,9 +963,16 @@ PRIMEPY
 # spent nine forks (bcl_python, bcl_config_path, bcl_repo_root, two quoting helpers,
 # the pipeline, the capture, timeout, python) and measured 235ms; it is now four.
 bcl_prime() {
-  local out rc=0 want=0 root
+  local out rc=0 want=0 root src="$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC"
   [[ $# -gt 0 ]] && want=1
   _BCL_PRIME_STATE=""
+  # bcl_prime "$PAYLOAD" definition: also judge the payload's file_path (see
+  # _BCL_DEFPATH_SRC). Opt-in, so every other hook's prime runs exactly the script
+  # it ran before, and a fault in that code can fail only the hook that asked.
+  if [[ "${2:-}" == definition ]]; then
+    src+="$_BCL_DEFPATH_SRC$_BCL_DEFPATH_PRIME_TAIL"
+    unset -v _BCL_PL_DEFINITION _BCL_PL_DEFREAL
+  fi
 
   # Called, not substituted, so _BCL_PY lands in the caller's shell: every later
   # `$(bcl_python)` then answers from the memo instead of re-probing.
@@ -578,10 +1001,10 @@ bcl_prime() {
   # empty-payload test both ignore.
   _bcl_cfg_scope
   if [[ $want -eq 1 ]]; then
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC" \
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$src" \
       "$_BCL_PRIME_KEY" 1 "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED" <<< "$1")" || rc=$?
   else
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC" \
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$src" \
       "$_BCL_PRIME_KEY" 0 "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED" </dev/null)" || rc=$?
   fi
   # No output at all, other than the script's own bounds exit (3) or a timeout

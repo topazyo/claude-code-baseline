@@ -30,7 +30,11 @@ TMP="$(mktemp -d)"
 # broken. The hooks wrap their children in `timeout`, which signals its process
 # group, so a stray TERM reaching this harness is a real scenario, not a
 # theoretical one.
-cleanup() { cd "$SRC" 2>/dev/null || true; rm -rf "$TMP"; }
+cleanup() { cd "$SRC" 2>/dev/null || true; rm -rf "$TMP" "$HOMETMP"; }
+# The user's config home is protected by scope-guard (see its definition-path check),
+# so the suite must not see the developer's real ~/.claude: pinned to a scratch home,
+# outside the scratch repo, before any hook runs.
+HOMETMP="$(mktemp -d)"
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
@@ -62,6 +66,9 @@ H="$WT/.claude/hooks/baseline"
 CFG="$WT/.claude/baseline.config.json"
 RULES="$WT/.claude/security-defaults.json"
 export CLAUDE_PROJECT_DIR="$WT"
+UH="$(winpath "$HOMETMP")"
+export HOME="$HOMETMP" USERPROFILE="$UH"
+unset CLAUDE_CONFIG_DIR CLAUDE_CODE_PLUGIN_CACHE_DIR
 pass=0; fail=0
 
 setcfg() { "$PY" -c "import json;p=r'$CFG';c=json.load(open(p));$1;json.dump(c,open(p,'w'))"; }
@@ -117,15 +124,153 @@ run "out-of-scope -> 2"      modules/scope-guard.sh "$(write_payload "$WT/src/ot
 run "in-scope -> 0"          modules/scope-guard.sh "$(write_payload "src/in-scope.py")" 0
 run "unparseable -> 2"       modules/scope-guard.sh '{ not json' 2
 resetcfg
-# Subagent and skill definitions: a Write or Edit whose new text names the baseline hook
-# directory is refused there, with scopeGuard off (the default) or on; elsewhere, or
-# without that text, it is not. def_payload <tool> <file_path> <text key> <text>
+# Paths only a human may write -- subagent, skill and command definitions, plugins, user
+# settings, .claude.json and .mcp.json: every Write or Edit is refused, with scopeGuard
+# off (the default) or on, whatever the text. The path decides, as written and as it
+# resolves. def_payload <tool> <file_path> <text key> <text>
 def_payload() { printf '{"tool_name":"%s","tool_input":{"file_path":"%s","%s":"%s"}}' "$1" "$2" "$3" "$4"; }
 DEFTXT="See /.claude/hooks/baseline/README for the baseline hooks."
 run "agent file naming the hook dir -> 2"        modules/scope-guard.sh "$(def_payload Write "$WT/.claude/agents/helper.md" content "$DEFTXT")" 2
-run "agent file, other text -> 0"                modules/scope-guard.sh "$(def_payload Write "$WT/.claude/agents/helper.md" content "A helper agent.")" 0
+run "agent file, other text -> 2"                modules/scope-guard.sh "$(def_payload Write "$WT/.claude/agents/helper.md" content "A helper agent.")" 2
 run "skill file via Edit new_string -> 2"        modules/scope-guard.sh "$(def_payload Edit "$WT/.claude/skills/x/SKILL.md" new_string "$DEFTXT")" 2
-run "skill file, only old_string names it -> 0"  modules/scope-guard.sh "$(def_payload Edit "$WT/.claude/skills/x/SKILL.md" old_string "$DEFTXT")" 0
+run "skill file, only old_string names it -> 2"  modules/scope-guard.sh "$(def_payload Edit "$WT/.claude/skills/x/SKILL.md" old_string "$DEFTXT")" 2
+run "command file -> 2"                          modules/scope-guard.sh "$(def_payload Write "$WT/.claude/commands/c.md" content "x")" 2
+run "skill folder plugin manifest -> 2"          modules/scope-guard.sh "$(def_payload Write "$WT/.claude/skills/x/.claude-plugin/plugin.json" content "{}")" 2
+run "script beside a skill -> 2"                 modules/scope-guard.sh "$(def_payload Write "$WT/.claude/skills/x/scripts/a.sh" content "true")" 2
+run "nested .claude agents -> 2"                 modules/scope-guard.sh "$(def_payload Write "$WT/sub/.claude/agents/h.md" content "x")" 2
+run "project .claude/plugins -> 2"               modules/scope-guard.sh "$(def_payload Write "$WT/.claude/plugins/p/hooks/hooks.json" content "{}")" 2
+run ".mcp.json -> 2"                             modules/scope-guard.sh "$(def_payload Write "$WT/.mcp.json" content "{}")" 2
+run "nested .mcp.json -> 2"                      modules/scope-guard.sh "$(def_payload Write "$WT/sub/.mcp.json" content "{}")" 2
+run "user settings.json -> 2"                    modules/scope-guard.sh "$(def_payload Write "$UH/.claude/settings.json" content "{}")" 2
+run "user settings.local.json -> 2"              modules/scope-guard.sh "$(def_payload Edit "$UH/.claude/settings.local.json" new_string "x")" 2
+run "user .claude.json -> 2"                     modules/scope-guard.sh "$(def_payload Write "$UH/.claude.json" content "{}")" 2
+run "user plugin cache -> 2"                     modules/scope-guard.sh "$(def_payload Write "$UH/.claude/plugins/cache/m/p/1/hooks/hooks.json" content "{}")" 2
+run "user skill -> 2"                            modules/scope-guard.sh "$(def_payload Write "$UH/.claude/skills/x/SKILL.md" content "x")" 2
+run "user CLAUDE.md -> 0"                        modules/scope-guard.sh "$(def_payload Write "$UH/.claude/CLAUDE.md" content "x")" 0
+run "project settings.json (config-guard's) -> 0" modules/scope-guard.sh "$(def_payload Edit "$WT/.claude/settings.json" new_string "x")" 0
+run "a .claude-agents file -> 0"                 modules/scope-guard.sh "$(def_payload Write "$WT/docs/.claude-agents.md" content "x")" 0
+run "project hook script -> 2"                   modules/scope-guard.sh "$(def_payload Write "$WT/.claude/hooks/mine/h.sh" content "true")" 2
+run "user hook script -> 2"                      modules/scope-guard.sh "$(def_payload Write "$UH/.claude/hooks/h.sh" content "true")" 2
+run "security-defaults rules -> 2"               modules/scope-guard.sh "$(def_payload Write "$WT/.claude/security-defaults.json" content "{}")" 2
+run "a hooks folder elsewhere -> 0"              modules/scope-guard.sh "$(def_payload Write "$WT/src/hooks/h.sh" content "true")" 0
+run "an agents folder in src -> 0"               modules/scope-guard.sh "$(def_payload Write "$WT/src/agents/x.md" content "x")" 0
+# A relocated config home has no .claude component: only its real path finds it.
+sg_env() {  # <desc> <env assignment> <payload> <want>
+  local got
+  printf '%s' "$3" | env "$2" bash "$H/modules/scope-guard.sh" >/dev/null 2>&1; got=$?
+  if [ "$got" = "$4" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1] want=$4 got=$got"; fi
+}
+mkdir -p "$HOMETMP/cfg" "$HOMETMP/pc"
+sg_env "CLAUDE_CONFIG_DIR skill -> 2"    "CLAUDE_CONFIG_DIR=$UH/cfg" "$(def_payload Write "$UH/cfg/skills/x/SKILL.md" content "x")" 2
+sg_env "CLAUDE_CONFIG_DIR settings -> 2" "CLAUDE_CONFIG_DIR=$UH/cfg" "$(def_payload Write "$UH/cfg/settings.json" content "{}")" 2
+sg_env "CLAUDE_CONFIG_DIR, other file -> 0" "CLAUDE_CONFIG_DIR=$UH/cfg" "$(def_payload Write "$UH/cfg/notes.md" content "x")" 0
+sg_env "plugin cache dir env -> 2"       "CLAUDE_CODE_PLUGIN_CACHE_DIR=$UH/pc" "$(def_payload Write "$UH/pc/m/hooks.json" content "{}")" 2
+sg_env "without the env, same file -> 0" "CLAUDE_CODE_PLUGIN_CACHE_DIR=" "$(def_payload Write "$UH/pc/m/hooks.json" content "{}")" 0
+# Aliases: a link or junction into .claude/agents, a hard link, and (Windows) the
+# \\?\ form through the junction. Each is created by the shell, not by the hook.
+mkdir -p "$WT/.claude/agents" "$WT/links" "$WT/src"
+printf 'x\n' > "$WT/.claude/agents/hl.md"
+ln -s "$WT/.claude/agents" "$WT/links/ag" 2>/dev/null
+if [ ! -L "$WT/links/ag" ] && command -v cygpath >/dev/null 2>&1; then
+  rm -rf "$WT/links/ag"
+  MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$WT/links/ag")" "$(cygpath -w "$WT/.claude/agents")" >/dev/null 2>&1
+fi
+if [ -d "$WT/links/ag" ]; then
+  run "write through a link into agents -> 2"    modules/scope-guard.sh "$(def_payload Write "$WT/links/ag/n.md" content "x")" 2
+  run "edit through a link into agents -> 2"     modules/scope-guard.sh "$(def_payload Edit "$WT/links/ag/hl.md" new_string "y")" 2
+  # The prime fails on this payload; the standalone run must still resolve the link.
+  run "prime failure, write through the link -> 2" modules/scope-guard.sh "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":"x \\%s"}}' "$WT/links/ag/n.md" ud800)" 2
+  if command -v cygpath >/dev/null 2>&1; then
+    run "\\\\?\\ form through the junction -> 2" modules/scope-guard.sh "$(def_payload Write "\\\\\\\\?\\\\$(cygpath -w "$WT/links/ag/z.md" | sed 's/\\/\\\\/g')" content "x")" 2
+  fi
+else
+  fail=$((fail + 1)); echo "  FAIL [no link into .claude/agents could be made: neither ln -s nor mklink /J]"
+fi
+if ln "$WT/.claude/agents/hl.md" "$WT/src/hl.md" 2>/dev/null; then
+  run "hard link of an agent file -> 2"          modules/scope-guard.sh "$(def_payload Edit "$WT/src/hl.md" new_string "y")" 2
+else
+  fail=$((fail + 1)); echo "  FAIL [no hard link could be made]"
+fi
+run "ordinary file next to the hard link -> 0"   modules/scope-guard.sh "$(def_payload Write "$WT/src/plain.md" content "x")" 0
+mkdir -p "$HOMETMP/.claude"; printf '{}\n' > "$HOMETMP/.claude/settings.json"
+if ln "$HOMETMP/.claude/settings.json" "$WT/src/us.json" 2>/dev/null; then
+  run "hard link of user settings -> 2"          modules/scope-guard.sh "$(def_payload Edit "$WT/src/us.json" new_string "y")" 2
+else
+  fail=$((fail + 1)); echo "  FAIL [no hard link of user settings could be made]"
+fi
+# A definition directory that is itself a link elsewhere: the target is protected too.
+P2="$HOMETMP/p2"; mkdir -p "$P2/.claude" "$P2/shared/skills"
+ln -s "$P2/shared/skills" "$P2/.claude/skills" 2>/dev/null
+if [ ! -L "$P2/.claude/skills" ] && command -v cygpath >/dev/null 2>&1; then
+  rm -rf "$P2/.claude/skills"
+  MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$P2/.claude/skills")" "$(cygpath -w "$P2/shared/skills")" >/dev/null 2>&1
+fi
+if [ -d "$P2/.claude/skills" ]; then
+  sg_env "linked-away skills dir, real location -> 2" "CLAUDE_PROJECT_DIR=$(winpath "$P2")" "$(def_payload Write "$(winpath "$P2")/shared/skills/x/SKILL.md" content "x")" 2
+  sg_env "linked-away skills dir, sibling -> 0"       "CLAUDE_PROJECT_DIR=$(winpath "$P2")" "$(def_payload Write "$(winpath "$P2")/shared/other.md" content "x")" 0
+else
+  fail=$((fail + 1)); echo "  FAIL [no link for the definition directory could be made]"
+fi
+# Windows: an 8.3 short name of .claude, and UNC / device forms. On CI the short name must
+# exist (fsutil sets one when the volume has none); locally its absence is a SKIP.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    short="$(MSYS_NO_PATHCONV=1 cmd /c dir /x "$(cygpath -w "$WT")" 2>/dev/null | awk '$NF == ".claude" && $(NF-1) ~ /~/ {print $(NF-1)}')"
+    if [ -z "$short" ]; then
+      MSYS_NO_PATHCONV=1 fsutil file setshortname "$(cygpath -w "$WT/.claude")" CLAUDE~1 >/dev/null 2>&1 && short="CLAUDE~1"
+    fi
+    if [ -n "$short" ]; then
+      run "8.3 name of .claude -> 2"             modules/scope-guard.sh "$(def_payload Write "$WT/$short/agents/q.md" content "x")" 2
+    elif [ "${CI:-}" = true ]; then
+      fail=$((fail + 1)); echo "  FAIL [8.3 row: no short name for .claude and fsutil could not set one on CI]"
+    else
+      echo "  SKIP [8.3 row: no short name for .claude and fsutil could not set one here]"
+    fi
+    # Every spelling Windows (or the Node/Bun runtimes) turns into a protected file.
+    jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g'; }
+    USW="$(cygpath -w "$HOMETMP/.claude/settings.json")"
+    MCW="$(cygpath -w "$WT/.mcp.json")"
+    run "NTFS stream on .mcp.json -> 2"          modules/scope-guard.sh "$(def_payload Write "$(jesc "$MCW::\$DATA")" content "{}")" 2
+    run "NTFS stream on user settings -> 2"      modules/scope-guard.sh "$(def_payload Write "$(jesc "$USW::\$DATA")" content "{}")" 2
+    run "index allocation into agents -> 2"      modules/scope-guard.sh "$(def_payload Write "$(jesc "$(cygpath -w "$WT/.claude")\\agentz::\$INDEX_ALLOCATION\\x.md")" content "x")" 2
+    run "\\??\\ user settings -> 2"               modules/scope-guard.sh "$(def_payload Write "$(jesc "\\??\\$USW")" content "{}")" 2
+    run "GLOBALROOT\\??\\ user settings -> 2"     modules/scope-guard.sh "$(def_payload Write "$(jesc "\\\\?\\GLOBALROOT\\??\\$USW")" content "{}")" 2
+    run "GLOBALROOT Mup -> 2 (cannot judge)"     modules/scope-guard.sh "$(def_payload Write "$(jesc '\\?\GLOBALROOT\Device\Mup\no-such-host.invalid\s\x.md')" content "x")" 2
+    run "\\\\.\\ trailing dot on .mcp.json -> 2"  modules/scope-guard.sh "$(def_payload Write "$(jesc "\\\\.\\$MCW.")" content "{}")" 2
+    run "IPv6 loopback spelling -> 2"            modules/scope-guard.sh "$(def_payload Write "$(jesc '\\[0::1]\c$\x.md')" content "x")" 2
+    # Links whose own names end in a dot, made through \\?\: Win32 would trim the dot,
+    # but Node and Bun write through the literal name.
+    if "$PY" -c 'import _winapi, os, sys; _winapi.CreateJunction(sys.argv[1], sys.argv[2]); os.link(sys.argv[3], sys.argv[4])' \
+        "$(cygpath -w "$WT/.claude/agents")" "\\\\?\\$(cygpath -w "$WT/links")\\ag." \
+        "$(cygpath -w "$WT/.claude/agents/hl.md")" "\\\\?\\$(cygpath -w "$WT/src")\\h.md." 2>/dev/null; then
+      run "junction named ag. -> 2"              modules/scope-guard.sh "$(def_payload Write "$WT/links/ag./n.md" content "x")" 2
+      run "hard link named h.md. -> 2"           modules/scope-guard.sh "$(def_payload Edit "$WT/src/h.md." new_string "y")" 2
+    else
+      fail=$((fail + 1)); echo "  FAIL [no link named with a trailing dot could be made]"
+    fi
+    run "ordinary file via \\\\?\\ -> 0"          modules/scope-guard.sh "$(def_payload Write "$(jesc "\\\\?\\$(cygpath -w "$WT/src/viaq.md")")" content "x")" 0
+    vol="$(MSYS_NO_PATHCONV=1 mountvol "${USW:0:2}\\" /L 2>/dev/null | tr -d ' \r')"
+    case "$vol" in
+      '\\?\Volume{'*)
+        run "volume GUID user settings -> 2"     modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${USW:2}")" content "{}")" 2
+        WTW="$(cygpath -w "$WT")"
+        run "volume GUID, junction named ag. -> 2" modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${WTW:2}\\links\\ag.\\vx.md")" content "x")" 2
+        run "volume GUID, hard link h.md. -> 2"  modules/scope-guard.sh "$(def_payload Edit "$(jesc "${vol%\\}${WTW:2}\\src\\h.md.")" new_string "y")" 2
+        run "volume GUID, ordinary file -> 0"    modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${WTW:2}\\src\\vplain.md")" content "x")" 0 ;;
+      *)
+        if [ "${CI:-}" = true ]; then fail=$((fail + 1)); echo "  FAIL [volume GUID row: mountvol gave no volume name on CI]"
+        else echo "  SKIP [volume GUID row: mountvol gave no volume name here]"; fi ;;
+    esac
+    run "remote UNC, protected text -> 2"        modules/scope-guard.sh "$(def_payload Write '\\\\no-such-host.invalid\\s\\.claude\\agents\\x.md' content "x")" 2
+    run "remote UNC, ordinary -> 0"              modules/scope-guard.sh "$(def_payload Write '\\\\no-such-host.invalid\\s\\x.md' content "x")" 0
+    run "mixed-separator UNC, protected -> 2"    modules/scope-guard.sh "$(def_payload Write '\\/no-such-host.invalid\\s\\.claude\\skills\\x.md' content "x")" 2
+    run "loopback UNC -> 2 (cannot judge)"       modules/scope-guard.sh "$(def_payload Write '\\\\localhost\\c$\\x.md' content "x")" 2
+    run "device pipe -> 2 (cannot judge)"        modules/scope-guard.sh "$(def_payload Write '\\\\.\\pipe\\x' content "x")" 2
+    ;;
+esac
+run "NUL in the path -> 2 (cannot judge)"        modules/scope-guard.sh '{"tool_name":"Write","tool_input":{"file_path":"src/a\u0000b.md","content":"x"}}' 2
+run "file_path not a string -> 2"                modules/scope-guard.sh '{"tool_name":"Write","tool_input":{"file_path":7,"content":"x"}}' 2
+run "no file_path -> 0"                          modules/scope-guard.sh '{"tool_name":"Write","tool_input":{"content":"x"}}' 0
 run "windows path, mixed case -> 2"              modules/scope-guard.sh "$(def_payload Write 'C:\\repo\\.Claude\\Agents\\h.md' content "$DEFTXT")" 2
 run "relative agent path -> 2"                   modules/scope-guard.sh "$(def_payload Write ".claude/agents/h.md" content "$DEFTXT")" 2
 run "same text in a source file -> 0"            modules/scope-guard.sh "$(def_payload Write "$WT/src/app.py" content "$DEFTXT")" 0
@@ -136,6 +281,30 @@ run "Edit with old and new text naming it -> 2"  modules/scope-guard.sh "$(print
 run "unparseable payload naming it -> 2"         modules/scope-guard.sh '{"tool_name":"Write","tool_input":{"file_path":".claude/agents/h.md","content":"/.claude/hooks/baseline/x' 2
 run "unparseable payload, module off -> 0"       modules/scope-guard.sh '{ not json' 0
 run "payload the prime cannot encode, naming it -> 2" modules/scope-guard.sh "$(printf '{"tool_name":"Write","tool_input":{"file_path":".claude/agents/h.md","content":"/.claude/hooks/baseline/x \\%s"}}' ud800)" 2
+run "payload the prime cannot encode, ordinary file -> 0" modules/scope-guard.sh "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":"x \\%s"}}' "$WT/src/x.py" ud800)" 0
+# A broken definition check fails closed, for every target: a renamed entry point (the
+# prime survives, its call fails) and a syntax error (the prime and the standalone run
+# both fail). Run from a copy of the hook tree, outside the repo.
+# hbad_row <desc> <sed expression> <want>: a fresh copy, the edit proven applied, one run.
+hbad_row() {
+  rm -rf "$HOMETMP/hbad"; cp -R "$H" "$HOMETMP/hbad"
+  if [ -n "$2" ]; then
+    sed -i "$2" "$HOMETMP/hbad/lib/common.sh"
+    if cmp -s "$H/lib/common.sh" "$HOMETMP/hbad/lib/common.sh"; then
+      fail=$((fail + 1)); echo "  FAIL [$1: the edit did not apply]"; return
+    fi
+  fi
+  def_payload Write "$WT/src/x.py" content "x" | bash "$HOMETMP/hbad/modules/scope-guard.sh" >/dev/null 2>&1; rc=$?
+  [ "$rc" = "$3" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [$1] want=$3 rc=$rc"; }
+}
+hbad_row "the unmodified copy allows an ordinary write" "" 0
+hbad_row "definition check without its entry point fails closed" 's/^def bcl_definition_verdict(/def bcl_definition_verdict_gone(/' 2
+hbad_row "definition check with a syntax error fails closed" 's/^_D_WALK_BOUND = 20000$/_D_WALK_BOUND = (/' 2
+rm -rf "$HOMETMP/hbad"
+# Only scope-guard asks for the verdict: a plain prime (every other hook) computes none.
+( source "$H/lib/common.sh"; bcl_prime "$(write_payload "$WT/.claude/agents/x.md")"
+  [ "$_BCL_PRIME_STATE" = ok ] && [ -z "${_BCL_PL_DEFINITION+set}" ] ) \
+  && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [a plain prime computed a definition verdict]"; }
 setcfg "c['failClosed']=False"
 run "unparseable payload naming it, failClosed false -> 0" modules/scope-guard.sh '{"tool_name":"Write","tool_input":{"file_path":".claude/agents/h.md","content":"/.claude/hooks/baseline/x' 0
 resetcfg
