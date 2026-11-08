@@ -65,6 +65,34 @@ LAUNCH_CASES = {"hooks": {"PreToolUse": [{"hooks": [
     ours('bash -p' + chr(11) + '"' + B + 'guardrails/auto-format.sh"'),  # VT: one word to sh
     USER,                                                         # not ours: ignored
 ]}]}}
+def doc_claims():
+    """Claims the shipped docs must not make again (review M3, M11): command-guard has no
+    "tamper rule", and `deny` is not "enforced unconditionally" (a mod can approve a call a
+    deny rule refused). English docs and the shipped JSON comments only; whitespace is
+    collapsed so a phrase wrapped across lines is still seen. Hebrew is held to the
+    English by tests/translation_sync.py, not by phrases."""
+    import re
+    texts = {}
+    for rel in ("README.md", "ONBOARDING.md", "RELEASING.md", "ROADMAP.md", "SECURITY.md",
+                "managed/README.md", "tools/README.md", "tests/README.md"):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+            texts[rel] = fh.read()
+    for rel in ("settings.template.json", "managed/allowlist.example.json"):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+            texts[rel] = fh.read()
+    # Claims, not words: "command-guard has no tamper rule" stays sayable.
+    claims = (
+        ("command-guard's tamper rule", r"command-guard'?s (own )?tamper rule"),
+        ("tamper rule is the other half", r"tamper rule is the other half"),
+        ("deny ... unconditional", r"\bdeny\b[^.]{0,80}\bunconditional|\bunconditional\w* (enforced|enforcement)"),
+    )
+    bad = []
+    for rel, text in texts.items():
+        flat = re.sub(r"\s+", " ", text).lower()
+        bad += [rel + ": " + label for label, pat in claims if re.search(pat, flat)]
+    return bad
+
+
 FULL_TEMPLATE = ms.strip_comments(ms.load(os.path.join(ROOT, "settings.template.json"), "baseline template"))
 DENY = ms.baseline_deny(FULL_TEMPLATE)
 MINS = ms.baseline_timeouts(ms.strip_comments(ms.load(os.path.join(ROOT, "settings.template.json"), "baseline template")))
@@ -371,6 +399,11 @@ checks = [
      and ms.missing_deny({"permissions": {"deny": "Edit(.env*)"}}, DENY) == DENY
      and ms.missing_deny({"permissions": {"deny": {"0": "Edit(.env*)"}}}, DENY) == DENY
      and ms.missing_deny({"permissions": {"deny": {"Edit(.env*)": True}}}, DENY) == DENY),
+    # shipped docs (review M3, M11)
+    ("docs: no command-guard 'tamper rule', no deny 'enforced unconditionally'", doc_claims() == []),
+    ("template deny comment states the cd / variable gap and that command-guard does not cover it",
+     "command-guard has no rule" in ms.load(os.path.join(ROOT, "settings.template.json"),
+                                            "baseline template")["permissions"]["_comment_deny_scope"]),
 ]
 
 failed = [label for label, ok in checks if not ok]

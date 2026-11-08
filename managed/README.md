@@ -46,6 +46,19 @@ those gaps**, because:
 - **Optional total lockdown.** `allowManagedHooksOnly`, `allowManagedPermissionRulesOnly`,
   and `strictPluginOnlyCustomization` make managed settings the *only* source of
   hooks / permission rules / customization (see the strict profile).
+- **Mods.** A Claude Code mod (on by default since v2.1.287) answers after the
+  `PreToolUse` hooks. *"With neither managed settings nor a Team or Enterprise
+  `/login` as the session's credential, the mod can approve a call that a deny rule
+  refuses or a `PreToolUse` hook blocked"* (permissions docs) — so on a machine
+  without managed settings, a session on any other credential (for example an API key,
+  Bedrock, Google Cloud, Foundry or a long-lived `CLAUDE_CODE_OAUTH_TOKEN`) gets no
+  protection from it. Deploying either profile to the managed-settings path puts
+  managed settings on the machine; the same file passed with `--settings` or copied
+  into a repo does not. To keep users' own mods from running
+  at all, set `allowManagedModsOnly` (not in either profile):
+  `{"pluginConfigs": {"cc-plugin-sec-default@builtin": {"options": {"allowManagedModsOnly": true}}}}`;
+  the strict profile's `allowManagedHooksOnly` also keeps user-installed mods from
+  loading (mods admin docs, re-read 2026-11-08).
 
 This is also where the deliberate **R5 residual** is narrowed the furthest: a managed
 `deny` on `.claude/baseline.config.json`, `.claude/settings.json`,
@@ -60,8 +73,9 @@ tampering with the baseline *non-overridably and in every repo* — not just the
 > **path-text** rules — `Bash(*.claude/baseline.config.json*)` and PowerShell forward- and
 > backslash variants — which do cover the shell path. Understand what a text rule can and
 > cannot do: it matches the **command string**, so `cd .claude && sed -i … settings.json`
-> and `sed -i … "$CFG"` are *not* matched, and nothing else in the baseline catches those
-> forms either (see [What this does not protect against](../README.md#what-this-does-not-protect-against)).
+> and `sed -i … "$CFG"` are *not* matched, and nothing in the baseline prevents those
+> forms; for `settings.json` and `settings.local.json`, config-guard (when enabled)
+> detects the change after the write (see [What this does not protect against](../README.md#what-this-does-not-protect-against)).
 > Under the managed profiles that matters less for the floor itself: the managed hooks
 > take their posture and the other managed keys from `<BASELINE_PREFIX>/managed.config.json`
 > (see "Installing the guardrail scripts"), so a repo-side edit of

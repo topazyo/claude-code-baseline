@@ -167,7 +167,7 @@ is below the pin; checklist exists and is referenced from the release process.
 schema and an inline rationale comment). The pin exists because the whole deny-list —
 secrets *and* the tamper-protection entries
 (`Edit(.claude/settings.json|baseline.config.json|hooks/baseline/**)`) — depends on
-`deny` being enforced unconditionally, so a release where something could route around
+`deny` holding, so a release where something could route around
 `deny` silently weakens it. **The mechanism originally cited here was wrong** and is
 corrected: the documented fix is **v2.1.77** — *"Fixed PreToolUse hooks returning
 `\"allow\"` bypassing `deny` permission rules, including enterprise managed settings"* —

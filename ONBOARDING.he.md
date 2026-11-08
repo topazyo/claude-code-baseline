@@ -97,7 +97,7 @@
 
 ---
 
-<!-- he-sync: part-1--hooks-from-zero sha256=0f8fd8b529e54bc9 -->
+<!-- he-sync: part-1--hooks-from-zero sha256=c5240c750fbd8238 -->
 ## חלק 1 — hooks מאפס
 
 <sub>[המקור באנגלית](ONBOARDING.md#part-1--hooks-from-zero)</sub>
@@ -135,7 +135,7 @@ Claude Code מפעיל hooks ב**אירועים** (events) בעלי שם. התי
 | אירוע (event) | קצב | מתי הוא מופעל | בשביל מה אנחנו משתמשים בו | האם הוא יכול לחסום? |
 |-------|---------|---------------|---------------|---------------|
 | `PreToolUse` | בכל קריאה לכלי | *לפני* שכלי רץ | command-guard (Bash, PowerShell), scope-guard (Write/Edit) | ✅ **כן** |
-| `PostToolUse` | בכל קריאה לכלי | *אחרי* שכלי רץ | auto-format, security-defaults, fix-tags, run-tests, auto-stage | ❌ לא, הכלי כבר רץ |
+| `PostToolUse` | בכל קריאה לכלי | *אחרי* שכלי רץ | security-defaults, fix-tags, run-tests, auto-format, auto-stage (בסדר הזה) | ❌ לא, הכלי כבר רץ |
 | `Stop` | בכל תור | כש-Claude מסיים להשיב | tracker-reminder *(אופציונלי, ראו חלק 4)* | ✅ כן (גורם לו להמשיך) |
 | `ConfigChange` | בשינוי הגדרות | קובץ הגדרות נערך באמצע סשן | config-guard *(אופציונלי, חלק 7)* | ✅ כן (דוחה את השינוי, בשקט) |
 
@@ -177,7 +177,9 @@ Claude Code מפעיל hooks ב**אירועים** (events) בעלי שם. התי
 
 ב-baseline שלנו: ה-command-guard מתאים ל-`Bash|PowerShell`; ה-hooks שקשורים לקבצים
 (auto-format, security-defaults, scope-guard, …) מתאימים ל-`Write|Edit`; וה-hook
-שנקרא tracker-reminder רשום על `Stop`.
+שנקרא tracker-reminder רשום על `Stop`. `Write|Edit` היא רשימה מדויקת של שמות כלים,
+ולכן `NotebookEdit` (כתיבה לתא במחברת) לא מגיע לאף אחד מה-hooks שקשורים לקבצים;
+כללי ה-deny מסוג `Edit(...)` כן חלים עליו.
 
 > ⚠️ **למה `Bash|PowerShell` ולא רק `Bash`.** ב-Windows *בלי* Git Bash, Claude Code לא
 > רושם בכלל את הכלי Bash, ומפעיל במקומו את הכלי PowerShell. hook שמתאים רק ל-`Bash`
@@ -291,7 +293,12 @@ Claude Code מפעיל hooks ב**אירועים** (events) בעלי שם. התי
 > (`permissionDecision: "deny"`), וזה שקול לקוד `2`. וחשוב מאוד: חסימה של `PreToolUse`
 > בקוד `2` קורית *לפני* כללי ההרשאות, ולכן היא גוברת אפילו על כלל "allow" (התרה) ועל
 > `--dangerously-skip-permissions` (הדגל שבדרך כלל אומר ל-Claude Code לדלג על בקשות
-> האישור לכל פעולה). *מקור: התיעוד של Anthropic על hooks ועל הרשאות.*
+> האישור לכל פעולה). *מקור: התיעוד של Anthropic על hooks ועל הרשאות.* דבר אחד גובר
+> עליה: **mod** (מופעל כברירת מחדל מגרסה v2.1.287) עונה אחרי ה-hooks של `PreToolUse`,
+> ויכול לאשר קריאה שה-hook חסם או שכלל deny דחה, אלא אם במחשב יש הגדרות מנוהלות או
+> שפרטי ההתחברות של הסשן הם `/login` של תוכנית Team או Enterprise (מפתח API, Bedrock
+> או `CLAUDE_CODE_OAUTH_TOKEN` לטווח ארוך לא נחשבים). ראו ב-README את *What this does
+> not protect against*.
 >
 > ⚠️ **קראו את זה כ"ניתן לאכיפה *אם הוא רץ*", ולא כ"ניתן לאכיפה".** קוד 2 גובר על
 > כללי ההרשאות, אבל רק ב-hook שבאמת מופעל. ברמת הריפו, סקריפט ה-hook
@@ -310,7 +317,7 @@ Claude Code מפעיל hooks ב**אירועים** (events) בעלי שם. התי
 
 ---
 
-<!-- he-sync: part-2--why-secure-by-default-for-an-ai-coding-agent sha256=88efe59dfbf5720e -->
+<!-- he-sync: part-2--why-secure-by-default-for-an-ai-coding-agent sha256=36b324d7b94a74ec -->
 ## חלק 2 — למה סוכן תכנות מבוסס AI צריך הגנה כברירת מחדל
 
 <sub>[המקור באנגלית](ONBOARDING.md#part-2--why-secure-by-default-for-an-ai-coding-agent)</sub>
@@ -386,7 +393,7 @@ Claude Code יכול להריץ פקודות מעטפת ולערוך קבצים 
 | `drop table`, `truncate table`, `delete from` | פעולות הרסניות על נתונים |
 | הפקודות `curl`/`wget` מול שרת מרוחק (עם או בלי `scheme://`; מותר `http(s)://localhost`, `127.x.x.x` ו-`[::1]`) | הורדה מרוחקת שלא נבדקה (הזרקה / שרשרת אספקה) |
 | `npm install`, `pnpm install`, `yarn add`, `pip install` | תלות שלא נבדקה (שרשרת אספקה) |
-| ב-PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | אותן שלוש קטגוריות, במעטפת שסשנים ב-Windows מקבלים בפועל |
+| ב-PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | אותן שלוש קטגוריות, במעטפת שסשנים ב-Windows מקבלים בפועל. אותן דוחים **כללי ה-deny** מסוג `PowerShell(...)` שב-`settings.template.json`, ולא ה-command-guard, שלא מזהה cmdlets של PowerShell |
 
 אפשר להרחיב את הרשימה בכל ריפו דרך `guardrails.commandGuard.extraPatterns` (למשל
 `["terraform destroy"]`). *(Anthropic מפרסמת דוגמה כמעט זהה בשם `block-rm.sh`, כך שזה
@@ -409,7 +416,9 @@ Claude Code יכול להריץ פקודות מעטפת ולערוך קבצים 
 שדוחות קריאה ועריכה של `.env*` ושל `**/secrets/**`, וגם כללי נתיב שמגינים על הקבצים של
 ה-baseline עצמו. זה **כלל הרשאה** (permission rule), לא hook: Claude Code אוכף אותו
 ישירות, ולכן הוא לא צריך Python, לא `bash` ולא חיווט של hooks. *(הכלל משקף את דפוסי
-חסימת הסודות ש-OWASP ממליץ עליהם.)*
+חסימת הסודות ש-OWASP ממליץ עליהם.)* החריג היחיד הוא mod: בלי הגדרות מנוהלות ובלי
+`/login` של Team או Enterprise, mod יכול לאשר קריאה שכלל deny דחה (ראו את ההערה על
+hooks למעלה).
 
 > ⚠️ **על מה כלל deny מסוג `Read`/`Edit` חל בפועל — החלק שאנשים מבינים הפוך.**
 > הוא חל על כלי הקבצים של Claude עצמו, **וגם על פקודות הקבצים ש-Claude Code מזהה בתוך
@@ -448,7 +457,7 @@ Claude Code יכול להריץ פקודות מעטפת ולערוך קבצים 
 
 ---
 
-<!-- he-sync: part-3--anatomy-of-the-baseline-what-you-installed sha256=0c1384640f667a9b -->
+<!-- he-sync: part-3--anatomy-of-the-baseline-what-you-installed sha256=d6348dcc6d9ba8b8 -->
 ## חלק 3 — האנטומיה של ה-baseline (מה התקנתם)
 
 <sub>[המקור באנגלית](ONBOARDING.md#part-3--anatomy-of-the-baseline-what-you-installed)</sub>
@@ -494,20 +503,22 @@ Claude Code יכול להריץ פקודות מעטפת ולערוך קבצים 
   **עריכה של קובץ ההגדרות**, ואין צורך לגעת ב-`settings.json` בשביל זה.
 - **ה-dispatcher (המנתב) וסדר ההרצה.** הקובץ `settings.json` מפנה hook אחד של PostToolUse
   אל `dispatcher/post-write.sh`, וזה מריץ את ה-hooks של הקבצים בסדר קבוע ובטוח:
-  **auto-format → security-defaults → fix-tags → run-tests → auto-stage** (משמאל לימין). אם בדיקה חוסמת
+  **security-defaults → fix-tags → run-tests → auto-format → auto-stage** (משמאל לימין). אם בדיקה חוסמת
   נכשלת, השרשרת נעצרת, ולכן `auto-stage` אף פעם לא מכניס ל-staging קובץ שהרגע נכשל
-  בבדיקה. בהתקנה חדשה השרשרת מתחילה בפועל ב-`security-defaults`, כי `autoFormat` וכל
-  המודולים מגיעים כבויים: ריפו שהותקן זה עתה לא מריץ שום עבודה ב-`PostToolUse` עד
-  שמפעילים משהו. כל השרשרת חולקת זמן המתנה (timeout) אחד של `PostToolUse`, וזו הסיבה
-  הנוספת לא לשים בנייה של פרויקט (`dotnet format`) בתחילתה.
+  בבדיקה. בהתקנה חדשה שום דבר בשרשרת לא רץ, כי `autoFormat` וכל המודולים מגיעים
+  כבויים: ריפו שהותקן זה עתה לא מריץ שום עבודה ב-`PostToolUse` עד שמפעילים משהו. כל
+  השרשרת חולקת זמן המתנה (timeout) אחד של `PostToolUse`, ולכן צעד איטי (בנייה של
+  פרויקט, כמו `dotnet format`) מקצר את הזמן שנשאר לכל הצעדים שאחריו.
   > ⚠️ **על המינוח:** במודולים האלה של `PostToolUse`, "block" פירושו *להכשיל את
   > הצעד ולהחזיר את הדוח המלא ל-Claude כדי שיתקן*. העריכה כבר קרתה (ראו 1.5). רק
   > מעקות הבטיחות של `PreToolUse` באמת *מונעים* פעולה.
 - **הפרדת מרחבי שמות.** הכול נמצא תחת `.claude/hooks/baseline/`, ולכן אין התנגשות עם
   סקריפטים שהריפו עצמו שומר ב-`.claude/hooks/`.
 - **מה המתקין עשה ל-`settings.json`.** הוא מיזג לתוכו את חיווט ה-hooks של ה-baseline
-  ואת רשימת החסימה לסודות, ולא נגע ב-`permissions.allow`, ב-`model` או ב-hooks קיימים
-  שלכם. אם הקובץ השתנה, המתקין שמר קודם את הגרסה הקודמת בשם
+  ואת רשימת החסימה לסודות, והשאיר במקומם את `permissions.allow`, את `model` ואת
+  ה-hooks שלכם, חוץ מ-hook שהפקודה שלו מזכירה את `/.claude/hooks/baseline/` תחת אירוע
+  שהתבנית מחווטת: hook כזה נחשב חלק מה-baseline, והרשומות של התבנית מחליפות אותו (README,
+  שלב 3 בהתקנה). אם הקובץ השתנה, המתקין שמר קודם את הגרסה הקודמת בשם
   `settings.json.bak.<timestamp>` (והשאיר אותה מחוץ ל-git דרך `.git/info/exclude`);
   התקנה חוזרת שלא משנה כלום לא כותבת גיבוי.
 
@@ -726,7 +737,7 @@ echo "exit=$?"     # expect: the literal "REGRESSION BLOCKER …" message on std
 
 ---
 
-<!-- he-sync: part-7--for-repo-owners--team-leads sha256=c115a61b50ff3747 -->
+<!-- he-sync: part-7--for-repo-owners--team-leads sha256=684204df34e69da3 -->
 ## חלק 7 — לבעלי ריפו ולראשי צוותים
 
 <sub>[המקור באנגלית](ONBOARDING.md#part-7--for-repo-owners--team-leads)</sub>
@@ -747,6 +758,10 @@ echo "exit=$?"     # expect: the literal "REGRESSION BLOCKER …" message on std
   > אם אתם מחזיקים עותק של קוד המקור) לקובץ `CODEOWNERS` עם בעלים מתחום האבטחה, והפעילו
   > הגנת ענפים (branch protection) כך שהבעלות תחייב סקירה. PR של שורה אחת ל-`common.sh`
   > רץ אצל כולם. סקרו את הקבצים האלה כמו שסוקרים סקריפט של מריץ CI, ולא כמו קובץ הגדרות.
+  > בסשנים של `claude -p` ושל Agent SDK אין חלון אישור בכלל: Claude Code מתייחס לתיקייה
+  > כמהימנה, ולכן hooks שנמצאים ב-commit רצים מיד. אל תריצו `claude -p` על ענף שלא נסקר
+  > (למשל משימת CI על ה-head של pull request) בלי `--bare` או
+  > `--settings '{"disableAllHooks": true}'`, וסקרו קודם את תיקיית ה-`.claude/` שלו.
 - **פריסה בארגון (ריבוי ריפו).** הריצו בלולאה `install.sh --target <repo>` על רשימת
   הריפו שלכם; שדרוג הוא פשוט הרצה חוזרת. כל התקנה מטביעה **`baselineVersion`** (בקובץ
   `baseline.config.json`, ובעותק בקובץ `.claude/hooks/baseline/VERSION`), כך שאפשר להחזיק
@@ -807,7 +822,7 @@ echo "exit=$?"     # expect: the literal "REGRESSION BLOCKER …" message on std
   deny — כולל `Bash(*.claude/baseline.config.json*)` וגרסאות ה-PowerShell והלוכסן ההפוך
   שלו, שמתאימים ל**טקסט** של הפקודה. לכן הם עוצרים את
   `sed -i … .claude/baseline.config.json`, אבל לא `cd .claude` לפני כן, ולא נתיב שמורכב
-  ממשתנה; החצי השני הוא הכלל של ה-command-guard עצמו שמגן מפני שיבוש. רצפה שאי אפשר לעקוף
+  ממשתנה, וגם ל-command-guard אין כלל שמכסה את אלה. רצפה שאי אפשר לעקוף
   מפני עריכות של בני אדם או תהליכים חיצוניים היא העבודה על ההגדרות המנוהלות שתוארה למעלה.
   שימו לב לתופעת לוואי מכוונת של התאמת טקסט: גם גישה לקריאה בלבד דרך המעטפת לנתיבים האלה
   (`cat .claude/settings.json`, `git add .claude/settings.json`) נדחית.

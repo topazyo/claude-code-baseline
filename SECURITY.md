@@ -48,5 +48,6 @@ These are documented limitations, not vulnerabilities. See
 
 ## Supported versions
 
-Only the latest tagged release is supported. `hooks/VERSION` records the version of
+Only the current `main` (the latest `baselineVersion`) is supported; this
+repository does not cut tagged releases. `hooks/VERSION` records the version of
 an installed baseline tree; it is a convention stamp, not an integrity check.
