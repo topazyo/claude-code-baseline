@@ -450,18 +450,19 @@ printf 'n\n' > "$WT/l22d.txt"
 l22_check "post-index-change hook: auto-stage's git add" git add -- l22d.txt
 git config core.hooksPath ""
 # The same hook as a hook.<name>.* config entry, which core.hooksPath does not reach. A git
-# without config-based hooks (no `git hook list`) has nothing to plant: SKIP on any host.
-if git hook list post-index-change >/dev/null 2>&1; then
-  git config hook.l22.event post-index-change; git config hook.l22.command "$GPROG"
+# without config-based hooks (2.53 and older) does not list the planted one: SKIP on any
+# host. (`git hook list` exits 1 when an event has no hook, so it is asked after the plant.)
+git config hook.l22.event post-index-change; git config hook.l22.command "$GPROG"
+if git hook list post-index-change 2>/dev/null | tr -d '\r' | grep -qx l22; then
   printf 'n\n' > "$WT/l22e.txt"
   l22_hook auto-stage.sh "$WT/l22e.txt"
   l22_staged "config-based hook: auto-stage" l22e.txt
   printf 'n\n' > "$WT/l22f.txt"
   l22_check "config-based post-index-change hook: auto-stage's git add" git add -- l22f.txt
-  git config --remove-section hook.l22
 else
   echo "  SKIP [config-based hook: this git has no hook.<name>.* hooks ($(git --version))]"
 fi
+git config --remove-section hook.l22
 # Each configured hook is also switched off by name (git 2.54 has config-based hooks but
 # not the event switch), including a name holding `=`, which a -c option would split.
 git config 'hook.x=y.command' true
