@@ -514,7 +514,7 @@ the R6 guardrail hooks alongside.
 | Feature | Minimum Claude Code |
 |---------|---------------------|
 | Managed `deny` / managed hooks / `managed-settings.json` | the baseline pin, **2.1.314** (see [`../RELEASING.md`](../RELEASING.md)) |
-| Shell commands started by the Monitor tool reach command-guard | **2.1.314** (documented minimum; below it a Monitor command bypasses command-guard, while `Bash` deny rules still apply) |
+| Shell commands started by the Monitor tool reach command-guard | **2.1.314** (documented minimum; below it a Monitor command bypasses command-guard) |
 | `"onFailure": "block"` on command-guard | **2.1.295** (documented minimum; below it the key is unsupported and its handling is unverified) |
 | `strictPluginOnlyCustomization` | exact introduction **not documented** — no changelog section introduces the key; verified present in the settings docs and the official JSON schema as of 2026-08-12. Re-confirm before relying on the strict profile. |
 | `allowManagedHooksOnly` / `allowManagedPermissionRulesOnly` | operational by **2.1.140**; exact introduction not documented — re-confirm before relying on the strict profile |

@@ -1953,10 +1953,11 @@ vcheck() {
 # testing an old boundary (or failing on it).
 PIN="$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['minClaudeCodeVersion'])" "$(winpath "$SRC/baseline.config.json")" | tr -d '\r')"
 PIN_BELOW="$("$PY" -c "import sys;a,b,c=map(int,sys.argv[1].split('.'));print(f'{a}.{b}.{c-1}' if c else f'{a}.{b-1}.999')" "$PIN" | tr -d '\r')"
+PIN_ABOVE="$("$PY" -c "import sys;a,b,c=map(int,sys.argv[1].split('.'));print(f'{a}.{b+1}.0')" "$PIN" | tr -d '\r')"
 vcheck "old version warns"        "2.0.0" "is older than the baseline's required"
 vcheck "patch below pin warns"    "$PIN_BELOW" "is older than the baseline's required"
 vcheck "equal version ok"         "$PIN" ">= required v"
-vcheck "newer minor ok"           "2.9.0"  ">= required v"
+vcheck "newer minor ok"           "$PIN_ABOVE" ">= required v"
 # The warn/ok cases above would FAIL if the stub couldn't execute on this platform
 # (they assert a version-specific path), so they prove the stub is invocable — which
 # is what makes the "skip" assertion below meaningful rather than a false pass.

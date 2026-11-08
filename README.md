@@ -235,8 +235,10 @@ limit — not a bug. Read it before you rely on any of the above.
   checked: set values you need, such as `CLAUDE_CODE_GIT_BASH_PATH`, there.
 - **Below Claude Code v2.1.314, Monitor commands skip command-guard.** A shell
   command Claude starts with the Monitor tool reaches the `Bash`-matched guards only
-  from 2.1.314; below it, `Bash` deny rules still apply but command-guard never sees
-  the command. A Monitor WebSocket watch reaches no hook on any version.
+  from 2.1.314; below it command-guard never sees the command. (The current tools
+  reference says Monitor follows the same permission rules as Bash; that is not
+  verified here for older releases.) A Monitor WebSocket watch reaches no
+  `Bash`-matched hook, so no baseline guard, on any version.
 - **Below Claude Code v2.1.295, a hook that cannot start most likely fails
   open.** From 2.1.295 the two guards' `"onFailure": "block"` refuses the call
   when the hook can't start, times out, or exits with anything but 0 or 2. Older
