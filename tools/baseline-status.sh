@@ -88,9 +88,10 @@ SRC_MIN="$(read_src_key minClaudeCodeVersion)"
 # template's event in a group whose matcher covers the template's, with no `if`
 # ("<script> not under <event> [<matcher>]"), a hook entry in settings.local.json that
 # names a baseline script in its command or args ("settings.local.json runs <script>";
-# the installer never writes one there), a file under .claude/agents/ or .claude/skills/
+# the installer never writes one there), a file under .claude/agents/, .claude/skills/ or
+# .claude/commands/
 # that names the baseline hook directory ("<path> names the baseline hook directory",
-# or "<path> unreadable"; scope-guard refuses writing one), and a disableAllHooks in
+# or "<path> unreadable"; scope-guard refuses every Claude write there), and a disableAllHooks in
 # either file.
 # The env list is the installer's; the launch rules follow config-guard's, applied to
 # every entry naming a baseline path (both through lib/merge_settings.py). This tool
@@ -154,8 +155,9 @@ for fname in ("settings.json", "settings.local.json"):
                    for s, ev, m in ms.baseline_wiring_problems(data, wiring) if s not in unlaunched}
     else:   # the installer never writes a baseline hook here: config-guard (5)
         launch |= {name(fname + " runs " + s) for s in ms.baseline_hook_names(data)}
-# subagent and skill definitions in the repo (.claude/agents/, .claude/skills/) that
-# name the baseline hook directory, which scope-guard refuses to write. Regular files
+# subagent, skill and command definitions in the repo (.claude/agents/, .claude/skills/,
+# .claude/commands/) that name the baseline hook directory; scope-guard refuses every
+# Claude write there, so one is a human's. Regular files
 # only (a FIFO would block the read); each is read in full, in chunks. A file or
 # folder that cannot be read is reported, not skipped. Symlinked folders are followed,
 # each real folder once; each of the two folders is scanned up to 5000 files and 256 MiB,
@@ -174,7 +176,7 @@ def names_marker(path):
             tail = chunk[-(len(marker) - 1):]
 def rel(path):
     return os.path.relpath(path, repo).replace(os.sep, "/")
-for sub in ("agents", "skills"):
+for sub in ("agents", "skills", "commands"):
     walk_errors, seen_dirs = [], set()
     files_left, bytes_left = 5000, 256 << 20
     for dirpath, dirs, files in os.walk(os.path.join(repo, ".claude", sub), onerror=walk_errors.append,

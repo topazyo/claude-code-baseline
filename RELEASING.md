@@ -219,6 +219,11 @@ a fixture in `tests/` before bumping the pin.
    `baseline.config.json` **and** the identical value in `hooks/VERSION` (they must
    match — step-6 lockstep test). This is the value `tools/baseline-status.sh --drift`
    compares against; reconciling a repo is a re-run of `install.sh --target <repo>`.
+   **If the release adds `permissions.deny` entries, say so in the release notes:**
+   config-guard reports a missing baseline deny entry as tamper, so an updated hook
+   tree refuses the next settings change, and `baseline-status --strict` fails, until
+   `install.sh` is re-run on each repo. For managed deployments, push the new
+   managed-settings before the new hook tree.
 5. `bash tests/run.sh` green.
 6. **Check the shipped file modes and line endings** — these are the two things that
    break *only* for people who install from a fresh clone, so they never fail for you:

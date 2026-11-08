@@ -93,6 +93,11 @@ timeout -k 5 120 bash "$SRC/install.sh" --target "$WT" >/dev/null 2>&1 </dev/nul
 H="$WT/.claude/hooks/baseline"
 CFG="$WT/.claude/baseline.config.json"
 export CLAUDE_PROJECT_DIR="$WT"
+# scope-guard resolves the user config home (its definition-path check): pin it to a
+# scratch home so the developer's real ~/.claude (and plugin cache) is never walked.
+mkdir -p "$TMP/uhome"
+export HOME="$TMP/uhome" USERPROFILE="$(winpath "$TMP/uhome")"
+unset CLAUDE_CONFIG_DIR CLAUDE_CODE_PLUGIN_CACHE_DIR
 pass=0; fail=0
 setcfg() { "$PY" -c "import json;p=r'$CFG';c=json.load(open(p));$1;json.dump(c,open(p,'w'))"; }
 
@@ -163,11 +168,13 @@ P_BASH="$TMP/payloads/bash.json"
 P_WRITE="$TMP/payloads/write.json"
 P_SCOPE="$TMP/payloads/scope.json"
 P_CONFIG="$TMP/payloads/config.json"
+P_DEF="$TMP/payloads/definition.json"
 printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' > "$P_BASH"
 printf 'x = 1\n' > "$WT/app.py"
 printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$WT/app.py" > "$P_WRITE"
 printf 'src/in-scope.py\n' > "$WT/.claude/active-issue-scope.txt"
 printf '{"tool_name":"Write","tool_input":{"file_path":"src/in-scope.py"}}' > "$P_SCOPE"
+printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$WT/.claude/agents/a.md" > "$P_DEF"
 printf '{"source":"project_settings","file_path":"%s"}' "$WT/.claude/settings.json" > "$P_CONFIG"
 
 # measure <label> <hook-relpath> <payload-file> <budget-ms> <expected-rc>
@@ -222,6 +229,7 @@ measure "dispatcher/post-write" dispatcher/post-write.sh    "$P_WRITE"  "$BUDGET
 # return at their first gate and would time a no-op.
 setcfg "c['modules']['scopeGuard']['enabled']=True; c['modules']['configGuard']['enabled']=True"
 measure "scope-guard.sh"       modules/scope-guard.sh       "$P_SCOPE"  "$BUDGET_SCOPE_GUARD"   0
+measure "scope-guard.sh, agent file" modules/scope-guard.sh "$P_DEF"  "$BUDGET_SCOPE_GUARD"   2
 measure "config-guard.sh"      modules/config-guard.sh      "$P_CONFIG" "$BUDGET_CONFIG_GUARD"  0
 
 echo ""

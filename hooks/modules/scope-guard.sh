@@ -13,9 +13,9 @@
 # under "warn", it prints guidance and exits 0, and the guidance is also printed as
 # one JSON object on stdout so Claude Code shows it (see bcl_say in common.sh).
 #
-# Whether or not scopeGuard is enabled, it also refuses a Write or Edit that puts the
-# baseline hook directory's path into a subagent or skill definition (.claude/agents/,
-# .claude/skills/); see below.
+# Whether or not scopeGuard is enabled, it also refuses every Write or Edit to a path
+# only a human may write: subagent, skill and command definitions, plugins, user
+# settings, .claude.json and .mcp.json; see below.
 
 set -uo pipefail
 
@@ -36,41 +36,73 @@ bcl_notice_event PreToolUse
 read_rc=0
 bcl_read_payload PAYLOAD || read_rc=1
 
-# ONE interpreter for the config, the payload state and the extracted file_path.
-bcl_prime "$PAYLOAD"
+# ONE interpreter for the config, the payload state, the extracted file_path and the
+# definition-path verdict below. Its own timeout, shorter than the shared one: when it
+# fails, the standalone check below must still finish inside the hook's 10 s.
+_BCL_PRIME_TIMEOUT=4
+bcl_prime "$PAYLOAD" definition
 
 # Self-protection, whatever scopeGuard.enabled says: like the deny-list it has no
-# switch, and it follows the posture. A Write or Edit to a subagent or skill
-# definition (under .claude/agents/ or .claude/skills/, read without case, with \ as
-# /, and // and ./ collapsed; a ../ below .claude/ also counts) whose new text
-# (content or new_string) names the baseline hook directory is refused. It judges the
-# path as written and the edit's new text; baseline-status reads the files on disk.
-# Only a payload whose raw text names that directory is examined, and if it cannot be
-# parsed (no working Python, invalid JSON, or the payload prime failed) it fails
-# closed. A payload that cannot be read at all is empty and goes to the handling
-# below. Under warn, the scope check below still runs.
-if [[ $read_rc -eq 0 && "$PAYLOAD" == *"/.claude/hooks/baseline/"* ]]; then
-  if [[ "${_BCL_PRIME_STATE:-}" != ok ]] || bcl_payload_unparseable "$PAYLOAD"; then
-    bcl_say "[scope-guard] CONTROL COULD NOT RUN — the edit names the baseline hook directory, but its payload could not be parsed (no working Python, invalid JSON, or the payload check failed); it was NOT checked."
-    bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc
-  else
-    DEF_TARGET="$(bcl_extract_value "$PAYLOAD" file_path)"
-    def_path="/${DEF_TARGET//\\//}"
-    while [[ "$def_path" == *//* ]]; do def_path="${def_path//\/\///}"; done
-    while [[ "$def_path" == */./* ]]; do def_path="${def_path//\/.\///}"; done
-    def_hit=0
+# switch, and it follows the posture. A Write or Edit to a path only a human may write
+# is refused: subagent, skill and command definitions (.claude/agents|skills|commands,
+# at any depth and in the user's config home), plugins (a skill folder's
+# .claude-plugin, the plugin cache), user settings, .claude.json and .mcp.json. Each of
+# them can run commands command-guard never sees (hooks and MCP servers in frontmatter
+# or JSON, a skill's allowed-tools and `!` lines, the scripts a definition runs), so no
+# content is judged: the path decides. _BCL_DEFPATH_SRC (common.sh) reads it as written,
+# as it resolves (8.3 names, links, junctions), under the real protected directories,
+# and through hard links; see README for what this leaves to humans.
+#
+# Only the exact verdict "no" (or "nopath": no file_path in the payload) lets the edit
+# through. Without a parsed payload (no working Python, or a payload that is not JSON),
+# the raw payload text is searched for those paths instead, and a hit fails closed.
+# Anything else -- an empty or unknown verdict, a timeout -- fails closed too.
+# MultiEdit never reaches this hook (it is wired for Write and Edit only).
+#
+# Could not read stdin: `cat` blocked until EOF, so a caller that left stdin open
+# wedged this hook until Claude Code killed it — and a killed PreToolUse hook emits
+# no exit 2, so the edit proceeded unchecked. The target is unknown, so this fails
+# closed before the enabled-gate, with its own message.
+if [[ $read_rc -ne 0 ]]; then
+  bcl_say "[scope-guard] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR; the edit's target is unknown and was NOT checked."
+  bcl_failclosed_exit; exit $?
+fi
+if [[ "${_BCL_PRIME_STATE:-}" == ok ]]; then
+  def_verdict="${_BCL_PL_DEFINITION:-}"
+  def_real="${_BCL_PL_DEFREAL:-}"
+elif [[ -n "${_BCL_PY:-}" ]]; then
+  def_root="${CLAUDE_PROJECT_DIR:-}"
+  [[ -z "$def_root" ]] && def_root="$(bcl_repo_root)"
+  def_out="$(bcl_timeout 4 "$_BCL_PY" -I -S -X utf8 -c "$_BCL_DEFPATH_SRC$_BCL_DEFPATH_MAIN_TAIL" \
+    "$def_root" <<< "$PAYLOAD")" || def_out=""
+  def_verdict="${def_out%%$'\n'*}"
+  def_real="${def_out#*$'\n'}"
+  def_real="${def_real%%$'\n'*}"
+else
+  def_verdict=unparsed
+  def_real=""
+fi
+case "$def_verdict" in
+  no|nopath) ;;
+  yes)
+    bcl_say "[scope-guard] REFUSED — ${def_real:-the target} is a path only a human may write (a subagent, skill or command definition, a plugin, user settings, .claude.json or .mcp.json). These can register hooks, MCP servers or pre-approved commands that no guard sees, so Claude may not write them: edit it yourself."
+    bcl_violation_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc ;;
+  unparsed)
+    # No parser: the raw text, without case, with /, \ or \\ (JSON) as separators.
+    def_re='\.claude[/\\]+(agents|skills|commands|plugins|settings\.json|settings\.local\.json)'
+    def_re+='|\.claude[/\\]+[^/\\"]+[/\\]+\.\.[/\\]|\.claude\.json|\.mcp\.json'
+    def_re+='|(^|[/\\"])(cl[0-9a-z]{0,4}|mcp[0-9a-z]{0,3})~[0-9]+(\.[0-9a-z]{1,3})?([/\\"]|$)'
     shopt -s nocasematch   # bash 3.1+; ${x,,} needs bash 4
-    case "$def_path" in */.claude/agents/*|*/.claude/skills/*|*/.claude/*/../*) def_hit=1 ;; esac
+    if [[ "$PAYLOAD" =~ $def_re ]]; then def_hit=1; else def_hit=0; fi
     shopt -u nocasematch
     if [[ $def_hit -eq 1 ]]; then
-      DEF_TEXT="$(bcl_extract_value "$PAYLOAD" content)$(bcl_extract_value "$PAYLOAD" new_string)"
-      if [[ "$DEF_TEXT" == *"/.claude/hooks/baseline/"* ]]; then
-        bcl_say "[scope-guard] REFUSED — $DEF_TARGET is a subagent or skill definition, and the edit puts the baseline hook directory's path in it."
-        bcl_violation_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc
-      fi
-    fi
-  fi
-fi
+      bcl_say "[scope-guard] CONTROL COULD NOT RUN — the edit may target a path only a human may write, but its payload could not be parsed (no working Python, or not JSON); it was NOT checked."
+      bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc
+    fi ;;
+  *)
+    bcl_say "[scope-guard] CONTROL COULD NOT RUN — whether the edit targets a path only a human may write could not be decided (a link, UNC or device path it may not resolve, or the check failed); it was NOT checked."
+    bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc ;;
+esac
 
 # A config that exists but cannot be read would read scopeGuard as off. Whether it is
 # on is unknown, so fail closed before the enabled-gate (see _malformedConfigRationale).
@@ -80,15 +112,6 @@ if bcl_config_malformed; then
 fi
 
 bcl_module_enabled scopeGuard || exit 0
-
-# Could not read stdin: `cat` blocked until EOF, so a caller that left stdin open
-# wedged this hook until Claude Code killed it — and a killed PreToolUse hook emits
-# no exit 2, so the edit proceeded unchecked. Same fail-closed destination as an
-# unparseable payload, with its own message so the two causes stay distinguishable.
-if [[ $read_rc -ne 0 ]]; then
-  bcl_say "[scope-guard] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR; edit was NOT scope-checked."
-  bcl_failclosed_exit; exit $?
-fi
 
 # A PreToolUse control must not silently allow when it cannot read its input.
 # (No-Python disables this opt-in module's gating, but that degradation is

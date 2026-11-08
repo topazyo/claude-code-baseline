@@ -572,7 +572,7 @@ hooks למעלה).
 
 ---
 
-<!-- he-sync: part-5--hands-on-lab-15-min sha256=1f871c55ea8be61b -->
+<!-- he-sync: part-5--hands-on-lab-15-min sha256=ef8ab57af387af37 -->
 ## חלק 5 — תרגול מעשי (כ-15 דקות)
 
 <sub>[המקור באנגלית](ONBOARDING.md#part-5--hands-on-lab-15-min)</sub>
@@ -650,7 +650,9 @@ echo '{"session_id":"demo"}' | CLAUDE_PROJECT_DIR="$PWD" bash .claude/hooks/base
 ההרצה השנייה לא מדפיסה כלום. המצב נשמר ב-`.git/baseline/tracker-reminder/demo`.
 (בסוף כבו שוב את המודול.)
 
-**תרגיל 4: לכתוב כלל אבטחה.** צרו את הקובץ `.claude/security-defaults.json`:
+**תרגיל 4: לכתוב כלל אבטחה.** צרו בעצמכם את הקובץ `.claude/security-defaults.json`,
+בעורך שלכם (כלי העריכה ופקודות המעטפת של Claude חסומים מהקובץ הזה, כך ש-Claude לא יכול
+לשכתב את המדיניות שהעבודה שלו נבדקת מולה):
 
 <div dir="ltr">
 

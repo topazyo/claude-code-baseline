@@ -175,6 +175,16 @@ printf -- '---\nname: x\ndescription: A skill.\n---\nSee /.claude/hooks/baseline
 got="$(findings)"
 [ "$got" = "[] ['.claude/skills/x/SKILL.md names the baseline hook directory']" ] && ok || no "skill file naming the hook directory not reported: $got"
 rm -rf "$A/.claude/skills"
+# ...and a command definition, the third kind (parity with scope-guard).
+mkdir -p "$A/.claude/commands"
+printf -- '---
+description: A command.
+---
+See /.claude/hooks/baseline/README.
+' > "$A/.claude/commands/c.md"
+got="$(findings)"
+[ "$got" = "[] ['.claude/commands/c.md names the baseline hook directory']" ] && ok || no "command file naming the hook directory not reported: $got"
+rm -rf "$A/.claude/commands"
 # a symlinked skill folder is followed, and a link back up is not walked twice (only where
 # ln -s makes a real symlink: Linux and macOS). A relative target is read from the link's
 # own folder, so nest/up -> .. is .claude/skills.

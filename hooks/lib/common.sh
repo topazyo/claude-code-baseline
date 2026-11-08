@@ -533,6 +533,308 @@ emit_arr("_BCL_PL_PATHS", pl_paths)
 sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
 PRIMEPY
 
+# >>> definition paths (scope-guard) >>>
+# _BCL_DEFPATH_SRC decides whether a Write/Edit target is a path only a human may write:
+# subagent, skill and command definitions, plugins, user settings, .claude.json and
+# .mcp.json (see scope-guard.sh for why). It is source text, never an imported module:
+# an import would read and write __pycache__ inside the installed hook tree, which the
+# drift check skips, so a planted .pyc could run in place of this reviewed code.
+# Two tails run it: _BCL_DEFPATH_PRIME_TAIL is appended to the payload prime only when
+# a hook asks (bcl_prime "$PAYLOAD" definition) and reuses the parsed payload;
+# _BCL_DEFPATH_MAIN_TAIL runs it standalone, payload on stdin and the project root as
+# argv[1], when the prime failed. Each prints a verdict and the resolved path.
+IFS='' read -r -d '' _BCL_DEFPATH_SRC <<'DEFPATHPY' || true
+# --- _BCL_DEFPATH_SRC: is a Write/Edit target a definition or user-config path? ---
+# Human-only targets (see scope-guard.sh): subagent/skill/command definitions, plugins,
+# user settings, .claude.json and .mcp.json. Path-only: no file content is read.
+# Verdicts: "yes" protected, "no" not, "nopath" the payload names no file_path,
+# "unparsed" the payload is not a JSON object, "cannot" could not judge (fail closed).
+import os as _d_os
+import re as _d_re
+
+_D_NT = _d_os.name == "nt"
+_D_DIRS = ("agents", "skills", "commands", "plugins")
+# main's rule: a ../ below .claude/ may step back into a protected directory.
+_D_RAW_RE = _d_re.compile(
+    r"/\.claude/(?:agents|skills|commands|plugins)/|/\.claude/[^/]+/\.\./"
+    r"|/\.mcp\.json$|/\.claude\.json$")
+# Generated 8.3 names for .claude, .claude.json and .mcp.json (CLAUDE~1, CL3F2A~1, MCP~1.JSO).
+_D_SHORT_RE = _d_re.compile(r"(?:cl[0-9a-z]{0,4}|mcp[0-9a-z]{0,3})~[0-9]+(?:\.[0-9a-z]{1,3})?")
+_D_WALK_BOUND = 20000
+_D_MAX_DEPTH = 64
+
+
+class _DCannot(Exception):
+    pass
+
+
+def _d_norm(path):
+    """`\\` as `/`, `//` and `/./` collapsed, casefolded, with a leading `/`."""
+    p = "/" + path.replace("\\", "/")
+    while "//" in p:
+        p = p.replace("//", "/")
+    while "/./" in p:
+        p = p.replace("/./", "/")
+    return p.casefold()
+
+
+def _d_raw_hit(path):
+    return bool(_D_RAW_RE.search(_d_norm(path)))
+
+
+def _d_short_hit(path):
+    return any(_D_SHORT_RE.fullmatch(c) for c in _d_norm(path).split("/"))
+
+
+def _d_loopback(host):
+    if host in ("localhost", "localhost.", ".", "?", "::1", "[::1]", "0:0:0:0:0:0:0:1") \
+            or host.startswith("127.") or host.endswith(".ipv6-literal.net"):
+        return True
+    try:
+        import socket
+        name = socket.gethostname().casefold()
+    except Exception:
+        return True
+    return host == name or host.split(".")[0] == name.split(".")[0]
+
+
+def _d_classify(path, nt):
+    """("local", path to resolve) | ("remote", None) | ("cannot", None).
+    Windows reads any two leading separators as a UNC or device prefix, so `\\/h` and
+    `/\\h` are UNC too. Resolving a remote one opens an SMB connection before the
+    permission prompt, so it is never touched; a loopback one could alias anything."""
+    if not nt or len(path) < 2 or path[0] not in "\\/" or path[1] not in "\\/":
+        return "local", path
+    rest = path[2:].replace("/", "\\")
+    if rest[:2] in ("?\\", ".\\"):
+        kind, ns = rest[0], rest[2:]
+        if _d_re.match(r"[A-Za-z]:(?:\\|$)", ns):
+            return "local", ns
+        if ns.casefold().startswith("unc\\"):
+            rest = ns[4:]
+        elif kind == "?" and ns.casefold().startswith(("volume{", "globalroot\\")):
+            return "local", "\\\\?\\" + ns
+        else:
+            return "cannot", None
+    host = rest.split("\\", 1)[0].casefold()
+    if host in ("wsl$", "wsl.localhost"):
+        return "local", "\\\\" + rest
+    if not host or _d_loopback(host):
+        return "cannot", None
+    return "remote", None
+
+
+def _d_real(path):
+    try:
+        return _d_os.path.realpath(path)
+    except (OSError, ValueError):
+        raise _DCannot()
+
+
+def _d_key(path):
+    return path.replace("\\", "/").casefold().rstrip("/")
+
+
+def _d_protected(project, env):
+    """Casefolded keys of the protected directories and files, for comparing, and the
+    real directory paths themselves, for walking (a key need not exist on disk)."""
+    home = _d_os.path.expanduser("~")
+    cfg = env.get("CLAUDE_CONFIG_DIR") or _d_os.path.join(home, ".claude")
+    plugins = env.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or _d_os.path.join(cfg, "plugins")
+    dirs = [_d_os.path.join(project, ".claude", d) for d in _D_DIRS[:3]]
+    dirs += [_d_os.path.join(cfg, d) for d in _D_DIRS[:3]] + [plugins]
+    files = [_d_os.path.join(cfg, "settings.json"), _d_os.path.join(cfg, "settings.local.json"),
+             _d_os.path.join(home, ".claude.json"), _d_os.path.join(project, ".mcp.json")]
+    if env.get("CLAUDE_CONFIG_DIR"):
+        files.append(_d_os.path.join(cfg, ".claude.json"))
+    reals = [_d_real(d) for d in dirs]
+    return [_d_key(d) for d in reals], [_d_key(_d_real(f)) for f in files], reals
+
+
+def _d_contained(real, dirs, files):
+    k = _d_key(real)
+    return k in files or any(k == d or k.startswith(d + "/") for d in dirs)
+
+
+def _d_link_names(real):
+    """Every name of a Windows file (its hard links), as full paths."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.FindFirstFileNameW.restype = wintypes.HANDLE
+    k32.FindFirstFileNameW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                       ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR]
+    k32.FindNextFileNameW.restype = wintypes.BOOL
+    k32.FindNextFileNameW.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+                                      wintypes.LPWSTR]
+    k32.FindClose.argtypes = [wintypes.HANDLE]
+    size = 32768
+    buf = ctypes.create_unicode_buffer(size)
+    n = wintypes.DWORD(size)
+    h = k32.FindFirstFileNameW(real, 0, ctypes.byref(n), buf)
+    if h in (None, wintypes.HANDLE(-1).value, -1):
+        raise _DCannot()
+    drive = _d_os.path.splitdrive(real)[0]
+    names = []
+    try:
+        while True:
+            names.append(drive + buf.value)          # names are volume-relative
+            if len(names) > 1024:
+                raise _DCannot()
+            n = wintypes.DWORD(size)
+            if not k32.FindNextFileNameW(h, ctypes.byref(n), buf):
+                if ctypes.get_last_error() != 38:     # ERROR_HANDLE_EOF
+                    raise _DCannot()
+                break
+    finally:
+        k32.FindClose(h)
+    return names
+
+
+def _d_hardlinked(real, dirs, files, nt, link_names, walk_dirs):
+    """Is the existing file at real also reachable under a protected name?"""
+    import stat as _d_stat
+    try:
+        st = _d_os.stat(real)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        raise _DCannot()
+    if not _d_stat.S_ISREG(st.st_mode):
+        return False
+    if nt:
+        try:
+            names = link_names(real)
+        except _DCannot:
+            raise
+        except Exception:
+            raise _DCannot()
+        return any(_d_raw_hit(n) or _d_contained(n, dirs, files) for n in names if n)
+    if st.st_nlink <= 1:
+        return False
+    seen = 0
+    stack = [(d, 0) for d in walk_dirs]
+    while stack:
+        top, depth = stack.pop(0)
+        try:
+            it = _d_os.scandir(top)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            raise _DCannot()
+        with it:
+            for e in it:
+                seen += 1
+                if seen > _D_WALK_BOUND:
+                    raise _DCannot()
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if depth < _D_MAX_DEPTH:
+                            stack.append((e.path, depth + 1))
+                    elif e.inode() == st.st_ino and e.stat(follow_symlinks=False).st_dev == st.st_dev:
+                        return True
+                except OSError:
+                    raise _DCannot()
+    return False
+
+
+def _d_judge(path, project, env, nt=_D_NT, link_names=None):
+    """(verdict, real path or "") for one file_path."""
+    if not path:
+        return "no", ""
+    if "\x00" in path:
+        return "cannot", ""
+    if _d_raw_hit(path):
+        return "yes", ""
+    kind, local = _d_classify(path, nt)
+    if kind == "cannot":
+        return "cannot", ""
+    if kind == "remote":
+        return ("yes" if _d_short_hit(path) else "no"), ""
+    try:
+        if not _d_os.path.isabs(local):
+            local = _d_os.path.join(project, local)
+        real = _d_real(local)
+        if _d_raw_hit(real):
+            return "yes", real
+        dirs, files, walk_dirs = _d_protected(project, env)
+        if _d_contained(real, dirs, files):
+            return "yes", real
+        if _d_hardlinked(real, dirs, files, nt, link_names or _d_link_names, walk_dirs):
+            return "yes", real
+    except _DCannot:
+        return "cannot", ""
+    return "no", real
+
+
+def _d_paths(obj, acc, depth):
+    if depth > _D_MAX_DEPTH:
+        raise _DCannot()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "file_path":
+                acc.append(v)
+            _d_paths(v, acc, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj:
+            _d_paths(v, acc, depth + 1)
+
+
+def bcl_definition_verdict(obj, project, env=None, nt=_D_NT, link_names=None):
+    """The verdict for a parsed payload (None when it did not parse)."""
+    env = _d_os.environ if env is None else env
+    if not isinstance(obj, dict):
+        return "unparsed", ""
+    try:
+        acc = []
+        _d_paths(obj, acc, 0)
+    except (_DCannot, RecursionError):
+        return "cannot", ""
+    if any(not isinstance(p, str) for p in acc):
+        return "cannot", ""
+    acc = [p for p in acc if p]
+    if not acc:
+        return "nopath", ""
+    out, shown = "no", ""
+    for p in acc:
+        try:
+            v, real = _d_judge(p, project, env, nt, link_names)
+        except Exception:
+            v, real = "cannot", ""
+        if v == "yes":
+            return "yes", real or p
+        if v != "no":
+            out = "cannot"
+        shown = shown or real
+    return out, shown
+DEFPATHPY
+
+IFS='' read -r -d '' _BCL_DEFPATH_PRIME_TAIL <<'DEFPATHPY' || true
+try:
+    _d_obj = pdata if globals().get("pl_state") == "ok" else None
+    _d_v, _d_r = bcl_definition_verdict(_d_obj, os.path.dirname(os.path.dirname(CFG_PATH)))
+except Exception:
+    _d_v, _d_r = "cannot", ""
+sys.stdout.buffer.write(("_BCL_PL_DEFINITION=" + q(_d_v) + "\n_BCL_PL_DEFREAL=" + q(_d_r) + "\n")
+                        .encode("utf-8", "backslashreplace"))
+DEFPATHPY
+
+IFS='' read -r -d '' _BCL_DEFPATH_MAIN_TAIL <<'DEFPATHPY' || true
+import json as _d_json
+import sys as _d_sys
+try:
+    _d_obj = _d_json.loads(_d_sys.stdin.buffer.read().decode("utf-8"))
+except Exception:
+    _d_obj = None
+try:
+    _d_v, _d_r = bcl_definition_verdict(_d_obj, _d_sys.argv[1])
+except Exception:
+    _d_v, _d_r = "cannot", ""
+_d_sys.stdout.buffer.write((_d_v + "\n" + _d_r.replace("\n", " ") + "\n")
+                           .encode("utf-8", "backslashreplace"))
+DEFPATHPY
+# <<< definition paths (scope-guard) <<<
+
 # bcl_prime [payload]
 # Call it plainly — `bcl_prime "$PAYLOAD"`, NOT `eval "$(bcl_prime ...)"`. A shell
 # function body runs in the caller's shell, so it can set these globals directly;
@@ -547,9 +849,16 @@ PRIMEPY
 # spent nine forks (bcl_python, bcl_config_path, bcl_repo_root, two quoting helpers,
 # the pipeline, the capture, timeout, python) and measured 235ms; it is now four.
 bcl_prime() {
-  local out rc=0 want=0 root
+  local out rc=0 want=0 root src="$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC"
   [[ $# -gt 0 ]] && want=1
   _BCL_PRIME_STATE=""
+  # bcl_prime "$PAYLOAD" definition: also judge the payload's file_path (see
+  # _BCL_DEFPATH_SRC). Opt-in, so every other hook's prime runs exactly the script
+  # it ran before, and a fault in that code can fail only the hook that asked.
+  if [[ "${2:-}" == definition ]]; then
+    src+="$_BCL_DEFPATH_SRC$_BCL_DEFPATH_PRIME_TAIL"
+    unset -v _BCL_PL_DEFINITION _BCL_PL_DEFREAL
+  fi
 
   # Called, not substituted, so _BCL_PY lands in the caller's shell: every later
   # `$(bcl_python)` then answers from the memo instead of re-probing.
@@ -578,10 +887,10 @@ bcl_prime() {
   # empty-payload test both ignore.
   _bcl_cfg_scope
   if [[ $want -eq 1 ]]; then
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC" \
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$src" \
       "$_BCL_PRIME_KEY" 1 "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED" <<< "$1")" || rc=$?
   else
-    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC" \
+    out="$(bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "$src" \
       "$_BCL_PRIME_KEY" 0 "$_BCL_CFG_IS_MANAGED" "$_BCL_CFG_MANAGED" </dev/null)" || rc=$?
   fi
   # No output at all, other than the script's own bounds exit (3) or a timeout
