@@ -16,7 +16,7 @@
       "Bash(npm run:*)",
       "Bash(pytest:*)"
     ],
-    "_comment_deny": "The Bash()/PowerShell() entries are not redundant under defaultMode 'dontAsk'. Deny is evaluated before allow, and the allow list above hands out whole command families - `Bash(git add:*)` would otherwise reach .claude/settings.json, and Read(./**)/Edit(./**) cover the baseline's own files. They match the command TEXT wherever the path appears, so they do not survive a `cd .claude` first or a path built from a variable; command-guard's tamper rule is the other half. The PowerShell command floor from settings.template.json (Remove-Item, Invoke-WebRequest, ...) is deliberately absent here: under 'dontAsk' every PowerShell command is denied unless it is in the allow list, so an enumerated deny would add nothing.",
+    "_comment_deny": "The Bash()/PowerShell() entries are not redundant under defaultMode 'dontAsk'. Deny is evaluated before allow, and the allow list above hands out whole command families - `Bash(git add:*)` would otherwise reach .claude/settings.json, and Read(./**)/Edit(./**) cover the baseline's own files. They match the command TEXT wherever the path appears, so they do not survive a `cd .claude` first or a path built from a variable, and command-guard has no rule that covers those (see README.md, What this does not protect against). The PowerShell command floor from settings.template.json (Remove-Item, Invoke-WebRequest, ...) is deliberately absent here: under 'dontAsk' every PowerShell command is denied unless it is in the allow list, so an enumerated deny would add nothing.",
     "deny": [
       "Edit(.env*)",
       "Read(.env*)",

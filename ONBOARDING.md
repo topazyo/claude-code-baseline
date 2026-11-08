@@ -104,7 +104,7 @@ The events our baseline uses:
 | Event | Cadence | When it fires | We use it for | Can it block? |
 |-------|---------|---------------|---------------|---------------|
 | `PreToolUse` | per tool call | *before* a tool runs | command-guard (Bash, PowerShell), scope-guard (Write/Edit) | ✅ **yes** |
-| `PostToolUse` | per tool call | *after* a tool ran | auto-format, security-defaults, fix-tags, run-tests, auto-stage | ❌ no — tool already ran |
+| `PostToolUse` | per tool call | *after* a tool ran | security-defaults, fix-tags, run-tests, auto-format, auto-stage (in that order) | ❌ no — tool already ran |
 | `Stop` | per turn | when Claude finishes responding | tracker-reminder *(opt-in — see Part 4)* | ✅ yes (keeps it going) |
 | `ConfigChange` | on settings change | a settings file is edited mid-session | config-guard *(opt-in — Part 7)* | ✅ yes (rejects the change, silently) |
 
@@ -134,7 +134,9 @@ calls trigger the hook.
 
 In our baseline: command-guard matches `Bash|PowerShell`; the file-related hooks
 (auto-format, security-defaults, scope-guard, …) match `Write|Edit`;
-tracker-reminder is on `Stop`.
+tracker-reminder is on `Stop`. `Write|Edit` is an exact list of tool names, so a
+`NotebookEdit` (a write to a notebook cell) reaches none of the file-related hooks;
+the `Edit(...)` deny rules do cover it.
 
 > ⚠️ **Why `Bash|PowerShell` and not just `Bash`.** On Windows *without* Git Bash,
 > Claude Code doesn't register the Bash tool at all — it enables the PowerShell tool
@@ -239,7 +241,11 @@ Claude sees — the first line vs. the full report.)
 > `PreToolUse` block fires *before* permission rules, so it overrides even an
 > "allow" rule or `--dangerously-skip-permissions` (the flag that normally tells
 > Claude Code to skip its per-action approval prompts). *Source: Anthropic hooks /
-> permissions docs.*
+> permissions docs.* One thing outranks it: a **mod** (on by default since v2.1.287)
+> answers after the `PreToolUse` hooks, and can approve a call a hook blocked or a
+> deny rule refused — unless the machine has managed settings or the session's
+> credential is a Team or Enterprise `/login` (an API key, Bedrock or a long-lived
+> `CLAUDE_CODE_OAUTH_TOKEN` is not). See README, *What this does not protect against*.
 >
 > ⚠️ **Read that as "enforceable *if it runs*," not "enforceable."** Exit 2
 > outranks the permission rules — but only for a hook that actually fires. At the
@@ -336,7 +342,7 @@ and why each entry is on it:
 | `drop table`, `truncate table`, `delete from` | destructive data operations |
 | `curl`/`wget` at a remote host (with or without a `scheme://`; `http(s)://localhost`, `127.x.x.x` and `[::1]` are allowed) | unreviewed remote fetch (injection / supply-chain) |
 | `npm install`, `pnpm install`, `yarn add`, `pip install` | unvetted dependency (supply-chain) |
-| PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | the same three categories, in the shell Windows sessions actually get |
+| PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | the same three categories, in the shell Windows sessions actually get — refused by the `PowerShell(...)` **deny rules** in `settings.template.json`, not by command-guard, which does not match PowerShell cmdlets |
 
 You can extend it per-repo via `guardrails.commandGuard.extraPatterns` (e.g.
 `["terraform destroy"]`). *(Anthropic ships a near-identical `block-rm.sh` example —
@@ -359,7 +365,9 @@ targeted `rm -rf ./build` is intentionally allowed.
 to `.env*` and `**/secrets/**`, plus path rules protecting the baseline's own files.
 This is a **permission rule**, not a hook — Claude Code enforces it directly, so it
 needs no Python, no `bash`, and no hook wiring. *(This mirrors OWASP's prescribed
-secret-blocking patterns.)*
+secret-blocking patterns.)* The one exception is a mod: without managed settings or
+a Team/Enterprise `/login`, a mod can approve a call a deny rule refused (see the
+note on hooks above).
 
 > ⚠️ **What a `Read`/`Edit` deny rule actually binds — the part people get backwards.**
 > It binds Claude's own file tools **and the file commands Claude Code recognizes
@@ -427,13 +435,13 @@ trust — a convenience you opt into, not a protection you get.
   **config edit** — you never touch `settings.json` for that.
 - **The dispatcher + ordering.** `settings.json` points one PostToolUse hook at
   `dispatcher/post-write.sh`, which runs the file hooks in a fixed, safe order:
-  **auto-format → security-defaults → fix-tags → run-tests → auto-stage**. If a
+  **security-defaults → fix-tags → run-tests → auto-format → auto-stage**. If a
   blocking check fails, the chain short-circuits, so `auto-stage` never stages a
-  file that just failed a gate. Out of the box the chain effectively starts at
-  `security-defaults`, since `autoFormat` and every module ship disabled — a
-  freshly-installed repo runs no `PostToolUse` work at all until you enable
-  something. The whole chain shares one `PostToolUse` timeout, which is the other
-  reason not to put a project build (`dotnet format`) at the front of it.
+  file that just failed a gate. Out of the box nothing in the chain runs, since
+  `autoFormat` and every module ship disabled — a freshly-installed repo runs no
+  `PostToolUse` work at all until you enable something. The whole chain shares one
+  `PostToolUse` timeout, so a slow step (a project build such as `dotnet format`)
+  eats into the time left for every step after it.
   > ⚠️ **Terminology, told honestly:** for these `PostToolUse` modules, "block"
   > means *fail the step and hand the full report back to Claude to fix* — the edit
   > already happened (see 1.5). Only the `PreToolUse` guardrails truly *prevent* an
@@ -442,7 +450,10 @@ trust — a convenience you opt into, not a protection you get.
   collides with a repo's own `.claude/hooks/` scripts.
 - **What the installer did to `settings.json`.** It merged in the baseline hook
   wiring and the secrets deny-list, leaving your `permissions.allow`, `model`, and
-  any existing hooks untouched. If that changed the file, it saved the previous one
+  your own hooks in place — except a hook whose command names
+  `/.claude/hooks/baseline/` under an event the template wires: that counts as
+  baseline-managed and is replaced by the template's entries (README, Install
+  step 3). If that changed the file, it saved the previous one
   as `settings.json.bak.<timestamp>` first (and kept it out of git through
   `.git/info/exclude`); a re-install that changes nothing writes no backup.
 
@@ -632,6 +643,11 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
   > ownership means a required review. A one-line PR to `common.sh` runs on
   > everyone. Review these files the way you'd review a CI runner script, not the
   > way you'd review a config file.
+  > In `claude -p` and Agent SDK sessions there is no trust dialog at all: Claude
+  > Code treats the folder as trusted, so committed hooks run at once. Never point
+  > `claude -p` at an unreviewed branch (a CI job on a pull request's head, say)
+  > without `--bare` or `--settings '{"disableAllHooks": true}'`, and review its
+  > `.claude/` first.
 - **Org rollout (multi-repo).** Loop `install.sh --target <repo>` over your repo
   list; upgrades are just a re-run. Each install stamps a **`baselineVersion`** (in
   `baseline.config.json`, mirrored into `.claude/hooks/baseline/VERSION`), so you can
@@ -695,8 +711,8 @@ Change the user to `"1000:1000"` and re-run — it now passes (`exit=0`).
   or the hook scripts. Those are covered against the agent by deny rules — including
   `Bash(*.claude/baseline.config.json*)` and its PowerShell/backslash variants, which
   match the command **text**, so they stop `sed -i … .claude/baseline.config.json` but
-  not a `cd .claude` first or a path assembled from a variable; command-guard's own
-  tamper rule is the other half of that. A non-overridable floor for human/external
+  not a `cd .claude` first or a path assembled from a variable, and command-guard has
+  no rule that covers those either. A non-overridable floor for human/external
   edits is the managed-settings work above. Note the deliberate side effect of a
   text match: read-only shell access to those paths (`cat .claude/settings.json`,
   `git add .claude/settings.json`) is refused too.

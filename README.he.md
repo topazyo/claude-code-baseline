@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=27fe45189693a29f -->
+<!-- he-sync: what-this-does-not-protect-against sha256=a70d5191d3b6d315 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -63,12 +63,22 @@
   `main`, `master` או `HEAD` (את זה עוצרת רק הגנת ענפים (branch protection) בצד השרת,
   ורק אם היא חלה גם על מנהלי מערכת), לפקודות המובנות של cmd (`rd /s`, `del`),
   ל-`wsl --unregister`, ולקובץ סקריפט שמורץ דרך `pwsh -File` או `Start-Process`.
+- **mod יכול לעקוף כלל deny וחסימה של מעקה.** mod של Claude Code (מופעל כברירת
+  מחדל מגרסה v2.1.287) עונה אחרי ה-hooks של `PreToolUse`, ואם במחשב אין הגדרות מנוהלות
+  ופרטי ההתחברות של הסשן אינם `/login` של תוכנית Team או Enterprise, הוא יכול לאשר
+  קריאה שכלל deny דחה או שמעקה חסם. סשן שרץ על כל אמצעי התחברות אחר (למשל מפתח API,
+  Amazon Bedrock, Google Cloud, Microsoft Foundry או `CLAUDE_CODE_OAUTH_TOKEN` לטווח ארוך)
+  לא מקבל הגנה כזו בלי הגדרות מנוהלות. ארגונים שפורסים הגדרות מנוהלות יכולים לחסום את ה-mods של המשתמשים עצמם בעזרת
+  `allowManagedModsOnly` (או `allowManagedHooksOnly`, שהפרופיל המחמיר מגדיר); ראו
+  [managed/README.md](managed/README.md).
 - **PostToolUse לא יכול לבטל כתיבה.** המודולים `securityDefaults`, `fixTags`
   ו-`runTests` מדווחים על הפרה *אחרי* שהקובץ כבר השתנה בדיסק. הם נותנים ל-Claude הזדמנות
   לתקן; הם לא מונעים את השינוי.
 - **משפחות שלמות של כלים לא מכוסות ב-hooks.** ה-hooks מכסים רק את כלי המעטפת ואת
   `Write|Edit`. לכלים `WebFetch` ו-`WebSearch`, ולכל כלי `mcp__*`, אין כאן hook ואין
-  כלל deny. `curl`/`wget` הם שני כלי ההורדה הנפוצים ביותר — כל סביבת הרצה אחרת
+  כלל deny. `NotebookEdit` כותב קבצים אבל הוא לא `Write` ולא `Edit`, ולכן ה-scope-guard
+  והמודולים שרצים אחרי כתיבה לא רואים אותו; כללי ה-deny מסוג `Edit(...)` כן חלים עליו.
+  `curl`/`wget` הם שני כלי ההורדה הנפוצים ביותר — כל סביבת הרצה אחרת
   (`python -c "urllib.request.urlopen(…)"`,
   `nc`, ערכת SDK של שפת תכנות) ניגשת לרשת בחופשיות. **שליטה בתעבורה היוצאת (egress)
   שייכת ל-sandbox של מערכת ההפעלה, לא ל-baseline הזה.**
@@ -87,8 +97,9 @@
   תהליך צאצא שה-dispatcher מפעיל, רץ כ-`bash -p`, וה-hooks מנקים בזמן הטעינה את ערכי
   bash ש-`-p` משאיר, כך שקובץ אתחול של `BASH_ENV`, פונקציה מיוצאת או `SHELLOPTS`
   בסביבה של ה-hook כבר לא פועלים לפני ה-hook או בתוכו. אבל המעטפת שמריצה את מחרוזת
-  הפקודה של ה-hook באה קודם, והיא של Claude Code (bash כברירת מחדל, לפי תיעוד ה-hooks;
-  אופן ההפעלה המדויק שלה לא מתועד), ולכן היא עשויה לפעול לפי ערכים כאלה בכל פלטפורמה,
+  הפקודה של ה-hook באה קודם, והיא של Claude Code (לפי תיעוד ה-hooks: `sh -c` ב-macOS
+  וב-Linux, Git Bash ב-Windows, ו-PowerShell כש-Git Bash לא מותקן), ולכן היא עשויה לפעול
+  לפי ערכים כאלה בכל פלטפורמה,
   וגם `PATH`, `LD_PRELOAD`/`DYLD_*` או `CLAUDE_CODE_SHELL_PREFIX` משפיעים עליה. בלוק
   `env` בקובץ הגדרות יכול להגדיר כל אחד מהם. ה-config-guard (לבחירה) מדווח על ערך כזה
   בשינוי שנעשה בזמן הסשן ב-`.claude/settings.json` או ב-`.claude/settings.local.json`,

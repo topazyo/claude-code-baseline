@@ -182,12 +182,24 @@ limit — not a bug. Read it before you rely on any of the above.
   (only server-side branch protection that binds admins stops that), cmd
   built-ins (`rd /s`, `del`), `wsl --unregister`, and a script file run by
   `pwsh -File` or `Start-Process`.
+- **A mod can override a deny rule and a guard's block.** A Claude Code mod (on
+  by default since v2.1.287) answers after the `PreToolUse` hooks, and — unless the
+  machine has managed settings or the session's credential is a Team or Enterprise
+  `/login` — it can approve a call that a deny rule refused or a guard blocked. A
+  session on any other credential (for example an API key, Amazon Bedrock, Google
+  Cloud, Microsoft Foundry or a long-lived `CLAUDE_CODE_OAUTH_TOKEN`) gets no such
+  protection without managed settings. Managed
+  adopters can stop users' own mods with `allowManagedModsOnly`
+  (or `allowManagedHooksOnly`, which the strict profile sets); see
+  [managed/README.md](managed/README.md).
 - **PostToolUse cannot undo a write.** `securityDefaults`, `fixTags` and
   `runTests` report a violation *after* the file has changed on disk. They give
   Claude a chance to fix it; they do not prevent it.
 - **Whole tool families are unhooked.** Hooks cover the shell tools and
   `Write|Edit` only. `WebFetch`, `WebSearch` and every `mcp__*` tool have no
-  hook and no deny rule here. `curl`/`wget` are the two most common fetch
+  hook and no deny rule here. `NotebookEdit` writes files but is not `Write` or
+  `Edit`, so scope-guard and the post-write modules never see it; the `Edit(...)`
+  deny rules do cover it. `curl`/`wget` are the two most common fetch
   binaries — any other runtime (`python -c "urllib.request.urlopen(…)"`,
   `nc`, a language SDK) reaches the network freely. **Egress control belongs to
   the OS sandbox, not to this baseline.**
@@ -210,8 +222,9 @@ limit — not a bug. Read it before you rely on any of the above.
   hooks drop the bash values `-p` leaves alone as they load, so a `BASH_ENV` startup
   file, an exported function or `SHELLOPTS` in the hook's environment no longer acts
   before or inside a hook. The shell that runs the hook command string comes first
-  and is Claude Code's (bash by default, per the hooks documentation; its exact
-  invocation is not documented), so it may act on such values on any platform, and
+  and is Claude Code's (per the hooks documentation, `sh -c` on macOS and Linux,
+  Git Bash on Windows, PowerShell when Git Bash is missing), so it may act on such
+  values on any platform, and
   `PATH`, `LD_PRELOAD`/`DYLD_*` or `CLAUDE_CODE_SHELL_PREFIX` affect it too. A settings
   file's `env` block can set any of them. config-guard (opt-in) reports one in an
   in-session change to `.claude/settings.json` or `.claude/settings.local.json`,
@@ -318,9 +331,9 @@ It also runs an **advisory version check**: it compares your live `claude --vers
 against `minClaudeCodeVersion` in `baseline.config.json` and prints a warning if
 older. This never blocks the install. The floor is the documented minimum for
 the behaviours this baseline depends on: `"onFailure": "block"` on the guards
-(Claude Code 2.1.295), which also covers a `deny` rule being enforced
-unconditionally, including against a `PreToolUse` hook that returns `"allow"`
-(fixed in 2.1.77). See [`RELEASING.md`](RELEASING.md) for the per-release
+(Claude Code 2.1.295), which also covers a `PreToolUse` hook that returns
+`"allow"` no longer bypassing a `deny` rule (fixed in 2.1.77). A mod is the
+exception: see *What this does not protect against*. See [`RELEASING.md`](RELEASING.md) for the per-release
 re-verification checklist behind the pin. On Git Bash/MSYS/Cygwin and WSL hosts
 it also prints an advisory note about the Git Bash requirement above.
 
@@ -336,7 +349,11 @@ does refresh `settings.json` and adds `onFailure` to the guards.
 
 Everything is toggled in `.claude/baseline.config.json` (validated by
 `baseline.config.schema.json`). Enabling a module is a config change only — no
-`settings.json` edits. Below is what ships; the comments mark the two keys worth
+`settings.json` edits. Below is an annotated sketch of it, not the shipped file:
+the shipped `baseline.config.json` has every module off, an empty
+`extraPatterns`, empty `requireWhenEnv`, `commitGrep` and `tracker`, plus
+`version`, `minClaudeCodeVersion`, `baselineVersion` and a `fileRegex` for
+`fixTags`; the values here are examples. The comments mark the two keys worth
 thinking about before you flip them.
 
 ```jsonc
@@ -419,8 +436,11 @@ they trust the folder, with no per-command approval. Accepting the trust prompt
 allows exactly that (GHSA-ph6w-f82w-28w6: until 1.0.87 the prompt did not make it
 clear; CVE-2025-59536, fixed in 1.0.111, was a related bug that ran a project's
 code before the prompt was accepted). This is what the baseline exists to contain.
-A one-line PR to `common.sh` executes on everyone who pulls it. So, in every repo
-that adopts the baseline:
+A one-line PR to `common.sh` executes on everyone who pulls it. In `claude -p` and
+Agent SDK sessions there is no trust dialog at all: Claude Code treats the folder as
+trusted, so committed hooks run at once — never point `claude -p` at an unreviewed
+branch (a CI job on a pull request's head, say) without `--bare` or
+`--settings '{"disableAllHooks": true}'`. So, in every repo that adopts the baseline:
 
 - Add a `CODEOWNERS` entry requiring security review of `/.claude/**` (this repo
   ships [its own](.github/CODEOWNERS) as a model — it names this repo's
@@ -440,9 +460,11 @@ repo code from an admin-owned `managed.config.json` beside them, never from the
 repo's `.claude/baseline.config.json` (see
 [Installing the guardrail scripts](managed/README.md#installing-the-guardrail-scripts-for-the-hooks-block)).
 
-Two properties of that tier are actually verified here: a managed **deny** rule
-holds under `--dangerously-skip-permissions`, and managed **hooks** survive a
-lower-tier `disableAllHooks`. Managed hooks have *not* been verified to still
+Two properties of that tier are documented by Claude Code and re-checked against
+the docs each release (`RELEASING.md`), not run against a real managed deployment
+here: a managed **deny** rule holds under `--dangerously-skip-permissions`, and
+managed **hooks** survive a lower-tier `disableAllHooks` (the managed README's
+acceptance steps run them on a real deploy). Managed hooks have *not* been verified to still
 block under `--dangerously-skip-permissions` — don't assume command-guard
 survives it until that acceptance step exists.
 
@@ -491,9 +513,15 @@ tools/baseline-status.sh --strict ~/src/*     # non-zero exit if any repo drifte
 
 `--strict` is meant for an operator-run or org-level job. `baseline-ci.yml` does
 not invoke it — a cross-repo drift check needs the consumer repos, which this
-repo's CI does not have. Its only exerciser today is `tests/test_status.sh`. Note
-also that installation is detected from the presence of `.claude/hooks/baseline/`;
-the tool does not currently verify the `settings.json` wiring. See
+repo's CI does not have. Its only exerciser today is `tests/test_status.sh`.
+Installation is detected from the presence of `.claude/hooks/baseline/`; beyond
+that, the tool checks `settings.json` and `settings.local.json` for risky `env`
+values, `disableAllHooks`, baseline hooks not launched or not wired as the template
+wires them (including a guard without `onFailure: block`), a baseline hook entry in
+`settings.local.json`, baseline deny-list entries missing from `settings.json`,
+subagent or skill definitions naming the baseline hook directory, a `settings.json`
+that is missing or cannot be read, and a `baseline.config.json` that cannot be read.
+See
 [`tools/README.md`](tools/README.md).
 
 ---

@@ -28,9 +28,12 @@ behavior, on 2.1.312 (see the ledger); the full checklist below was **not** re-w
 **Why a pin at all:** the entire deny-list — the secrets rules and the
 tamper-protection rules (`Edit(.claude/settings.json)`,
 `Edit(.claude/baseline.config.json)`, `Edit(.claude/hooks/baseline/**)`, and the
-`Bash(...)`/`PowerShell(...)` path rules) — is only worth anything if `deny` is
-enforced unconditionally. A release in which something can route around `deny`
-weakens every one of them at once, silently.
+`Bash(...)`/`PowerShell(...)` path rules) — is only worth anything if `deny` holds.
+A release in which something can route around `deny` weakens every one of them at
+once, silently. One documented route already exists: a mod (on by default since
+v2.1.287) can approve a call a deny rule refused unless the machine has managed
+settings or the session uses a Team or Enterprise `/login` (README, *What this does
+not protect against*).
 
 **Why *this* number, stated accurately.** The documented fix for the known
 `deny`-bypass is **v2.1.77**: *"Fixed PreToolUse hooks returning `"allow"` bypassing
@@ -72,6 +75,13 @@ a fixture in `tests/` before bumping the pin.
 - [ ] **`deny` is enforced even when an `allow` rule is present**, and a PreToolUse hook
       returning `"allow"` does not bypass it either (fixed v2.1.77).
       *(Load-bearing for the secrets + tamper-protection deny-list → the version pin.)*
+- [ ] **Mod precedence is unchanged** — permissions docs, "Precedence among rules,
+      hooks, and mods": a mod's `tool.check` answer comes after the PreToolUse hooks,
+      and *"with neither managed settings nor a Team or Enterprise `/login` as the
+      session's credential, the mod can approve a call that a deny rule refuses or a
+      `PreToolUse` hook blocked."* If that widens (more credentials exposed, or managed
+      settings no longer enough), update the README limit; if `allowManagedModsOnly`
+      or `allowManagedHooksOnly` stops covering users' mods, update `managed/README.md`.
 - [ ] **`Read`/`Edit` deny rules still cover the recognized Bash file commands**
       (`cat`, `head`, `tail`, `sed`, `grep`) and not just Claude's own file tools. If
       that ever narrows to the tools alone, `cat .env` becomes readable in every repo
@@ -249,7 +259,7 @@ it, and when we last re-confirmed it against live docs.
 | `sandbox.network.strictAllowlist` required to block egress | (longstanding) | 2026-08-12 | `allowedDomains` alone prompts. Not honored from a repo's own `settings.json`. |
 | Windows without Git Bash gets the PowerShell tool, not Bash | (longstanding) | 2026-08-12 | Why every matcher is `Bash\|PowerShell`. A shell-form hook with no `shell` then runs in PowerShell, where `bash "…"` fails, so the guards fail **closed** and refuse every shell command and `Write`/`Edit` (`onFailure`, v2.1.295; since 2.1.299 even without it, per CHANGELOG 2.1.299, with the behavior described in the hooks docs' "Failed hooks on Windows without Git Bash"). Git Bash is a requirement on Windows. Not re-verified 2026-10-28 — changelog/docs-sourced. |
 | A hook process inherits Claude Code's environment, settings `env` included | (longstanding) | 2026-10-29 | Hooks docs: "A hook process inherits the parent environment, apart from the `OTEL_*` exporter variables" and what `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` strips; env-vars docs: Claude Code writes each `env` entry into the process environment, and subprocesses inherit even an empty value. Why config-guard, `install.sh` and `baseline-status.sh` report risky `env` keys (`RISKY_ENV_*`). Docs-sourced, not run. |
-| Shell-form hooks run through a shell; `args` (exec form) spawns directly | (longstanding; `args` version not documented) | 2026-10-29 | Hooks docs: with `args`, `command` "is resolved as an executable and spawned directly … with no shell involved"; `shell` defaults to bash, or PowerShell on Windows without Git Bash. The baseline keeps shell form (`bash -p "…"`): on Windows a bare `bash` resolved on the native `PATH` is the WSL launcher (`System32\bash.exe`, measured 2026-10-29), not Git Bash, so exec form would start the wrong bash. The exact argv of the outer shell was not found in the docs read. |
+| Shell-form hooks run through a shell; `args` (exec form) spawns directly | (longstanding; `args` version not documented) | 2026-10-29 | Hooks docs: with `args`, `command` "is resolved as an executable and spawned directly … with no shell involved"; without `args`, shell form passes the command string to a shell. The baseline keeps shell form (`bash -p "…"`): on Windows a bare `bash` resolved on the native `PATH` is the WSL launcher (`System32\bash.exe`, measured 2026-10-29), not Git Bash, so exec form would start the wrong bash. Shell form runs `sh -c` on macOS and Linux, Git Bash on Windows, or PowerShell when Git Bash isn't installed (hooks docs, "Exec form and shell form", re-read 2026-11-08). |
 | `CLAUDE_CODE_SHELL_PREFIX` wraps shell commands Claude Code runs | the release after 1.0.60 | 2026-10-29 | Changelog: "Added `CLAUDE_CODE_SHELL_PREFIX` for wrapping Claude and user-provided shell commands run by Claude Code". Reported as a risky `env` key because it would wrap every hook command. Changelog-sourced. |
 | Hook matcher readings: absent, `""` or `"*"` match every value; only letters, digits, `_`, `-`, spaces, `,` and `\|` is an exact name, or a list split on `\|` or `,` with optional surrounding whitespace (for FileChanged and StopFailure only letters, digits, `_` and `\|`, split on `\|`); anything else is an unanchored JavaScript regex. A handler `if` narrows tool events, and on other events the hook never runs | `if` v2.1.85; comma lists fire since v2.1.191; hyphenated names exact since v2.1.195 (all below the pin) | 2026-10-31 | Hooks docs ("Matcher patterns", the `if` field) and CHANGELOG; docs- and changelog-sourced, not run. config-guard (2d) and `tools/baseline-status.sh` count only a match-all matcher or names joined by `\|` as covering the template's matcher, and report a regex, a comma or space list, a matcher on Stop, or a script whose only covering entries carry an `if`. |
 | `disableAllHooks` gap fixed | early 2026 | 2026-05-31 | Re-check there's no new hook-disable bypass. |
