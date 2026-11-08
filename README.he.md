@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=c338499b378aee22 -->
+<!-- he-sync: what-this-does-not-protect-against sha256=a70d5191d3b6d315 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -68,7 +68,7 @@
   ופרטי ההתחברות של הסשן אינם `/login` של תוכנית Team או Enterprise, הוא יכול לאשר
   קריאה שכלל deny דחה או שמעקה חסם. סשן שרץ על כל אמצעי התחברות אחר (למשל מפתח API,
   Amazon Bedrock, Google Cloud, Microsoft Foundry או `CLAUDE_CODE_OAUTH_TOKEN` לטווח ארוך)
-  לא מקבל הגנה כזו בלי הגדרות מנוהלות בנתיב של ההגדרות המנוהלות. ארגונים שפורסים הגדרות מנוהלות יכולים לחסום את ה-mods של המשתמשים עצמם בעזרת
+  לא מקבל הגנה כזו בלי הגדרות מנוהלות. ארגונים שפורסים הגדרות מנוהלות יכולים לחסום את ה-mods של המשתמשים עצמם בעזרת
   `allowManagedModsOnly` (או `allowManagedHooksOnly`, שהפרופיל המחמיר מגדיר); ראו
   [managed/README.md](managed/README.md).
 - **PostToolUse לא יכול לבטל כתיבה.** המודולים `securityDefaults`, `fixTags`

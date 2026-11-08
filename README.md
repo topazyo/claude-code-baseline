@@ -188,7 +188,7 @@ limit — not a bug. Read it before you rely on any of the above.
   `/login` — it can approve a call that a deny rule refused or a guard blocked. A
   session on any other credential (for example an API key, Amazon Bedrock, Google
   Cloud, Microsoft Foundry or a long-lived `CLAUDE_CODE_OAUTH_TOKEN`) gets no such
-  protection without managed settings at the managed-settings path. Managed
+  protection without managed settings. Managed
   adopters can stop users' own mods with `allowManagedModsOnly`
   (or `allowManagedHooksOnly`, which the strict profile sets); see
   [managed/README.md](managed/README.md).
