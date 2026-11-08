@@ -1227,12 +1227,14 @@ PS_STATEMENT_ALLOW += [
 ]
 # Where a command name may start (_ps_command_mode, reached through _ps_argument_group):
 # a quoted first word is a value, not a command; `-not` before a command is skipped; a
-# glued `$y=` with or without its value, and `$f in`, walk on to the command after them.
+# glued `$y=` (the command in the next word, or glued to it in the same word) and
+# `$f in` reach the command. A `(` after a command is in argument position, so `$x` in
+# it is read as a command word: these block with a harmless `git status`, as intended.
 PS_STATEMENT_ALLOW += [
     "if ('a' -eq ($b)) { 1 }",
 ]
 PS_STATEMENT_BLOCK += [
-    'if (-not git push -eq ($x)) { 1 }',
+    'if (-not git status -eq ($x)) { 1 }',
     '$y= git status -eq ($x)',
     '$y=git status -eq ($x)',
     'foreach ($f in git status -eq ($x)) { }',
