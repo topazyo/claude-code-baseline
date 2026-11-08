@@ -64,8 +64,9 @@ and tracker-reminder reports it. A byte order mark or UTF-16 text is read normal
 
 - **command-guard** — `PreToolUse(Bash|PowerShell)`, **enabled by default**.
   Blocks a curated set of destructive / unapproved shell commands: `rm -rf /`
-  and friends (including drive roots such as `C:/`, `/c` and `/mnt/c`, and
-  `../..`), `git push --force` (including `+refspec` forms), `git push --mirror`
+  and friends (including drive roots such as `C:/`, `/c` and `/mnt/c`, `../..`,
+  the current directory as `~+` or `$PWD`, and a path that reaches a root through
+  `..` or a glob such as `/**`), `git push --force` (including `+refspec` forms), `git push --mirror`
   and `--prune`, deleting a remote `main`, `master` or `HEAD`, `git reset
   --hard`, dangerous SQL (`drop/truncate table`, `delete from`), remote fetch
   via `curl`/`wget` (including scheme-less hosts, since both default to HTTP;
@@ -79,8 +80,8 @@ and tracker-reminder reports it. A byte order mark or UTF-16 text is read normal
   `.exe` suffixes, newline-separated and compound commands, and blocks a shell
   or Windows runner reading its commands from a pipe (`... | sh`), `pwsh
   -EncodedCommand`, and anything it cannot parse --
-  including `eval "$(...)"`, so a setup line such as `eval "$(ssh-agent -s)"` is
-  refused.
+  including `eval "$(...)"` and `source <(...)`, so a setup line such as
+  `eval "$(ssh-agent -s)"` or `source <(kubectl completion bash)` is refused.
   A newline inside a quoted string (a
   multi-line commit message or PR body, a PowerShell here-string) or after a
   trailing `\` does not split the command; a line of such a string that starts

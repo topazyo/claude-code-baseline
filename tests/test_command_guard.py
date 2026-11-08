@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 200
+FP_FLOOR = 222
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 395
+BLOCK_FLOOR = 429
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -722,6 +722,65 @@ CASES = [
     ("fp a long cmd /c echo", "cmd /c echo " + "word " * 780, A, ()),
     ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
      ("status ; echo",)),
+
+    # --- review 2026-11-07 L1-L7: env options, source, targets, xargs, find -ok ---
+    ("rm -rf the cwd as ~+", "rm -rf ~+", B, ()),
+    ("rm -rf everything in ~+", "rm -rf ~+/*", B, ()),
+    ("rm -rf the previous directory ~-", "rm -rf ~-", B, ()),
+    ("rm -rf the cwd as $PWD", "rm -rf $PWD", B, ()),
+    ("rm -rf everything in ${PWD}", "rm -rf ${PWD}/*", B, ()),
+    ("rm -rf $OLDPWD", "rm -rf $OLDPWD", B, ()),
+    ("rm -rf /**", "rm -rf /**", B, ()),
+    ("rm -rf ~/**", "rm -rf ~/**", B, ()),
+    ("rm -rf ./**", "rm -rf ./**", B, ()),
+    ("rm -rf a bracket glob at the root", "rm -rf /[a-z]*", B, ()),
+    ("rm -rf the dotfiles in home", "rm -rf ~/.[!.]*", B, ()),
+    ("rm -rf through a parent step", "rm -rf build/../*", B, ()),
+    ("rm -rf the parent of home", "rm -rf ~/../*", B, ()),
+    ("rm -rf through an absolute parent step", "rm -rf /home/../*", B, ()),
+    ("find delete in the parent of home", "find ~/.. -delete", B, ()),
+    ("find delete in ~+", "find ~+ -delete", B, ()),
+    ("source a process substitution", "source <(echo ls)", B, ()),
+    (". a process substitution", ". <(echo ls)", B, ()),
+    ("env -S with the command unquoted", "env -S git push --force", B, ()),
+    ("env -u before -S", "env -u FOO -S 'git push --force'", B, ()),
+    ("env --chdir before -S", "env --chdir / -S 'git push --force'", B, ()),
+    ("env -a before -S", "env -a x -S 'git push --force'", B, ()),
+    ("env -a then the command", "env -a x git push --force", B, ()),
+    ("xargs -I rm -rf", "ls | xargs -I % rm -rf %", B, ()),
+    ("xargs appends to rm -rf", "echo / | xargs rm -rf build", B, ()),
+    ("xargs runs sh -c rm -rf", "ls | xargs sh -c 'rm -rf \"$@\"' _", B, ()),
+    ("xargs runs sh -c rm -rf, reading a file", "rm -rf build; xargs sh -c 'rm -rf build' < list",
+     B, ()),
+    ("rm -rf the cwd as \"$(pwd)\"", 'rm -rf "$(pwd)"', B, ()),
+    ("rm -rf everything in ${PWD:?}", 'rm -rf "${PWD:?}"/*', B, ()),
+    ("rm -rf everything in ${HOME:?}", 'rm -rf "${HOME:?}/"*', B, ()),
+    ("fp rm -rf a file named ~build in the cwd", "rm -rf ./~build", A, ()),
+    ("fp rm -rf a folder under ${PWD:?}", 'rm -rf "${PWD:?}/build"', A, ()),
+    ("find -ok rm -rf in home", "find ~ -ok rm -rf {} \\;", B, ()),
+    ("find -okdir rm -rf at the root", "find / -okdir rm -rf {} \\;", B, ()),
+    ("extraPattern with a quoted upper-case flag", "git branch '-D' old-feature", B,
+     ("git branch -D",)),
+    ("fp env -u then a command", "env -u FOO ls -la", A, ()),
+    ("fp env -i with a variable", "env -i PATH=/usr/bin make test", A, ()),
+    ("fp sort -S after env", "env FOO=1 sort -S 50% file.txt", A, ()),
+    ("fp env -S with a variable", "env -S 'echo $HOME'", A, ()),
+    ("fp source a venv", "source ./venv/bin/activate", A, ()),
+    ("fp source bashrc", "source ~/.bashrc", A, ()),
+    ("fp diff two process substitutions", "diff <(sort a) <(sort b)", A, ()),
+    ("fp rm -rf node_modules/**", "rm -rf node_modules/**", A, ()),
+    ("fp rm -rf a cache in home", "rm -rf ~/.cache/*", A, ()),
+    ("fp rm -rf a folder under ~+", "rm -rf ~+/build", A, ()),
+    ("fp rm -rf a sibling through ..", "rm -rf dist/../dist2", A, ()),
+    ("fp rm -rf a one-character glob", "rm -rf build/?", A, ()),
+    ("fp rm -rf a bracket glob in a folder", "rm -rf build/[a-z]*", A, ()),
+    ("fp rm -rf a bracket class at the root", "rm -rf /[abc]", A, ()),
+    ("fp rm -rf a variable's parent step", "rm -rf $BUILD/../out", A, ()),
+    ("fp rm -rf a folder under $PWD", "rm -rf $PWD/build", A, ()),
+    ("fp rm -rf a suffix glob", "rm -rf *.pyc", A, ()),
+    ("fp xargs -I echo", "ls | xargs -I % echo %", A, ()),
+    ("fp xargs sh -c rm -f", "ls | xargs sh -c 'rm -f \"$@\"' _", A, ()),
+    ("fp find -ok rm in a folder", "find ./build -ok rm {} \\;", A, ()),
 ]
 
 # PowerShell payloads (tool_name "PowerShell"): evaluated with shell="powershell",
@@ -847,6 +906,7 @@ PS_CASES = [
     ("ps fp if (Test-Path) block", "if (Test-Path x) { git status }", A, ()),
     ("ps fp dot-source a script", ". ./build.ps1", A, ()),
     ("ps fp dot-source $PROFILE", ". $PROFILE", A, ()),
+    ("ps rm through a parent step", "rm -r -Force .\\build\\..\\*", B, ()),
     ("ps fp parens in a commit message", 'git commit -m "Fix (#12)"', A, ()),
     ("ps fp targeted rm of a joined temp path", "rm -r -fo (Join-Path $env:TEMP build)", A, ()),
     ("ps fp targeted rm of a joined home path", "rm -r -fo (Join-Path $HOME .cache)", A, ()),
@@ -1065,6 +1125,21 @@ def _flagged(text):
     for s in m._segments(text):
         out.setdefault(tuple(s), set()).add(getattr(s, "ps_script", False))
     return out
+
+
+def _env_inline(words):
+    """The inline scripts _split_inline_script finds in an env segment (a tuple, one per
+    reading), or None."""
+    return m._split_inline_script(_seg(words))[1]
+
+
+def _env_words_kept(words):
+    """True when every word after env is still judged: in the outer segment, or a word of
+    an inline script (the -S value itself is split into words there)."""
+    import shlex
+    outer, inline = m._split_inline_script(_seg(words))
+    kept = list(outer) + [w for s in (inline or ()) for w in shlex.split(s)]
+    return all(w in kept or any(w.endswith(k) for k in kept) for w in words)
 
 
 def _timing(shell, text):
@@ -1382,6 +1457,101 @@ STRUCT_CASES = [
     ("timing: 4 KB of nested runners (Bash)", lambda: _timing(
         "bash", ("cmd /c wsl -- pwsh -Command cmd //c echo a^b 'q w' ; " * 80)[:4096]) < 3.0,
      True),
+    # env -S: env's own options come first, and the words after the script are part of
+    # the command it runs (benign words; the block fixtures are in CASES).
+    ("env: -S in a bundle", lambda: _env_inline(["env", "-iS", "echo hi"]), ("env echo hi",)),
+    ("env: -S glued in a lowercased bundle", lambda: _env_inline(["env", "-0isecho hi"]),
+     ("env echo hi",)),
+    ("env: -u takes a value", lambda: _env_inline(["env", "-u", "foo", "-S", "echo hi"]),
+     ("env echo hi",)),
+    ("env: -C takes a value", lambda: _env_inline(["env", "-C", "/", "-S", "echo hi"]),
+     ("env echo hi",)),
+    ("env: --argv0 takes a value", lambda: _env_inline(["env", "--argv0", "x", "-S", "echo hi"]),
+     ("env echo hi",)),
+    ("env: a value letter takes -S as its value (the walk)",
+     lambda: m._env_split(["env", "-u", "-S", "echo", "hi"], 0), None),
+    ("env: the loose reading still splits there",
+     lambda: _env_inline(["env", "-u", "-S", "echo", "hi"]), "echo"),
+    ("env: `--` ends the walk", lambda: m._env_split(["env", "--", "-S", "echo"], 0), None),
+    ("env: only the walk splits -> the segment stays whole",
+     lambda: list(m._split_inline_script(_seg(["env", "-iS", "echo", "hi"]))[0]),
+     ["env", "-iS", "echo", "hi"]),
+    ("env: a lowercased glued -C value ends the bundle",
+     lambda: _env_inline(["env", "-c/opt/tools", "echo", "hi"]), None),
+    ("env: a character no option letter can be ends the bundle",
+     lambda: _env_inline(["env", "-x/s", "echo", "hi"]), None),
+    ("env: the command's own -S is not env's",
+     lambda: _env_inline(["env", "foo=1", "sort", "-S", "50%"]), None),
+    ("env: a later env is still read", lambda: _env_inline(["env", "foo=1", "env", "-S", "echo hi"]),
+     ("echo hi", "env echo hi")),
+    ("env: the words after the script stay with it",
+     lambda: _env_inline(["env", "-S", "echo", "hi", "there"]), ("echo", "env echo hi there")),
+    ("env: GNU's \\_ is a space in -S", lambda: _env_inline(["env", "-S", "echo\\_hi"]),
+     ("echo\\_hi", "env echo hi")),
+    ("env: a walk-only split does not stop the scan for a later sh -c",
+     lambda: _env_inline(["env", "-iS", "-iS", "sh", "-c", "echo hi"]),
+     ("echo hi", "env -iS sh -c 'echo hi'")),
+    ("env: ...and the outer segment is the one the sh -c split leaves",
+     lambda: list(m._split_inline_script(_seg(["env", "-iS", "-iS", "sh", "-c", "echo hi"]))[0]),
+     ["env", "-iS", "-iS", "sh", "-c"]),
+    ("wide reading: an eval only it finds is an extra script",
+     lambda: _env_inline(["env", "-a", "x", "eval", "echo", "hi"]), ("echo hi",)),
+    ("wide reading: env -a takes a value", lambda: m._effective_cmd_index(
+        ["env", "-a", "x", "git", "push"], m._WIDE)[0], 3),
+    ("wide reading: not the table's own reading", lambda: m._effective_cmd_index(
+        ["env", "-a", "x", "git", "push"], True)[0], 2),
+    ("env: no word after env leaves judgment",
+     lambda: [_env_words_kept(w) for w in (
+         ["env", "-S", "echo", "hi"], ["env", "-iS", "echo", "hi"], ["env", "-0iS", "echo", "hi"],
+         ["env", "-c/opt/tools", "echo", "hi"], ["env", "-u", "foo", "-S", "echo", "hi"],
+         ["env", "--split-string=echo", "hi"], ["env", "-Secho", "hi"])],
+     [True] * 7),
+    # source / . with a process substitution or a pipe
+    ("source: `--` ends its options",
+     lambda: m._shell_reads_stdin(_seg(["source", "--"], piped=True)), True),
+    ("source: -p takes a value",
+     lambda: m._shell_reads_stdin(_seg(["source", "-p", "x"], piped=True)), True),
+    ("source: a piped source of a file reads the file",
+     lambda: m._shell_reads_stdin(_seg(["source", "./x.sh"], piped=True)), False),
+    # catastrophic targets
+    ("target: glob-only components",
+     lambda: [m._is_danger_target(t) for t in ("**", "/?*", "/[a-z]*", "~/.??*", ".[!.]*")],
+     [True] * 5),
+    ("target: tilde prefixes", lambda: [m._is_danger_target(t) for t in ("~root", "~+1", "~-")],
+     [True] * 3),
+    ("target: the root's parent is the root",
+     lambda: [m._is_danger_target(t) for t in ("/..", "/../*", "$home/..")], [True] * 3),
+    ("target: not catastrophic",
+     lambda: [m._is_danger_target(t) for t in ("build/?", "~+/build", "/[abc]", "$build/../out",
+                                               "build/*.o", "[a-z]x*")],
+     [False] * 6),
+    ("target: parent steps collapse",
+     lambda: [m._collapse_parents(t) for t in ("a/b/../..", "/home/..", "build/../*",
+                                               "~/..", "$x/../y", "c:/..")],
+     [".", "/", "*", "~/..", "$x/../y", "c:/.."]),
+    # xargs reaches the commands of a script it runs
+    ("xargs: an inline script's segments are marked",
+     lambda: {getattr(s, "xargs_fed", False) for s in m._segments("xargs sh -c 'echo hi'")
+              if list(s) == ["echo", "hi"]}, {True}),
+    ("xargs: seen by either reading of a wrapper's options",
+     lambda: {getattr(s, "xargs_fed", False) for s in m._segments("sudo -u xargs sh -c 'echo hi'")
+              if list(s) == ["echo", "hi"]}, {True}),
+    ("xargs: not without xargs",
+     lambda: {getattr(s, "xargs_fed", False) for s in m._segments("sh -c 'echo hi'")
+              if list(s) == ["echo", "hi"]}, {False}),
+    # the size caps say how to pass a long body
+    ("size cap: the reason names --body-file",
+     lambda: "--body-file" in m.evaluate("echo " + "a" * 5000)[0], True),
+    ("chain cap: the reason names --body-file",
+     lambda: "--body-file" in m.evaluate(_long_continuation_chain())[0], True),
+    ("timing: 4 KB of parent steps", lambda: _timing(
+        "bash", ("rm -rf ~" + "/.." * 1400)[:4096]) < 3.0, True),
+    ("timing: 4 KB of repeated env -S words (Bash)", lambda: _timing(
+        "bash", ("env -iS x " * 410)[:4096]) < 3.0, True),
+    ("timing: 4 KB of repeated env -S words (PowerShell)", lambda: _timing(
+        "powershell", ("env -0S x " * 410)[:4096]) < 3.0, True),
+    ("timing: 4 KB of glob brackets", lambda: _timing(
+        "bash", "rm -rf /" + "[" * 4080) < 3.0, True),
 ]
 
 
