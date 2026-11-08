@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 305
+FP_FLOOR = 306
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 640
+BLOCK_FLOOR = 644
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -1224,6 +1224,20 @@ PS_STATEMENT_ALLOW += [
     "$f='--force'; git push $f",
     "$a='push','--force'; git @a",
     "$h='--hard'; git reset $h",
+]
+# Where a command name may start (_ps_command_mode, reached through _ps_argument_group):
+# a quoted first word is a value, not a command; `-not` before a command is skipped; a
+# glued `$y=` (the command in the next word, or glued to it in the same word) and
+# `$f in` reach the command. A `(` after a command is in argument position, so `$x` in
+# it is read as a command word: these block with a harmless `git status`, as intended.
+PS_STATEMENT_ALLOW += [
+    "if ('a' -eq ($b)) { 1 }",
+]
+PS_STATEMENT_BLOCK += [
+    'if (-not git status -eq ($x)) { 1 }',
+    '$y= git status -eq ($x)',
+    '$y=git status -eq ($x)',
+    'foreach ($f in git status -eq ($x)) { }',
 ]
 PS_CASES += [(f"ps statement: {c!r}", c, A, ()) for c in PS_STATEMENT_ALLOW]
 PS_CASES += [(f"ps not an ordinary statement: {c!r}", c, B, ()) for c in PS_STATEMENT_BLOCK]
