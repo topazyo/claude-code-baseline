@@ -238,6 +238,16 @@ case "$(uname -s)" in
     run "GLOBALROOT Mup -> 2 (cannot judge)"     modules/scope-guard.sh "$(def_payload Write "$(jesc '\\?\GLOBALROOT\Device\Mup\no-such-host.invalid\s\x.md')" content "x")" 2
     run "\\\\.\\ trailing dot on .mcp.json -> 2"  modules/scope-guard.sh "$(def_payload Write "$(jesc "\\\\.\\$MCW.")" content "{}")" 2
     run "IPv6 loopback spelling -> 2"            modules/scope-guard.sh "$(def_payload Write "$(jesc '\\[0::1]\c$\x.md')" content "x")" 2
+    # Links whose own names end in a dot, made through \\?\: Win32 would trim the dot,
+    # but Node and Bun write through the literal name.
+    if "$PY" -c 'import _winapi, os, sys; _winapi.CreateJunction(sys.argv[1], sys.argv[2]); os.link(sys.argv[3], sys.argv[4])' \
+        "$(cygpath -w "$WT/.claude/agents")" "\\\\?\\$(cygpath -w "$WT/links")\\ag." \
+        "$(cygpath -w "$WT/.claude/agents/hl.md")" "\\\\?\\$(cygpath -w "$WT/src")\\h.md." 2>/dev/null; then
+      run "junction named ag. -> 2"              modules/scope-guard.sh "$(def_payload Write "$WT/links/ag./n.md" content "x")" 2
+      run "hard link named h.md. -> 2"           modules/scope-guard.sh "$(def_payload Edit "$WT/src/h.md." new_string "y")" 2
+    else
+      fail=$((fail + 1)); echo "  FAIL [no link named with a trailing dot could be made]"
+    fi
     run "ordinary file via \\\\?\\ -> 0"          modules/scope-guard.sh "$(def_payload Write "$(jesc "\\\\?\\$(cygpath -w "$WT/src/viaq.md")")" content "x")" 0
     vol="$(MSYS_NO_PATHCONV=1 mountvol "${USW:0:2}\\" /L 2>/dev/null | tr -d ' \r')"
     case "$vol" in

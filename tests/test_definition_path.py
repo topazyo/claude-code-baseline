@@ -228,6 +228,16 @@ with tempfile.TemporaryDirectory(prefix="DefPathUC") as tmp:
                   verdict(payload(str(plain)), P, {}, link_names=names_fail)[0], "no")
             check("missing target needs no enumeration",
                   verdict(payload(str(proj / "src" / "new.md")), P, {}, link_names=names_fail)[0], "no")
+            # A link whose own name ends in a dot, made through \\?\ (Node and Bun write
+            # through it; Win32's trimmed spelling names a file that does not exist).
+            import _winapi
+            _winapi.CreateJunction(str(proj / ".claude" / "agents"), "\\\\?\\" + str(proj / "src" / "ag."))
+            os.link(agent, "\\\\?\\" + str(proj / "src" / "h.md."))
+            check("junction named ag. -> yes", verdict(payload(str(proj / "src" / "ag.") + "\\n.md"), P, {})[0], "yes")
+            check("hard link named h.md. -> yes", verdict(payload(str(proj / "src" / "h.md.")), P, {})[0], "yes")
+            check("a plain name ending in a dot -> no", verdict(payload(str(plain) + "."), P, {})[0], "no")
+            os.rmdir("\\\\?\\" + str(proj / "src" / "ag."))
+            os.unlink("\\\\?\\" + str(proj / "src" / "h.md."))
 
         # realpath failing -> cannot
         rp = os.path.realpath

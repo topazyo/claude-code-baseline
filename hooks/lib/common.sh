@@ -598,7 +598,7 @@ def _d_trim(p):
     return "\\".join(c if c in (".", "..") else c.rstrip(". ") for c in p.split("\\"))
 
 
-def _d_win(path):
+def _d_win(path, trim=True):
     """The canonical Windows reading of a path: (kind, path).
     "local": a drive path (X:\\...) or a relative one; "unc": \\\\host\\share...;
     "volume": a volume with no drive letter (\\\\?\\Volume{...}, GLOBALROOT\\Device\\
@@ -639,7 +639,7 @@ def _d_win(path):
         kind, body = "local", p
     if ":" in body:
         return "cannot", None
-    return kind, _d_trim(p)
+    return kind, (_d_trim(p) if trim else p)
 
 
 def _d_loopback(host):
@@ -654,14 +654,14 @@ def _d_loopback(host):
     return h == name or h.split(".")[0] == name.split(".")[0]
 
 
-def _d_classify(path, nt):
+def _d_classify(path, nt, trim=True):
     """("local" | "volume", path to resolve) | ("remote", path) | ("cannot", None).
     A remote UNC path is never touched: resolving it opens an SMB connection before
     the permission prompt. A loopback or address-literal host could alias any local
     file, so it is not judged. WSL's \\\\wsl$ and \\\\wsl.localhost are local."""
     if not nt:
         return "local", path
-    kind, p = _d_win(path)
+    kind, p = _d_win(path, trim)
     if kind != "unc":
         return kind, p
     host = p[2:].split("\\", 1)[0].casefold()
@@ -802,6 +802,35 @@ def _d_hardlinked(real, prot, nt, link_names):
     return False
 
 
+def _d_resolved(local, project, env, nt, link_names, literal=False):
+    """(verdict, real path) for an absolute local path. literal: judge the spelling as
+    written (a \\\\?\\ path), not Win32's trimmed one -- see _d_judge."""
+    real = _d_real(local)
+    probe = real
+    if nt:
+        # What it resolved to is classified again: a link may lead to a network or
+        # loopback path, and a volume with no drive letter (mounted as a folder)
+        # matches no key, so it is not judged (fails closed).
+        rkind, rp = _d_classify(real, True, trim=not literal)
+        if rkind in ("cannot", "volume"):
+            return "cannot", ""
+        if rkind == "remote":
+            return ("yes" if _d_raw_hit(rp) or _d_short_hit(rp) else "no"), rp
+        real = rp
+        if literal and _D_DRIVE_RE.match(rp):
+            probe = "\\\\?\\" + rp
+        else:
+            probe = real
+    if _d_raw_hit(real):
+        return "yes", real
+    prot = _d_protected(project, env, nt)
+    if _d_contained(real, prot[0], prot[1], nt):
+        return "yes", real
+    if _d_hardlinked(probe, prot, nt, link_names or _d_link_names):
+        return "yes", real
+    return "no", real
+
+
 def _d_judge(path, project, env, nt=_D_NT, link_names=None):
     """(verdict, real path or "") for one file_path."""
     if not path:
@@ -820,26 +849,22 @@ def _d_judge(path, project, env, nt=_D_NT, link_names=None):
     try:
         if not _d_os.path.isabs(local):
             local = _d_os.path.join(project, local)
-        real = _d_real(local)
-        if nt:
-            # What it resolved to is classified again: a link may lead to a network
-            # or loopback path, and a volume with no drive letter matches no key.
-            rkind, rp = _d_classify(real, True)
-            if rkind in ("cannot", "volume"):
-                return "cannot", ""
-            if rkind == "remote":
-                return ("yes" if _d_raw_hit(rp) or _d_short_hit(rp) else "no"), rp
-            real = rp
-        if _d_raw_hit(real):
-            return "yes", real
-        prot = _d_protected(project, env, nt)
-        if _d_contained(real, prot[0], prot[1], nt):
-            return "yes", real
-        if _d_hardlinked(real, prot, nt, link_names or _d_link_names):
-            return "yes", real
+        v, real = _d_resolved(local, project, env, nt, link_names)
+        if nt and kind == "local" and v == "no":
+            # Win32 drops trailing dots and spaces, but a runtime that writes through
+            # \\?\ (Node, Bun) keeps them: an existing link named `ag.` or `h.md.` is
+            # another file. When trimming changed the path, judge the literal one too.
+            lkind, lit = _d_classify(path, nt, trim=False)
+            if lkind == "local" and lit is not None:
+                if not _d_os.path.isabs(lit):
+                    lit = _d_os.path.join(project, lit)
+                if lit != local and _D_DRIVE_RE.match(lit):
+                    v2, r2 = _d_resolved("\\\\?\\" + lit, project, env, nt, link_names, True)
+                    if v2 != "no":
+                        return v2, r2
     except _DCannot:
         return "cannot", ""
-    return "no", real
+    return v, real
 
 
 def _d_paths(obj, acc, depth):
