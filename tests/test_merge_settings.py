@@ -301,6 +301,12 @@ checks = [
                                 "GIT_CONFIG_COUNT": "1", "claude_code_git_bash_path": "c"}})
      == sorted(["BASH_ENV", "SHELLOPTS", "FUNCNEST", "PATH", "CLAUDE_CODE_SHELL_PREFIX",
                 "x_BASH_FUNC_y", "GIT_CONFIG_COUNT", "claude_code_git_bash_path"])),
+    # where git and the tools the hooks start find the user's config; exact names only
+    ("home and config-directory names reported, exactly",
+     ms.risky_env_keys({"env": {"HOME": "x", "xdg_config_home": "y", "USERPROFILE": "z",
+                                "HOMEDRIVE": "C:", "HOMEPATH": "/u", "HOMEBREW_PREFIX": "p",
+                                "MY_HOME": "m"}})
+     == sorted(["HOME", "xdg_config_home", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"])),
     ("bash startup and git names reported",
      ms.risky_env_keys({"env": {"POSIXLY_CORRECT": "1", "CDPATH": ".", "GIT_EXEC_PATH": "x"}})
      == ["CDPATH", "GIT_EXEC_PATH", "POSIXLY_CORRECT"]),

@@ -36,11 +36,12 @@ if [[ $read_rc -ne 0 ]]; then
 fi
 
 cd "$(bcl_repo_root)" || exit 0
+bcl_git_init
 
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   [[ -f "$f" ]] || continue
-  git add "$f" 2>/dev/null || true
+  bcl_git add -- "$f" 2>/dev/null || true
 done < <(bcl_extract_paths "$PAYLOAD")
 
 exit 0

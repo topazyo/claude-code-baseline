@@ -396,6 +396,153 @@ setcfg "c['modules']['fixTags']['enabled']=True"
 run "untagged change -> 2"   modules/fix-tags.sh "$(write_payload "$WT/app.py")" 2
 resetcfg
 
+echo "== the hooks' own git ignores repository config that runs programs (L22) =="
+# A repository's config can make git start a program: core.fsmonitor, a post-index-change
+# hook (a hooks directory or a hook.<name>.* entry), diff.external, a textconv driver, a
+# partial clone's fetch transport. The planted program only appends to a marker.
+# Each case runs the hook first and asserts no marker, then runs the hook's own git
+# command without the hardening as a control, which must leave one: a dead control means
+# the plant did not take, so the hook row would prove nothing. That fails on Linux, where
+# it can only be a broken setup, and is reported as a SKIP on Windows.
+GMARK="$TMP/l22mark"; GPROG="$TMP/l22prog.sh"
+printf '#!/bin/sh\necho ran >> "%s"\nexit 0\n' "$GMARK" > "$GPROG"; chmod +x "$GPROG"
+l22_check() {  # l22_check <desc> <control command...>
+  local desc="$1"; shift
+  if [ -e "$GMARK" ]; then fail=$((fail + 1)); echo "  FAIL [$desc: the hook's git ran the planted program]"
+  else pass=$((pass + 1)); fi
+  rm -f "$GMARK"
+  "$@" >/dev/null 2>&1 </dev/null
+  if [ -e "$GMARK" ]; then pass=$((pass + 1))
+  else
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*) echo "  SKIP [$desc: plain git did not run the planted program on this Windows host]" ;;
+      *) fail=$((fail + 1)); echo "  FAIL [$desc: control: plain git did not run the planted program, so the case proves nothing]" ;;
+    esac
+  fi
+  rm -f "$GMARK"
+}
+L22RC=0
+# l22_hook <module> <path>: run the hook on a Write of <path>; its exit status in L22RC.
+l22_hook() { printf '%s' "$(write_payload "$2")" | bash "$H/modules/$1" >/dev/null 2>&1; L22RC=$?; }
+# The hook must have reached its git call, or a "no marker" row proves nothing: fix-tags
+# blocks on the untagged app.py, and auto-stage staged the file.
+l22_tags_ran() { if [ "$L22RC" = 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1: fix-tags exited $L22RC, not 2: it did not reach its diff]"; fi; }
+# (Read with the plants switched off, so the check itself cannot leave a marker.)
+l22_staged() { if [ -n "$(git -c core.fsmonitor= -c core.hooksPath=/dev/null -c hook.post-index-change.enabled=false diff --cached --name-only -- "$2")" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$1: auto-stage did not stage $2]"; fi; }
+setcfg "c['modules']['fixTags']['enabled']=True; c['modules']['autoStage']['enabled']=True"
+rm -f "$GMARK"
+git config core.fsmonitor "$GPROG"
+l22_hook fix-tags.sh "$WT/app.py"
+l22_tags_ran "core.fsmonitor: fix-tags"
+l22_check "core.fsmonitor: fix-tags' git diff --name-only" git diff --name-only
+printf 'n\n' > "$WT/l22a.txt"
+l22_hook auto-stage.sh "$WT/l22a.txt"
+l22_staged "core.fsmonitor: auto-stage" l22a.txt
+printf 'n\n' > "$WT/l22b.txt"
+l22_check "core.fsmonitor: auto-stage's git add" git add -- l22b.txt
+git config --unset core.fsmonitor
+mkdir -p "$TMP/l22hooks"; cp "$GPROG" "$TMP/l22hooks/post-index-change"; chmod +x "$TMP/l22hooks/post-index-change"
+git config core.hooksPath "$TMP/l22hooks"
+printf 'n\n' > "$WT/l22c.txt"
+l22_hook auto-stage.sh "$WT/l22c.txt"
+l22_staged "post-index-change hook: auto-stage" l22c.txt
+printf 'n\n' > "$WT/l22d.txt"
+l22_check "post-index-change hook: auto-stage's git add" git add -- l22d.txt
+git config core.hooksPath ""
+# The same hook as a hook.<name>.* config entry, which core.hooksPath does not reach. A git
+# without config-based hooks (no `git hook list`) has nothing to plant: SKIP on any host.
+if git hook list post-index-change >/dev/null 2>&1; then
+  git config hook.l22.event post-index-change; git config hook.l22.command "$GPROG"
+  printf 'n\n' > "$WT/l22e.txt"
+  l22_hook auto-stage.sh "$WT/l22e.txt"
+  l22_staged "config-based hook: auto-stage" l22e.txt
+  printf 'n\n' > "$WT/l22f.txt"
+  l22_check "config-based post-index-change hook: auto-stage's git add" git add -- l22f.txt
+  git config --remove-section hook.l22
+else
+  echo "  SKIP [config-based hook: this git has no hook.<name>.* hooks ($(git --version))]"
+fi
+# Each configured hook is also switched off by name (git 2.54 has config-based hooks but
+# not the event switch), including a name holding `=`, which a -c option would split.
+git config 'hook.x=y.command' true
+got="$(cd "$WT" && bash -p -c 'source "$1/lib/common.sh"; bcl_git_init; bcl_git config --get "hook.x=y.enabled"' _ "$H" 2>&1 | tr -d '\r')"
+if [ "$got" = false ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [bcl_git switches off a configured hook by name: got '$got']"; fi
+git config --remove-section 'hook.x=y'
+git config diff.external "$GPROG"
+l22_hook fix-tags.sh "$WT/app.py"
+l22_tags_ran "diff.external: fix-tags"
+l22_check "diff.external: fix-tags' git diff -- FILE" git diff -- app.py
+git config --unset diff.external
+git config diff.l22.textconv "$GPROG"; printf '*.py diff=l22\n' > "$WT/.gitattributes"
+l22_hook fix-tags.sh "$WT/app.py"
+l22_tags_ran "textconv driver: fix-tags"
+l22_check "textconv driver: fix-tags' git diff -- FILE" git diff -- app.py
+rm -f "$WT/.gitattributes"; git config --unset diff.l22.textconv
+# A repository set up as a partial clone fetches an object it lacks through a transport
+# its config picks; here an index entry names an object that is not there.
+# The repository also allows the file transport itself: its protocol.<name>.allow outranks
+# a command-line protocol.allow, which git older than GIT_NO_LAZY_FETCH relies on.
+mkdir -p "$TMP/l22-origin"
+L22FMT="$(git config core.repositoryformatversion || echo 0)"
+git config core.repositoryformatversion 1; git config extensions.partialClone l22
+git config remote.l22.promisor true; git config remote.l22.url "$TMP/l22-origin"
+git config remote.l22.uploadpack "$GPROG"; git config protocol.file.allow always
+git update-index --add --cacheinfo 100644,1111111111111111111111111111111111111111,l22ghost.py
+l22_hook fix-tags.sh "$WT/app.py"
+l22_tags_ran "partial-clone fetch: fix-tags"
+l22_check "partial-clone fetch: fix-tags' git diff -- FILE" git diff -- l22ghost.py
+git update-index --force-remove l22ghost.py
+git config --remove-section remote.l22; git config --unset extensions.partialClone
+git config --unset protocol.file.allow; git config core.repositoryformatversion "$L22FMT"
+# A GIT_*_PATHSPECS value in the hook's environment (a settings env block can set one) must
+# not make the hooks' git refuse to run, which would skip every check without a word.
+printf 'n\n' > "$WT/l22g.txt"
+run_out "GIT_GLOB_PATHSPECS=1: auto-stage -> 0" modules/auto-stage.sh 0 GIT_GLOB_PATHSPECS=1 <<< "$(write_payload "$WT/l22g.txt")"
+l22_staged "GIT_GLOB_PATHSPECS=1: auto-stage" l22g.txt
+run_out "GIT_GLOB_PATHSPECS=1: fix-tags still checks -> 2" modules/fix-tags.sh 2 GIT_GLOB_PATHSPECS=1 <<< "$(write_payload "$WT/app.py")"
+run_out "GIT_ICASE_PATHSPECS=1: fix-tags still checks -> 2" modules/fix-tags.sh 2 GIT_ICASE_PATHSPECS=1 <<< "$(write_payload "$WT/app.py")"
+# Repository config must not blind the tag check either: colour codes in front of the `+`
+# (color.ui=always), or a quoted name that `git diff -- FILE` then misses.
+setcfg "c['modules']['autoStage']['enabled']=False"
+git config color.ui always
+run "color.ui=always: the untagged change still blocks -> 2" modules/fix-tags.sh "$(write_payload "$WT/app.py")" 2
+git config --unset color.ui
+git rm -q --cached --ignore-unmatch -- l22a.txt l22b.txt l22c.txt l22d.txt l22e.txt l22f.txt l22g.txt
+rm -f "$WT"/l22?.txt
+# From here app.py is clean, so each row's file is the only change fix-tags sees.
+cp "$WT/app.py" "$TMP/l22app.py"; git checkout -q -- app.py
+printf 'a = 1\n' > "$WT/é.py"; printf 'a = 1\n' > "$WT/l22pp.py"
+git add -- "é.py" l22pp.py; git commit -qm l22 </dev/null
+printf 'a = 1\nb = 2\n' > "$WT/é.py"
+run "core.quotePath: an untagged change in a non-ASCII name blocks -> 2" modules/fix-tags.sh "$(write_payload "$WT/é.py")" 2
+git checkout -q -- "é.py"
+printf 'a = 1\n++a\n' > "$WT/l22pp.py"
+run "an added line that begins with ++ is checked -> 2" modules/fix-tags.sh "$(write_payload "$WT/l22pp.py")" 2
+git checkout -q -- l22pp.py
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "  SKIP [a newline in a file name, and a file named *: not creatable on Windows]" ;;
+  *)
+    NLNAME="$(printf 'l22\nnl.py')"
+    printf 'a = 1\n' > "$WT/$NLNAME"; git add -- "$NLNAME"; git commit -qm l22nl </dev/null
+    printf 'a = 1\nb = 2\n' > "$WT/$NLNAME"
+    run "a newline in a name: the untagged change blocks -> 2" modules/fix-tags.sh "$(write_payload "$WT/l22nl.py")" 2
+    git checkout -q -- "$NLNAME"
+    # auto-stage stages the named file only: `*` is a name, not a pattern.
+    setcfg "c['modules']['autoStage']['enabled']=True"
+    printf 'n\n' > "$WT/*"; printf 'n\n' > "$WT/l22other.txt"
+    run "auto-stage of a file named * -> 0" modules/auto-stage.sh "$(write_payload "$WT/*")" 0
+    if [ -z "$(git diff --cached --name-only -- l22other.txt)" ] && [ -n "$(git diff --cached --name-only -- '\*')" ]; then
+      pass=$((pass + 1))
+    else
+      fail=$((fail + 1)); echo "  FAIL [auto-stage of a file named * staged other files, or not that file: $(git diff --cached --name-only | tr '\n' ' ')]"
+    fi
+    git rm -q --cached --ignore-unmatch -- '\*' l22other.txt
+    rm -f "$WT/*" "$WT/l22other.txt" ;;
+esac
+cp "$TMP/l22app.py" "$WT/app.py"
+resetcfg
+
 echo "== tracker-reminder (Stop): the reminder is shown to the user =="
 # Plain stdout from an exit-0 hook reaches only the debug log. The reminder must be ONE
 # JSON object holding only systemMessage: on Stop, additionalContext or a decision
@@ -1149,11 +1296,13 @@ for i, (k, v) in enumerate([("BASH_ENV", "/tmp/x.sh"), ("BASH_FUNC_timeout%%", "
                             ("FUNCNEST", "1"), ("CLAUDE_CODE_SHELL_PREFIX", "/tmp/wrap"),
                             ("bash_env", "/tmp/x.sh"), ("BASH_ENV", " "), ("PATH", ""),
                             ("BASH_ENV", None), ("FUNCNEST", 1), ("GIT_DIR", "/tmp/g"),
-                            ("POSIXLY_CORRECT", "1"), ("CDPATH", "/tmp"), ("GIT_EXEC_PATH", "/tmp")]):
+                            ("POSIXLY_CORRECT", "1"), ("CDPATH", "/tmp"), ("GIT_EXEC_PATH", "/tmp"),
+                            ("HOME", "/tmp/h"), ("home", "/tmp/h"), ("XDG_CONFIG_HOME", "/tmp/x"),
+                            ("USERPROFILE", "C:/tmp"), ("HOMEDRIVE", "C:"), ("HOMEPATH", "/tmp")]):
     variant("_t_env%d.json" % i, lambda s, k=k, v=v: s.setdefault("env", {}).update({k: v}))
 variant("_t_env_ok.json", lambda s: s.setdefault("env", {}).update(
     {"FOO": "1", "PYTHONPATH": "/tmp/py", "NODE_ENV": "production", "GIT_AUTHOR_NAME": "a",
-     "ENV": "production"}))
+     "ENV": "production", "HOMEBREW_PREFIX": "/opt/homebrew", "MY_HOME": "/tmp"}))
 # A stale launch plus a real tamper is headed as tamper.
 variant("_t_stale_env.json", lambda s: (relaunch("command-guard", plain)(s),
                                         s.setdefault("env", {}).update({"BASH_ENV": "/tmp/x.sh"})))
@@ -1245,9 +1394,14 @@ run "local_settings tamper + warn -> 0" modules/config-guard.sh "$(ccp local_set
 resetcfg
 run "local_settings, module disabled -> 0" modules/config-guard.sh "$(ccp local_settings "$TDIR/_l_keys.json")" 0
 setcfg "c['modules']['configGuard']['enabled']=True"
-for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
-  run "risky env value $i -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_env$i.json")" 2
+# Every risky-env fixture the generator above wrote, so a new one cannot miss the loop.
+n_env=0
+for f in "$TDIR"/_t_env[0-9]*.json; do
+  [ -e "$f" ] || continue
+  n_env=$((n_env + 1))
+  run "risky env value ${f##*/} -> 2"   modules/config-guard.sh "$(ccp project_settings "$f")" 2
 done
+if [ "$n_env" -ge 24 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [risky env fixtures: found $n_env, want >= 24]"; fi
 run "harmless env values -> 0"           modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_env_ok.json")" 0
 # The heading follows the worst finding: an install from before -p is out of date, a
 # risky env value is reported as such, and anything else is tamper.

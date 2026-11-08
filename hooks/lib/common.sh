@@ -165,12 +165,71 @@ bcl_python() {
   printf '%s' "$_BCL_PY"
 }
 
+# --- the hooks' own git -------------------------------------------------------
+# Every git the hooks run goes through this. A repository's config can make git start a
+# program, and the hooks run outside Claude Code's sandbox. Switched off for these calls
+# only (a command-line -c outranks every config file):
+#   core.fsmonitor=        runs on any index read. Empty, not false: git 2.16-2.35 read
+#                          the value as a program path, where only empty means none; 2.36+
+#                          read empty as false.
+#   core.hooksPath=/dev/null, hook.post-index-change.enabled=false, hook.<name>.enabled=false
+#                          git add, and a diff's index refresh, write the index and run
+#                          post-index-change: from a hooks directory, or a hook.<name>
+#                          config entry (git 2.54+), which core.hooksPath does not reach.
+#                          The event switch is git 2.55+, so each configured hook is
+#                          also switched off by name (see bcl_git_init), through
+#                          GIT_CONFIG_KEY_<n>: -c splits at the first `=`, and a hook
+#                          name may hold one. That replaces any GIT_CONFIG_COUNT the
+#                          session started with (config-guard reports GIT_CONFIG_* in a
+#                          settings env block).
+#   GIT_NO_LAZY_FETCH=1, protocol.allow=never, protocol.<name>.allow=never
+#                          a repository set up as a partial clone fetches a missing
+#                          object on demand, through a transport its config chooses
+#                          (remote.<name>.uploadpack, core.sshCommand, an ext:: URL). The
+#                          variable is git 2.44+. On older git the protocol keys refuse
+#                          the transports; each per-protocol key is given too, because a
+#                          repository's own protocol.<name>.allow outranks protocol.allow.
+#   --literal-pathspecs    a path is a name, never a pattern (`git add -- '*'`). The
+#                          GIT_*_PATHSPECS variables are pinned off: git refuses to run
+#                          when one is set beside the literal mode.
+# Not covered: a repository's filter driver (filter.<name>.clean/.process with a
+# .gitattributes entry) still runs inside git add and a diff of a working-tree file, as it
+# does for the user's own git add; its name is not known in advance, and dropping filters
+# would change what git add stages (git-lfs pointers, line endings).
+_BCL_GIT_ENV=()      # GIT_CONFIG_COUNT/KEY_<n>/VALUE_<n> words; filled by bcl_git_init
+# bcl_git_init: list the repository's configured hooks once, from the directory the
+# hook's git calls run in. Call it there, in the hook's own shell: a $(...) or <(...) is
+# a subshell, so a list made inside one would be made again on every call.
+bcl_git_init() {
+  local name i=0
+  _BCL_GIT_ENV=()
+  # Reading config runs nothing: no index, no hook, no fetch.
+  while IFS= read -r -d '' name; do
+    name="${name#hook.}"
+    _BCL_GIT_ENV+=("GIT_CONFIG_KEY_$i=hook.${name%.command}.enabled" "GIT_CONFIG_VALUE_$i=false")
+    i=$((i + 1))
+  done < <(command git config -z --name-only --get-regexp '^hook\..*\.command$' 2>/dev/null)
+  _BCL_GIT_ENV+=("GIT_CONFIG_COUNT=$i")
+}
+bcl_git() {
+  (( ${#_BCL_GIT_ENV[@]} )) || bcl_git_init
+  (
+    for kv in "${_BCL_GIT_ENV[@]}"; do export "$kv"; done
+    export GIT_NO_LAZY_FETCH=1 GIT_GLOB_PATHSPECS=0 GIT_NOGLOB_PATHSPECS=0 GIT_ICASE_PATHSPECS=0
+    exec git -c core.fsmonitor= -c core.hooksPath=/dev/null \
+      -c hook.post-index-change.enabled=false -c protocol.allow=never \
+      -c protocol.file.allow=never -c protocol.ssh.allow=never -c protocol.ext.allow=never \
+      -c protocol.git.allow=never -c protocol.http.allow=never -c protocol.https.allow=never \
+      -c protocol.ftp.allow=never -c protocol.ftps.allow=never --literal-pathspecs "$@"
+  )
+}
+
 # --- repo + config location -------------------------------------------------
 bcl_repo_root() {
   if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
     printf '%s' "$CLAUDE_PROJECT_DIR"
   else
-    git rev-parse --show-toplevel 2>/dev/null || pwd
+    bcl_git rev-parse --show-toplevel 2>/dev/null || pwd
   fi
 }
 
@@ -502,7 +561,7 @@ bcl_prime() {
   if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
     root="$CLAUDE_PROJECT_DIR"
   else
-    root="$(git rev-parse --show-toplevel 2>/dev/null)"
+    root="$(bcl_git rev-parse --show-toplevel 2>/dev/null)"
     [[ -z "$root" ]] && root="$PWD"
   fi
   _BCL_PRIME_KEY="$root/.claude/baseline.config.json"

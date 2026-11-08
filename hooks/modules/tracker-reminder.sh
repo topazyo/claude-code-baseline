@@ -59,6 +59,7 @@ COMMIT_GREP="${COMMIT_GREP%$'\r'}"; TRACKER="${TRACKER%$'\r'}"
 [[ -z "$COMMIT_GREP" || -z "$TRACKER" ]] && exit 0
 
 cd "$(bcl_repo_root)" || exit 0
+bcl_git_init
 
 # Matches, by SUBJECT only (the old `--oneline | grep -F` also matched the abbreviated
 # hash). A quoted pattern in [[ == ]] is a literal substring, so COMMIT_GREP is never a
@@ -70,7 +71,7 @@ while IFS=$'\t' read -r h subj || [[ -n "$h" ]]; do
   h="${h%$'\r'}"; subj="${subj%$'\r'}"
   [[ -n "$h" && "$subj" == *"$COMMIT_GREP"* ]] || continue
   MATCHED+="$h|"; M=$((M + 1))
-done < <(git log --no-show-signature -20 --format='%H%x09%s' 2>/dev/null)
+done < <(bcl_git log --no-show-signature -20 --format='%H%x09%s' 2>/dev/null)
 (( M > 0 )) || exit 0
 
 # The reminder as it always read: every match among the last 20 commits.
@@ -100,7 +101,7 @@ if [[ "$PAYLOAD" =~ $sid_re ]]; then SID="${BASH_REMATCH[1]}"; fi
 
 # <git dir>/baseline/tracker-reminder: every level a real directory (never a symlink,
 # which would aim the writes and the prune elsewhere), created one level at a time.
-BASE="$(git rev-parse --git-path baseline 2>/dev/null)"; BASE="${BASE%$'\r'}"
+BASE="$(bcl_git rev-parse --git-path baseline 2>/dev/null)"; BASE="${BASE%$'\r'}"
 [[ -n "$BASE" ]] || stateless "no git directory"
 STATE="$BASE/tracker-reminder"
 for d in "$BASE" "$STATE"; do
