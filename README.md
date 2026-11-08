@@ -138,7 +138,7 @@ Two limits, stated plainly:
 |--------|------|---------|
 | `securityDefaults` | PostToolUse | Verify immutable infra defaults haven't drifted, from a **declarative rules file** (see below). Reports to Claude after the write; cannot undo it. |
 | `fixTags` | PostToolUse | Require a traceability tag (e.g. `# FIX: TICKET-123`) on every added line. Configurable marker, file types, and an optional env gate. Reports to Claude after the write; cannot undo it. |
-| `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. Whether or not `scopeGuard` is enabled, `scope-guard.sh` also refuses **every** Write or Edit to a path only a human may write: subagent, skill and command definitions (`.claude/agents/`, `.claude/skills/`, `.claude/commands/`, at any depth and in the user's config home), plugins (a skill folder's `.claude-plugin/`, `.claude/plugins/`, the plugin cache), user `settings.json` / `settings.local.json`, `.claude.json` and `.mcp.json`. That check has no switch and follows `enforcement`; see [Definitions are human-only](#what-this-does-not-protect-against). |
+| `scopeGuard` | PreToolUse | Refuse edits to files outside a declared task scope (`.claude/active-issue-scope.txt`). Genuinely blocking under `block` — the write never happens. Whether or not `scopeGuard` is enabled, `scope-guard.sh` also refuses **every** Write or Edit to a path only a human may write: subagent, skill and command definitions and hook scripts (`.claude/agents/`, `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, at any depth and in the user's config home), plugins (a skill folder's `.claude-plugin/`, `.claude/plugins/`, the plugin cache), user `settings.json` / `settings.local.json`, `.claude.json`, `.mcp.json` and `.claude/security-defaults.json`. That check has no switch and follows `enforcement`; see [Definitions are human-only](#what-this-does-not-protect-against). |
 | `configGuard` | ConfigChange | Detect in-session tampering of `.claude/settings.json` (baseline hooks unwired or moved off the template's event or matcher, deny-list stripped, `disableAllHooks` or a risky environment value set) and of `.claude/settings.local.json` (`disableAllHooks`, a risky environment value, or a hook entry naming a baseline script, which the installer never writes there). **Off by default; under `block` it refuses the change for the session, silently (the report is in `claude --debug`), and does not revert the file; in-session only; watches those two files only** — never `baseline.config.json` and never the hook scripts. A deleted `settings.local.json` is normal; an unreadable one is treated as tampered. |
 | `runTests` | PostToolUse | Run the right test/lint per file type (pytest, shellcheck/bats, yamllint/actionlint). Missing tools are skipped. Reports to Claude after the write; cannot undo it. A failing check's output is passed on verbatim but capped (the first 60 lines of a linter's report, the last 30 of pytest's, the last 20 of bats'); a passing one stays quiet. Anything a failing test prints — file contents, environment values — is therefore shown to Claude (and, under `warn`, to you). |
 | `trackerReminder` | Stop | When Claude stops and commits whose subject contains `commitGrep` are among the last 20 (not only this session's), show you a reminder to update a tracking doc — once per session, then again only for a new matching commit (an amended or rebased commit counts as new). The session memory is kept in `.git/baseline/`; without a usable `session_id` in the Stop input, or when that memory cannot be used, it reminds at every stop. Not passed to Claude. Never blocks. |
@@ -197,11 +197,16 @@ limit — not a bug. Read it before you rely on any of the above.
   command definition can run commands no guard sees: `hooks` and `mcpServers` in
   its frontmatter, a skill's `allowed-tools` with `` !`cmd` `` lines that run when
   it loads, a `.claude-plugin/plugin.json` in a skill folder, or the scripts it
-  calls. The same holds for plugins, user settings, `.claude.json` and
-  `.mcp.json`. So scope-guard judges the **path**, not the content, and refuses
-  every Claude Write/Edit there: as written, as it resolves (links, junctions,
-  8.3 short names, `\\?\` forms), under the real protected directories, and
-  through hard links. `permissions.deny` adds `Edit(//**/.claude/<dir>/**)`-style
+  calls. The same holds for hook scripts under `.claude/hooks/`, plugins, user
+  settings, `.claude.json` and `.mcp.json`. So scope-guard judges the **path**,
+  not the content, and refuses every Claude Write/Edit there: as written, in its
+  canonical Windows form (`\\?\`, `\\.\`, `\??\`, `GLOBALROOT` and volume-GUID
+  prefixes, trailing dots and spaces; NTFS streams such as `::$DATA` and
+  drive-relative paths are refused outright), as it resolves (links, junctions,
+  8.3 short names), under the real protected directories, and through hard links
+  to a protected file. A UNC path to a loopback host or an address literal
+  (`\\127.1\…`, `\\[::1]\…`, `\\10.0.0.5\…`) is not judged and fails closed.
+  `permissions.deny` adds `Edit(//**/.claude/<dir>/**)`-style
   entries and path-text Bash/PowerShell entries as defense in depth. Edit these
   files yourself. What stops working: the bundled `/verify` recording its recipe
   in `.claude/skills/verify/`, `/run-skill-generator`, skill-creator-style skills
@@ -211,11 +216,14 @@ limit — not a bug. Read it before you rely on any of the above.
   *text* names one of these directories (a commit message, a `gh pr --body`, a
   `grep`). Residual gaps: shell spellings the path-text rules do not see (as for
   every deny rule here); a remote UNC share that holds this repo's definitions
-  through a link, or the machine's own IP over UNC; a link to a remote UNC target
-  made beforehand (it is followed while resolving); without Python, only the
-  payload text is checked; a custom 8.3 name set with `fsutil` where the path
-  cannot be resolved; and the older cwd-anchored `Edit(.claude/settings.json)`-
-  style entries. Repos that need no `` !`cmd` `` lines in skills can also set
+  through a link, or the machine's own name under another DNS alias; a link to a
+  remote UNC target made beforehand (it is followed while resolving); scripts a
+  settings file names outside these directories (a `statusLine` command, a hook
+  command pointing elsewhere); without Python, only the payload text is checked; a
+  custom 8.3 name set with `fsutil` where the path cannot be resolved; a POSIX
+  hard-link search that stops at 20 000 entries (a hard-linked file then fails
+  closed); resolving a `\\wsl$` path starts the WSL VM before the prompt; and the
+  older cwd-anchored `Edit(.claude/settings.json)`-style entries. Repos that need no `` !`cmd` `` lines in skills can also set
   `disableSkillShellExecution: true`.
 - **PostToolUse cannot undo a write.** `securityDefaults`, `fixTags` and
   `runTests` report a violation *after* the file has changed on disk. They give
@@ -460,8 +468,9 @@ the file content matches `appliesWhen`, it must (`mustMatch`) or must not
 See [`examples/security-defaults.openclaw.json`](examples/security-defaults.openclaw.json)
 for a full immutable-defaults policy (gateway/MCP bind, cap_drop, read-only fs,
 TLS 1.3, skills signing). Copy it to `.claude/security-defaults.json` and adapt —
-yourself: `permissions.deny` refuses Claude's edit tools and shell commands on that
-path, so the policy Claude is checked against is not one Claude can rewrite. A repo
+yourself: scope-guard refuses Claude's edit tools on that path, and `permissions.deny`
+refuses them and any shell command whose text names it, so the policy Claude is
+checked against is not one Claude can rewrite. A repo
 that points `rulesFile` elsewhere is not covered by those entries.
 
 ---

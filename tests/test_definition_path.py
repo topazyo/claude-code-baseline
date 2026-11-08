@@ -53,11 +53,26 @@ for path, want in [
         (r"\\.\C:\repo\x.md", "local"),
         (r"\\?\UNC\host\share\x.md", "remote"),
         (r"\\?\UNC\localhost\c$\x.md", "cannot"),
-        (r"\\?\Volume{0a1b}\repo\x.md", "local"),
-        (r"\\?\GLOBALROOT\Device\HarddiskVolume3\x.md", "local"),
-        (r"\\.\Volume{0a1b}\x.md", "cannot"),
+        (r"\\?\Volume{0a1b}\repo\x.md", "volume"),
+        (r"\\?\GLOBALROOT\Device\HarddiskVolume3\x.md", "volume"),
+        (r"\\.\Volume{0a1b}\x.md", "volume"),
+        (r"\??\C:\repo\x.md", "local"),
+        (r"\\?\GLOBALROOT\??\C:\repo\x.md", "local"),
+        (r"\\?\GLOBALROOT\??\UNC\host\s\x.md", "remote"),
+        (r"\\?\GLOBALROOT\Device\Mup\host\s\x.md", "cannot"),
+        (r"\\?\GLOBALROOT\Device\LanmanRedirector\host\s\x.md", "cannot"),
         (r"\\.\pipe\x", "cannot"),
         (r"\\?\pipe\x", "cannot"),
+        (r"C:\repo\.mcp.json::$DATA", "cannot"),
+        (r"C:\repo\.claude\agents::$INDEX_ALLOCATION\x.md", "cannot"),
+        (r"\\?\C:\repo\x.md:alt", "cannot"),
+        ("C:x.md", "cannot"),
+        ("x.md:alt", "cannot"),
+        (r"\\[0::1]\c$\x.md", "cannot"),
+        (r"\\127.1\c$\x.md", "cannot"),
+        (r"\\2130706433\c$\x.md", "cannot"),
+        (r"\\0x7f000001\c$\x.md", "cannot"),
+        (r"\\10.0.0.5\s\x.md", "cannot"),
         (r"\\wsl$\Ubuntu\home\x.md", "local"),
         (r"\\wsl.localhost\Ubuntu\home\x.md", "local"),
         (r"\\localhost\c$\x.md", "cannot"),
@@ -68,6 +83,12 @@ for path, want in [
         ("\\\\", "cannot")]:
     check(f"classify nt {path!r}", classify(path, True)[0], want)
 check("classify nt drive form strips the prefix", classify(r"\\?\C:\repo\x.md", True)[1], r"C:\repo\x.md")
+check("classify nt \\??\\ strips the prefix", classify(r"\??\C:\repo\x.md", True)[1], r"C:\repo\x.md")
+check("classify nt trailing dots and spaces trimmed", classify("\\\\.\\C:\\repo\\.mcp.json. ", True)[1],
+      r"C:\repo\.mcp.json")
+key = D["_d_key"]
+check("keys agree across prefixes", key(r"\\?\C:\Repo\X", True) == key(r"c:\repo\x", True) == key(r"\??\C:\REPO\x\\", True), True)
+check("posix key keeps the path", key("/A/b/", False), "/a/b")
 check("classify nt own host name", classify("\\\\" + __import__("socket").gethostname() + r"\c$\x", True)[0], "cannot")
 check("classify posix: \\\\host is a relative name", classify(r"\\host\share\x.md", False)[0], "local")
 
@@ -96,6 +117,9 @@ try:
             (r"\\files.example\share\CLAUDE~1\agents\x.md", "yes"),
             (r"\\files.example\share\MCP~1.JSO", "yes"),
             (r"\\files.example\share\PROGRA~1\x.md", "no"),
+            (r"\\files.example\share\.mcp.json.", "yes"),
+            (r"\\?\GLOBALROOT\Device\Mup\files.example\s\x.md", "cannot"),
+            (r"C:\repo\.mcp.json::$DATA", "cannot"),
             (r"\\localhost\c$\x.md", "cannot")]:
         try:
             got = judge(path, "C:/repo", {}, nt=True)[0]
@@ -116,6 +140,8 @@ for path, want in [
         (r"C:\r\.Claude\Skills\s\x.json", True), ("/r/sub/.claude/agents/a.md", True),
         (".claude/agents/a.md", True), (".claude//agents/a.md", True), (".claude/./agents/a.md", True),
         (".claude/x/../agents/a.md", True), ("/r/.mcp.json", True), ("/h/.claude.json", True),
+        ("/r/.claude/hooks/h.sh", True), ("/r/.claude/security-defaults.json", True),
+        ("/r/.claude/security-defaults.json.bak", False), ("/r/src/hooks/h.sh", False),
         ("/r/.claude/agentsx/a.md", False), ("/r/docs/agents/a.md", False),
         ("/r/.claude/settings.json", False), ("/r/.claude/worktrees/w/src/agents/a.py", False),
         ("/r/docs/.claude-agents.md", False), ("/r/x.mcp.json", False), ("/r/.mcp.json.bak", False)]:
@@ -185,12 +211,18 @@ with tempfile.TemporaryDirectory(prefix="DefPathUC") as tmp:
         def names_fail(real):
             raise OSError("enumeration failed")
 
+        # Only a file with more than one link is enumerated: a twin pair in src/.
+        twin = proj / "src" / "twin.md"
+        twin.write_text("x", encoding="utf-8")
+        os.link(twin, proj / "src" / "twin2.md")
         check("hard link names include an agent -> yes",
-              verdict(payload(str(plain)), P, {}, nt=True, link_names=names_with_agent)[0], "yes")
+              verdict(payload(str(twin)), P, {}, nt=True, link_names=names_with_agent)[0], "yes")
         check("hard link names, none protected -> no",
-              verdict(payload(str(plain)), P, {}, nt=True, link_names=names_alone)[0], "no")
+              verdict(payload(str(twin)), P, {}, nt=True, link_names=names_alone)[0], "no")
         check("hard link enumeration fails -> cannot",
-              verdict(payload(str(plain)), P, {}, nt=True, link_names=names_fail)[0], "cannot")
+              verdict(payload(str(twin)), P, {}, nt=True, link_names=names_fail)[0], "cannot")
+        check("a single-link file needs no enumeration",
+              verdict(payload(str(plain)), P, {}, nt=True, link_names=names_fail)[0], "no")
         check("missing target needs no enumeration",
               verdict(payload(str(proj / "src" / "new.md")), P, {}, nt=True, link_names=names_fail)[0], "no")
 
@@ -209,6 +241,11 @@ with tempfile.TemporaryDirectory(prefix="DefPathUC") as tmp:
             other = proj / "src" / "o.md"
             os.link(plain, other)
             check("posix hard link of a plain file -> no", verdict(payload(str(other)), P, {})[0], "no")
+            us = home / ".claude" / "settings.json"
+            us.write_text("{}", encoding="utf-8")
+            os.link(us, proj / "src" / "us.json")
+            check("posix hard link of user settings -> yes",
+                  verdict(payload(str(proj / "src" / "us.json")), P, {})[0], "yes")
             for i in range(3):
                 (proj / ".claude" / "agents" / f"f{i}.md").write_text("x", encoding="utf-8")
             bound = D["_D_WALK_BOUND"]

@@ -148,6 +148,8 @@ EXPECTED_DENY = [
     "Edit(//**/.claude/agents/**)",
     "Edit(//**/.claude/skills/**)",
     "Edit(//**/.claude/commands/**)",
+    "Edit(//**/.claude/hooks/**)",
+    "Edit(~/.claude/hooks/**)",
     "Edit(~/.claude/plugins/**)",
     "Edit(//**/.mcp.json)",
     "Edit(~/.claude/settings.json)",

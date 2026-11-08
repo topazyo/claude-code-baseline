@@ -559,8 +559,9 @@ The second run prints nothing. The memory is `.git/baseline/tracker-reminder/dem
 (Disable the module again when done.)
 
 **Exercise 4 — Author a security rule.** Create `.claude/security-defaults.json`
-yourself, in your editor (Claude's edit tools and shell commands are denied this file,
-so the policy it is checked against is not one it can rewrite):
+yourself, in your editor (scope-guard refuses Claude's edit tools on this file, and the
+deny rules refuse its edit tools and any shell command that names the path, so the
+policy it is checked against is not one it can rewrite):
 ```json
 { "infraPattern": "docker-compose",
   "rules": [ { "id": "no-root", "appliesWhen": "^\\s*user:\\s",

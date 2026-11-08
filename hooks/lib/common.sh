@@ -544,22 +544,29 @@ PRIMEPY
 # _BCL_DEFPATH_MAIN_TAIL runs it standalone, payload on stdin and the project root as
 # argv[1], when the prime failed. Each prints a verdict and the resolved path.
 IFS='' read -r -d '' _BCL_DEFPATH_SRC <<'DEFPATHPY' || true
-# --- _BCL_DEFPATH_SRC: is a Write/Edit target a definition or user-config path? ---
-# Human-only targets (see scope-guard.sh): subagent/skill/command definitions, plugins,
-# user settings, .claude.json and .mcp.json. Path-only: no file content is read.
+# --- _BCL_DEFPATH_SRC: is a Write/Edit target a path only a human may write? ---
+# Human-only targets (see scope-guard.sh): subagent/skill/command definitions, hook
+# scripts, plugins, user settings, .claude.json, .mcp.json and the default
+# securityDefaults rules file. Path-only: no file content is read.
 # Verdicts: "yes" protected, "no" not, "nopath" the payload names no file_path,
 # "unparsed" the payload is not a JSON object, "cannot" could not judge (fail closed).
 import os as _d_os
 import re as _d_re
 
 _D_NT = _d_os.name == "nt"
-_D_DIRS = ("agents", "skills", "commands", "plugins")
+# Under <project>/.claude and the user's config home.
+_D_DIRS = ("agents", "skills", "commands", "hooks")
 # main's rule: a ../ below .claude/ may step back into a protected directory.
 _D_RAW_RE = _d_re.compile(
-    r"/\.claude/(?:agents|skills|commands|plugins)/|/\.claude/[^/]+/\.\./"
-    r"|/\.mcp\.json$|/\.claude\.json$")
+    r"/\.claude/(?:agents|skills|commands|plugins|hooks)/|/\.claude/[^/]+/\.\./"
+    r"|/\.mcp\.json$|/\.claude\.json$|/\.claude/security-defaults\.json$")
 # Generated 8.3 names for .claude, .claude.json and .mcp.json (CLAUDE~1, CL3F2A~1, MCP~1.JSO).
 _D_SHORT_RE = _d_re.compile(r"(?:cl[0-9a-z]{0,4}|mcp[0-9a-z]{0,3})~[0-9]+(?:\.[0-9a-z]{1,3})?")
+_D_DRIVE_RE = _d_re.compile(r"[A-Za-z]:")
+_D_HDV_RE = _d_re.compile(r"globalroot\\device\\harddiskvolume[0-9]+(?:\\|$)")
+# A host Windows may read as an address: dotted or bare numbers, hex, IPv6 (a `:` is
+# refused before this), or the IPv6 literal form. Any of them may be this machine.
+_D_ADDR_RE = _d_re.compile(r"[0-9.]+|0x[0-9a-f.x]*|.*\.ipv6-literal\.net")
 _D_WALK_BOUND = 20000
 _D_MAX_DEPTH = 64
 
@@ -586,42 +593,83 @@ def _d_short_hit(path):
     return any(_D_SHORT_RE.fullmatch(c) for c in _d_norm(path).split("/"))
 
 
+def _d_trim(p):
+    """Win32 drops trailing dots and spaces from each path component (`x.json.`)."""
+    return "\\".join(c if c in (".", "..") else c.rstrip(". ") for c in p.split("\\"))
+
+
+def _d_win(path):
+    """The canonical Windows reading of a path: (kind, path).
+    "local": a drive path (X:\\...) or a relative one; "unc": \\\\host\\share...;
+    "volume": a volume with no drive letter (\\\\?\\Volume{...}, GLOBALROOT\\Device\\
+    HarddiskVolumeN), resolvable but never equal to a drive path; "cannot": any other
+    device namespace (pipes, \\Device\\Mup, ...), an NTFS stream (`x::$DATA`), a
+    drive-relative path (`C:x`). Every prefix Windows accepts is peeled first:
+    \\\\?\\, \\\\.\\, \\??\\, \\\\?\\UNC\\, GLOBALROOT\\??\\; any two leading
+    separators are a UNC or device prefix (`\\/h` and `/\\h` too)."""
+    p = path.replace("/", "\\")
+    kind = None
+    for _ in range(8):
+        if p[:4] not in ("\\\\?\\", "\\\\.\\", "\\??\\"):
+            break
+        ns = p[4:]
+        low = ns.casefold()
+        if _D_DRIVE_RE.match(ns) and ns[2:3] in ("", "\\"):
+            p = ns
+        elif low.startswith("unc\\"):
+            p = "\\\\" + ns[4:]
+        elif low.startswith("globalroot\\??\\"):
+            p = "\\??\\" + ns[14:]
+        elif low.startswith("volume{") or _D_HDV_RE.match(low):
+            kind = "volume"
+            break
+        else:
+            return "cannot", None
+    else:
+        return "cannot", None
+    if kind == "volume":
+        body = p[4:]
+    elif p[:2] == "\\\\":
+        kind, body = "unc", p[2:]
+    elif _D_DRIVE_RE.match(p):
+        if p[2:3] not in ("", "\\"):
+            return "cannot", None
+        kind, body = "local", p[2:]
+    else:
+        kind, body = "local", p
+    if ":" in body:
+        return "cannot", None
+    return kind, _d_trim(p)
+
+
 def _d_loopback(host):
-    if host in ("localhost", "localhost.", ".", "?", "::1", "[::1]", "0:0:0:0:0:0:0:1") \
-            or host.startswith("127.") or host.endswith(".ipv6-literal.net"):
+    h = host.strip("[]")
+    if h in ("", "localhost", "localhost.", ".", "?") or _D_ADDR_RE.fullmatch(h):
         return True
     try:
         import socket
         name = socket.gethostname().casefold()
     except Exception:
         return True
-    return host == name or host.split(".")[0] == name.split(".")[0]
+    return h == name or h.split(".")[0] == name.split(".")[0]
 
 
 def _d_classify(path, nt):
-    """("local", path to resolve) | ("remote", None) | ("cannot", None).
-    Windows reads any two leading separators as a UNC or device prefix, so `\\/h` and
-    `/\\h` are UNC too. Resolving a remote one opens an SMB connection before the
-    permission prompt, so it is never touched; a loopback one could alias anything."""
-    if not nt or len(path) < 2 or path[0] not in "\\/" or path[1] not in "\\/":
+    """("local" | "volume", path to resolve) | ("remote", path) | ("cannot", None).
+    A remote UNC path is never touched: resolving it opens an SMB connection before
+    the permission prompt. A loopback or address-literal host could alias any local
+    file, so it is not judged. WSL's \\\\wsl$ and \\\\wsl.localhost are local."""
+    if not nt:
         return "local", path
-    rest = path[2:].replace("/", "\\")
-    if rest[:2] in ("?\\", ".\\"):
-        kind, ns = rest[0], rest[2:]
-        if _d_re.match(r"[A-Za-z]:(?:\\|$)", ns):
-            return "local", ns
-        if ns.casefold().startswith("unc\\"):
-            rest = ns[4:]
-        elif kind == "?" and ns.casefold().startswith(("volume{", "globalroot\\")):
-            return "local", "\\\\?\\" + ns
-        else:
-            return "cannot", None
-    host = rest.split("\\", 1)[0].casefold()
+    kind, p = _d_win(path)
+    if kind != "unc":
+        return kind, p
+    host = p[2:].split("\\", 1)[0].casefold()
     if host in ("wsl$", "wsl.localhost"):
-        return "local", "\\\\" + rest
-    if not host or _d_loopback(host):
+        return "local", p
+    if _d_loopback(host):
         return "cannot", None
-    return "remote", None
+    return "remote", p
 
 
 def _d_real(path):
@@ -631,28 +679,35 @@ def _d_real(path):
         raise _DCannot()
 
 
-def _d_key(path):
+def _d_key(path, nt=_D_NT):
+    """A comparison key: the canonical Windows reading on nt, `/`, casefolded."""
+    if nt:
+        kind, p = _d_win(path)
+        if p is not None:
+            path = p
     return path.replace("\\", "/").casefold().rstrip("/")
 
 
-def _d_protected(project, env):
-    """Casefolded keys of the protected directories and files, for comparing, and the
-    real directory paths themselves, for walking (a key need not exist on disk)."""
+def _d_protected(project, env, nt=_D_NT):
+    """Keys of the protected directories and files, for comparing, and their real
+    paths, for the POSIX hard-link checks (a key need not exist on disk)."""
     home = _d_os.path.expanduser("~")
     cfg = env.get("CLAUDE_CONFIG_DIR") or _d_os.path.join(home, ".claude")
     plugins = env.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or _d_os.path.join(cfg, "plugins")
-    dirs = [_d_os.path.join(project, ".claude", d) for d in _D_DIRS[:3]]
-    dirs += [_d_os.path.join(cfg, d) for d in _D_DIRS[:3]] + [plugins]
+    dirs = [_d_os.path.join(project, ".claude", d) for d in _D_DIRS]
+    dirs += [_d_os.path.join(cfg, d) for d in _D_DIRS] + [plugins]
     files = [_d_os.path.join(cfg, "settings.json"), _d_os.path.join(cfg, "settings.local.json"),
-             _d_os.path.join(home, ".claude.json"), _d_os.path.join(project, ".mcp.json")]
+             _d_os.path.join(home, ".claude.json"), _d_os.path.join(project, ".mcp.json"),
+             _d_os.path.join(project, ".claude", "security-defaults.json")]
     if env.get("CLAUDE_CONFIG_DIR"):
         files.append(_d_os.path.join(cfg, ".claude.json"))
-    reals = [_d_real(d) for d in dirs]
-    return [_d_key(d) for d in reals], [_d_key(_d_real(f)) for f in files], reals
+    dreals = [_d_real(d) for d in dirs]
+    freals = [_d_real(f) for f in files]
+    return ([_d_key(d, nt) for d in dreals], [_d_key(f, nt) for f in freals], dreals, freals)
 
 
-def _d_contained(real, dirs, files):
-    k = _d_key(real)
+def _d_contained(real, dirs, files, nt=_D_NT):
+    k = _d_key(real, nt)
     return k in files or any(k == d or k.startswith(d + "/") for d in dirs)
 
 
@@ -691,16 +746,18 @@ def _d_link_names(real):
     return names
 
 
-def _d_hardlinked(real, dirs, files, nt, link_names, walk_dirs):
-    """Is the existing file at real also reachable under a protected name?"""
+def _d_hardlinked(real, prot, nt, link_names):
+    """Is the existing file at real also reachable under a protected name? Only a file
+    with more than one link is looked at, so ordinary edits pay nothing."""
     import stat as _d_stat
+    dirs, files, dreals, freals = prot
     try:
         st = _d_os.stat(real)
     except FileNotFoundError:
         return False
     except (OSError, ValueError):
         raise _DCannot()
-    if not _d_stat.S_ISREG(st.st_mode):
+    if not _d_stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
         return False
     if nt:
         try:
@@ -709,11 +766,18 @@ def _d_hardlinked(real, dirs, files, nt, link_names, walk_dirs):
             raise
         except Exception:
             raise _DCannot()
-        return any(_d_raw_hit(n) or _d_contained(n, dirs, files) for n in names if n)
-    if st.st_nlink <= 1:
-        return False
+        return any(_d_raw_hit(n) or _d_contained(n, dirs, files, nt) for n in names if n)
+    for f in freals:
+        try:
+            fs = _d_os.stat(f)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            raise _DCannot()
+        if (fs.st_dev, fs.st_ino) == (st.st_dev, st.st_ino):
+            return True
     seen = 0
-    stack = [(d, 0) for d in walk_dirs]
+    stack = [(d, 0) for d in dreals]
     while stack:
         top, depth = stack.pop(0)
         try:
@@ -749,18 +813,29 @@ def _d_judge(path, project, env, nt=_D_NT, link_names=None):
     kind, local = _d_classify(path, nt)
     if kind == "cannot":
         return "cannot", ""
+    if _d_raw_hit(local):
+        return "yes", ""
     if kind == "remote":
-        return ("yes" if _d_short_hit(path) else "no"), ""
+        return ("yes" if _d_short_hit(local) else "no"), ""
     try:
         if not _d_os.path.isabs(local):
             local = _d_os.path.join(project, local)
         real = _d_real(local)
+        if nt:
+            # What it resolved to is classified again: a link may lead to a network
+            # or loopback path, and a volume with no drive letter matches no key.
+            rkind, rp = _d_classify(real, True)
+            if rkind in ("cannot", "volume"):
+                return "cannot", ""
+            if rkind == "remote":
+                return ("yes" if _d_raw_hit(rp) or _d_short_hit(rp) else "no"), rp
+            real = rp
         if _d_raw_hit(real):
             return "yes", real
-        dirs, files, walk_dirs = _d_protected(project, env)
-        if _d_contained(real, dirs, files):
+        prot = _d_protected(project, env, nt)
+        if _d_contained(real, prot[0], prot[1], nt):
             return "yes", real
-        if _d_hardlinked(real, dirs, files, nt, link_names or _d_link_names, walk_dirs):
+        if _d_hardlinked(real, prot, nt, link_names or _d_link_names):
             return "yes", real
     except _DCannot:
         return "cannot", ""

@@ -73,8 +73,8 @@ tampering with the baseline *non-overridably and in every repo* — not just the
 > **path-text** rules — `Bash(*.claude/baseline.config.json*)` and PowerShell forward- and
 > backslash variants — which do cover the shell path. The same pair of shapes, plus
 > cwd-independent `Edit(//**/.claude/<dir>/**)` entries, now covers the paths only a human
-> may write (subagent, skill and command definitions, `.mcp.json`, user settings, the
-> plugin cache) and `.claude/security-defaults.json`; scope-guard refuses those as the
+> may write (subagent, skill and command definitions, hook scripts, `.mcp.json`, user
+> settings, the plugin cache) and `.claude/security-defaults.json`; scope-guard refuses those as the
 > complete check (see the README). Understand what a text rule can and
 > cannot do: it matches the **command string**, so `cd .claude && sed -i … settings.json`
 > and `sed -i … "$CFG"` are *not* matched, and nothing in the baseline prevents those

@@ -44,14 +44,18 @@ bcl_prime "$PAYLOAD" definition
 
 # Self-protection, whatever scopeGuard.enabled says: like the deny-list it has no
 # switch, and it follows the posture. A Write or Edit to a path only a human may write
-# is refused: subagent, skill and command definitions (.claude/agents|skills|commands,
-# at any depth and in the user's config home), plugins (a skill folder's
-# .claude-plugin, the plugin cache), user settings, .claude.json and .mcp.json. Each of
-# them can run commands command-guard never sees (hooks and MCP servers in frontmatter
-# or JSON, a skill's allowed-tools and `!` lines, the scripts a definition runs), so no
-# content is judged: the path decides. _BCL_DEFPATH_SRC (common.sh) reads it as written,
-# as it resolves (8.3 names, links, junctions), under the real protected directories,
-# and through hard links; see README for what this leaves to humans.
+# is refused: subagent, skill and command definitions and hook scripts
+# (.claude/agents|skills|commands|hooks, at any depth and in the user's config home),
+# plugins (a skill folder's .claude-plugin, the plugin cache), user settings,
+# .claude.json, .mcp.json and .claude/security-defaults.json. Each of them can run
+# commands command-guard never sees (hooks and MCP servers in frontmatter or JSON, a
+# skill's allowed-tools and `!` lines, the scripts a definition runs) or relax a check,
+# so no content is judged: the path decides. _BCL_DEFPATH_SRC (common.sh) reads it as
+# written, in its canonical Windows form (device prefixes, trailing dots), as it
+# resolves (8.3 names, links, junctions), under the real protected directories, and
+# through hard links; see README for what this leaves to humans. A slow interpreter
+# start can cost the prime's 4 s and then the standalone run's 4 s before it fails
+# closed.
 #
 # Only the exact verdict "no" (or "nopath": no file_path in the payload) lets the edit
 # through. Without a parsed payload (no working Python, or a payload that is not JSON),
@@ -76,8 +80,11 @@ elif [[ -n "${_BCL_PY:-}" ]]; then
   def_out="$(bcl_timeout 4 "$_BCL_PY" -I -S -X utf8 -c "$_BCL_DEFPATH_SRC$_BCL_DEFPATH_MAIN_TAIL" \
     "$def_root" <<< "$PAYLOAD")" || def_out=""
   def_verdict="${def_out%%$'\n'*}"
-  def_real="${def_out#*$'\n'}"
-  def_real="${def_real%%$'\n'*}"
+  def_real=""
+  if [[ "$def_out" == *$'\n'* ]]; then
+    def_real="${def_out#*$'\n'}"
+    def_real="${def_real%%$'\n'*}"
+  fi
 else
   def_verdict=unparsed
   def_real=""
@@ -85,11 +92,13 @@ fi
 case "$def_verdict" in
   no|nopath) ;;
   yes)
-    bcl_say "[scope-guard] REFUSED — ${def_real:-the target} is a path only a human may write (a subagent, skill or command definition, a plugin, user settings, .claude.json or .mcp.json). These can register hooks, MCP servers or pre-approved commands that no guard sees, so Claude may not write them: edit it yourself."
+    bcl_say "[scope-guard] REFUSED — ${def_real:-the target} is a path only a human may write (a subagent, skill or command definition, a hook script, a plugin, user settings, .claude.json, .mcp.json or the security-defaults rules). These can register hooks, MCP servers or pre-approved commands that no guard sees, so Claude may not write them: edit it yourself."
     bcl_violation_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc ;;
   unparsed)
-    # No parser: the raw text, without case, with /, \ or \\ (JSON) as separators.
-    def_re='\.claude[/\\]+(agents|skills|commands|plugins|settings\.json|settings\.local\.json)'
+    # No parser: the raw text, without case, with /, \ or \\ (JSON) as separators, a
+    # `./` or a stream suffix (`.claude::$INDEX_ALLOCATION\agents`) allowed in between.
+    def_re='\.claude(:[^/\\"]*)?([/\\]+\.)*[/\\]+(agents|skills|commands|plugins|hooks'
+    def_re+='|settings\.json|settings\.local\.json|security-defaults\.json)'
     def_re+='|\.claude[/\\]+[^/\\"]+[/\\]+\.\.[/\\]|\.claude\.json|\.mcp\.json'
     def_re+='|(^|[/\\"])(cl[0-9a-z]{0,4}|mcp[0-9a-z]{0,3})~[0-9]+(\.[0-9a-z]{1,3})?([/\\"]|$)'
     shopt -s nocasematch   # bash 3.1+; ${x,,} needs bash 4
