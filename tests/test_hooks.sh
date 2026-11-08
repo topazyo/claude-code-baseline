@@ -252,7 +252,11 @@ case "$(uname -s)" in
     vol="$(MSYS_NO_PATHCONV=1 mountvol "${USW:0:2}\\" /L 2>/dev/null | tr -d ' \r')"
     case "$vol" in
       '\\?\Volume{'*)
-        run "volume GUID user settings -> 2"     modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${USW:2}")" content "{}")" 2 ;;
+        run "volume GUID user settings -> 2"     modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${USW:2}")" content "{}")" 2
+        WTW="$(cygpath -w "$WT")"
+        run "volume GUID, junction named ag. -> 2" modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${WTW:2}\\links\\ag.\\vx.md")" content "x")" 2
+        run "volume GUID, hard link h.md. -> 2"  modules/scope-guard.sh "$(def_payload Edit "$(jesc "${vol%\\}${WTW:2}\\src\\h.md.")" new_string "y")" 2
+        run "volume GUID, ordinary file -> 0"    modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${WTW:2}\\src\\vplain.md")" content "x")" 0 ;;
       *)
         if [ "${CI:-}" = true ]; then fail=$((fail + 1)); echo "  FAIL [volume GUID row: mountvol gave no volume name on CI]"
         else echo "  SKIP [volume GUID row: mountvol gave no volume name here]"; fi ;;

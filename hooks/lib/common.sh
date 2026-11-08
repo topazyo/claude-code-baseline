@@ -802,6 +802,19 @@ def _d_hardlinked(real, prot, nt, link_names):
     return False
 
 
+def _d_literal(p):
+    """The \\\\?\\ spelling of a canonical Windows path, which Win32 does not trim: a drive
+    path gets the prefix, a UNC one (WSL) becomes \\\\?\\UNC\\..., a volume path already
+    has it. None for a relative path."""
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + p[2:]
+    if _D_DRIVE_RE.match(p):
+        return "\\\\?\\" + p
+    return None
+
+
 def _d_resolved(local, project, env, nt, link_names, literal=False):
     """(verdict, real path) for an absolute local path. literal: judge the spelling as
     written (a \\\\?\\ path), not Win32's trimmed one -- see _d_judge."""
@@ -817,9 +830,8 @@ def _d_resolved(local, project, env, nt, link_names, literal=False):
         if rkind == "remote":
             return ("yes" if _d_raw_hit(rp) or _d_short_hit(rp) else "no"), rp
         real = rp
-        if literal and _D_DRIVE_RE.match(rp):
-            probe = "\\\\?\\" + rp
-        else:
+        probe = _d_literal(rp) if literal else real
+        if probe is None:
             probe = real
     if _d_raw_hit(real):
         return "yes", real
@@ -850,16 +862,18 @@ def _d_judge(path, project, env, nt=_D_NT, link_names=None):
         if not _d_os.path.isabs(local):
             local = _d_os.path.join(project, local)
         v, real = _d_resolved(local, project, env, nt, link_names)
-        if nt and kind == "local" and v == "no":
+        if nt and kind in ("local", "volume") and v == "no":
             # Win32 drops trailing dots and spaces, but a runtime that writes through
             # \\?\ (Node, Bun) keeps them: an existing link named `ag.` or `h.md.` is
-            # another file. When trimming changed the path, judge the literal one too.
+            # another file. When trimming changed the path -- a drive, volume or WSL
+            # path alike -- judge the literal \\?\ spelling too; yes or cannot wins.
             lkind, lit = _d_classify(path, nt, trim=False)
-            if lkind == "local" and lit is not None:
+            if lkind == kind and lit is not None:
                 if not _d_os.path.isabs(lit):
                     lit = _d_os.path.join(project, lit)
-                if lit != local and _D_DRIVE_RE.match(lit):
-                    v2, r2 = _d_resolved("\\\\?\\" + lit, project, env, nt, link_names, True)
+                lit_ns = _d_literal(lit)
+                if lit != local and lit_ns is not None:
+                    v2, r2 = _d_resolved(lit_ns, project, env, nt, link_names, True)
                     if v2 != "no":
                         return v2, r2
     except _DCannot:
