@@ -211,20 +211,23 @@ with tempfile.TemporaryDirectory(prefix="DefPathUC") as tmp:
         def names_fail(real):
             raise OSError("enumeration failed")
 
-        # Only a file with more than one link is enumerated: a twin pair in src/.
-        twin = proj / "src" / "twin.md"
-        twin.write_text("x", encoding="utf-8")
-        os.link(twin, proj / "src" / "twin2.md")
-        check("hard link names include an agent -> yes",
-              verdict(payload(str(twin)), P, {}, nt=True, link_names=names_with_agent)[0], "yes")
-        check("hard link names, none protected -> no",
-              verdict(payload(str(twin)), P, {}, nt=True, link_names=names_alone)[0], "no")
-        check("hard link enumeration fails -> cannot",
-              verdict(payload(str(twin)), P, {}, nt=True, link_names=names_fail)[0], "cannot")
-        check("a single-link file needs no enumeration",
-              verdict(payload(str(plain)), P, {}, nt=True, link_names=names_fail)[0], "no")
-        check("missing target needs no enumeration",
-              verdict(payload(str(proj / "src" / "new.md")), P, {}, nt=True, link_names=names_fail)[0], "no")
+        # Only a file with more than one link is enumerated: a twin pair in src/. Windows
+        # only: the code resolves real paths with the host's os.path, so a forced nt
+        # flavour on POSIX would turn /tmp/... into a relative \tmp\... and test nothing.
+        if os.name == "nt":
+            twin = proj / "src" / "twin.md"
+            twin.write_text("x", encoding="utf-8")
+            os.link(twin, proj / "src" / "twin2.md")
+            check("hard link names include an agent -> yes",
+                  verdict(payload(str(twin)), P, {}, link_names=names_with_agent)[0], "yes")
+            check("hard link names, none protected -> no",
+                  verdict(payload(str(twin)), P, {}, link_names=names_alone)[0], "no")
+            check("hard link enumeration fails -> cannot",
+                  verdict(payload(str(twin)), P, {}, link_names=names_fail)[0], "cannot")
+            check("a single-link file needs no enumeration",
+                  verdict(payload(str(plain)), P, {}, link_names=names_fail)[0], "no")
+            check("missing target needs no enumeration",
+                  verdict(payload(str(proj / "src" / "new.md")), P, {}, link_names=names_fail)[0], "no")
 
         # realpath failing -> cannot
         rp = os.path.realpath
