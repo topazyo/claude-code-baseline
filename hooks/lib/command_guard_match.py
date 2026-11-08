@@ -224,6 +224,37 @@ _PS_EXPR_NEXT = _PS_ASSIGN | {
     "-eq", "-ne", "-gt", "-lt", "-ge", "-le", "-like", "-notlike", "-match", "-notmatch",
     "-replace", "-contains", "-notcontains", "-in", "-notin", "-and", "-or", "-is",
     "-isnot", "-as", "-split", "-join"}
+# A PowerShell tool statement may start with a variable, with member or index steps (see
+# _ps_statement_tail). No other scope prefix: `$alias:g`, `$function:g` and `${c:\f}` name
+# a provider's item, and assigning one defines a command or writes a file.
+_PS_VAR = (r"\$(?:\{[^{}$:]+\}|(?:(?:env|global|script|local|private|using):)?\w+|\?)"
+           r"(?:\.\w+|\[[^\]()]*\])*")
+_PS_VAR_WORD_RE = re.compile(_PS_VAR + r"(?:\+\+|--)?\}*", re.I)
+# `$x=value`, one word: variable, operator, value.
+_PS_GLUED_ASSIGN_RE = re.compile("(" + _PS_VAR + r")((?:[-+*/%]|\?\?)?=)(.*)", re.I | re.S)
+# `key=value` in a hashtable; the value runs as a pipeline.
+_PS_GLUED_KEY_RE = re.compile(r"[^=]*=(.+)", re.S)
+# A word up to a value's opening quote: `$x=`, `$a=$b=`, `key=`, after any `{` or `!`.
+_PS_VALUE_PREFIX_RE = re.compile(
+    "[{!]*(?:(?:" + _PS_VAR + r"(?:[-+*/%]|\?\?)?=)+|\w*=)", re.I | re.S)
+# Words that may stand before a statement's variable (_effective_cmd_index skips them).
+_PS_STATEMENT_PREFIX = {"-not", "do", "else"}
+# A `(` after one of these, at the start of a statement, opens the keyword's own header.
+_PS_HEADER_KEYWORDS = {"if", "elseif", "while", "until", "switch", "foreach", "for", "param"}
+# Words a brace block's statement can follow once the braces are read away.
+_PS_BLOCK_WORDS = {"do", "else", "try", "catch", "finally"}
+# A condition's opening keyword, at the start of its statement.
+_PS_CONDITION_RE = re.compile(r"(?:^|[;{}\n(|&])\s*(?:if|elseif|while|until|switch)$")
+# The word before a method call's `(`: `$x.Run(`, `$a = $b.Run(`.
+_PS_CALLED_WORD_RE = re.compile(r"\$.*[\w\]]$", re.S)
+# Programs that run what their arguments name: a group passed to one is as uninspectable
+# as `sudo $c` (see ps_call on _Seg).
+_PS_PROGRAM_RUNNERS = ((_WRAPPERS - {"if", "elif", "then", "while", "until", "for", "do",
+                                     "else", "fi", "done", "esac"})
+                       | _SHELLS | _PS_RUNNERS | _DASH_C_RUNNERS | {"cmd", "wsl"})
+# A dot-invocation glued to a quoted name: `.'git' push`, which _shell_words reads as `.git`.
+_PS_DOT_QUOTE_RE = re.compile(r"""(^|[\s;|({=])\.(?=['"])""")
+_PS_BLOCK_COMMENT_RE = re.compile(r"<#.*?#>", re.S)
 # wsl options that take a value (`wsl -d Ubuntu -u root -- cmd`).
 _WSL_VALUE_OPTS = {"-d", "--distribution", "--distribution-id", "-u", "--user", "--cd",
                    "--shell-type"}
@@ -811,6 +842,110 @@ def _reasons_for(toks):
     return out
 
 
+def _ps_statement_start(toks):
+    return 1 if len(toks) > 1 and toks[0].lower() in _PS_STATEMENT_PREFIX else 0
+
+
+def _ps_statement_tail(toks):
+    """For an ordinary statement of a PowerShell tool payload whose first word is a
+    variable (`$x = 1`, `if ($LASTEXITCODE -ne 0)`, `foreach ($f in $l)`), the words it
+    goes on to run, as a list (empty when nothing is left to judge); None for any other
+    segment. The tool's payload has no outer shell, so the variable is no expansion.
+    Not after a call operator (`& $x`, `. ($x)`), not a method call (`$x.Run(...)`, or one
+    as a later word), not fed by a pipe, and not `$x <word>`.
+
+    The words are what follows an `=`, an operator or a foreach header's `in` (its
+    collection is a pipeline), past a chain `$a = $b = cmd`, with a glued `$x=value` read
+    as the same three words. A value that opens with a quote is a string, not a command."""
+    if not getattr(toks, "ps_tool", False) or toks.ps_call or toks.piped:
+        return None
+    start = _ps_statement_start(toks)
+    i, word, walked, value_of_glue = start, toks[start], False, False
+    while True:
+        glued = _PS_GLUED_ASSIGN_RE.fullmatch(word)
+        if glued:
+            walked, word, value_of_glue = True, glued[3], True
+            if word:
+                continue
+            i += 1                     # `$x= 1`: the value is the next word
+            if i >= len(toks):
+                return []
+            word, value_of_glue = toks[i], False
+            continue
+        if _PS_VAR_WORD_RE.fullmatch(word):
+            nxt = toks[i + 1].lower() if i + 1 < len(toks) else None
+            if nxt is None:
+                return []
+            if nxt in _PS_EXPR_NEXT or (nxt == "in" and toks.ps_foreach):
+                walked, value_of_glue = True, False
+                i += 2
+                if i >= len(toks):
+                    return []
+                word = toks[i]
+                continue
+        if not walked:
+            return None
+        if i in (toks.ps_quoted_value if value_of_glue else toks.ps_quoted):
+            return []
+        return [word] + list(toks[i + 1:])
+
+
+def _ps_hash_value(toks):
+    """A hashtable's value, as words, when the segment reads as `key = value` (the brace
+    reading turns `@{ a = git status }` into that), in the forms PowerShell accepts:
+    `a = v`, `a =v`, `a=v`, and `= v` or `=v` after a parenthesized key. None otherwise,
+    and [] for a value that opens with a quote, which is a string."""
+    glued = _PS_GLUED_KEY_RE.fullmatch(toks[0])
+    if glued:
+        return [] if 0 in toks.ps_quoted_value else [glued[1]] + list(toks[1:])
+    if "$" in toks[0]:
+        return None
+    if toks[0] == "=":
+        return [] if 1 in toks.ps_quoted else list(toks[1:])
+    if len(toks) > 2 and toks[1] == "=":
+        return [] if 2 in toks.ps_quoted else list(toks[2:])
+    if len(toks) > 1 and toks[1].startswith("=") and len(toks[1]) > 1:
+        return [toks[1][1:]] + list(toks[2:])
+    return None
+
+
+def _ps_tail_segment(words, called=False, piped=False):
+    """words as a segment of the tool's payload. `. cmd` dot-invokes cmd, so the words
+    are judged without the dot, and `. $y` is a call of $y, not an ordinary statement.
+    A leading number goes too: in `$x=2>&1 rm -rf /` the 2 was a redirect's.
+    called, piped: the source segment's ps_call and pipe, for words taken from one that
+    is not an ordinary statement (`'x' | . bash` feeds bash)."""
+    dot = words[0] == "." and len(words) > 1
+    drop = dot or (words[0].isdigit() and len(words) > 1)
+    seg = _new_seg(words[1:] if drop else words, piped)
+    seg.ps_tool, seg.ps_call = True, called or (dot and "$" in words[1])
+    return seg
+
+
+def _ps_statement_tails(segments):
+    """What the ordinary statements of a PowerShell tool payload go on to run, as segments
+    of their own, so the caller tokenizes inline scripts in them and judges them like any
+    other segment: see _ps_statement_tail and _ps_hash_value. `$x = $(cmd)`: the body is
+    its own segment. Each input yields at most two segments, so this stays linear."""
+    out = []
+    for toks in segments:
+        if not getattr(toks, "ps_tool", False):
+            continue
+        tail = _ps_statement_tail(toks)
+        if tail is None:
+            value = (list(toks[1:]) if toks[0] == "." and len(toks) > 1 and "$" not in toks[1]
+                     else _ps_hash_value(toks))   # `. cmd args`: cmd is the command
+            if not value or value == ["$"]:
+                continue
+            seg = _ps_tail_segment(value, toks.ps_call, toks.piped)
+            # `@{ a = $y = cmd }`: one more step
+            out.append(seg)
+            tail = _ps_statement_tail(seg)
+        if tail and tail != ["$"]:
+            out.append(_ps_tail_segment(tail))
+    return out
+
+
 def _rules_at(toks, idx, saw_xargs, rest=None):
     """The block reasons for the segment, taking toks[idx] as its command word. A
     PowerShell assignment's right-hand side is appended to rest, for the caller to
@@ -833,6 +968,9 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
     # A destructuring target (`$a, $b = 1, 2`) ends in a comma. The right-hand side of
     # an assignment runs as a pipeline (`$out = git push --force`): judge it.
     if "$" in cmd or toks[idx].startswith(("$(", "`")):
+        # A PowerShell tool payload has no outer shell: see _ps_statement_tail.
+        if idx == _ps_statement_start(toks) and _ps_statement_tail(toks) is not None:
+            return out
         nxt = toks[idx + 1].lower() if idx + 1 < len(toks) else None
         if not (getattr(toks, "ps_script", False)
                 and (nxt is None or nxt in _PS_EXPR_NEXT or toks[idx].endswith(","))):
@@ -1250,6 +1388,7 @@ def _runner_scripts(toks):
             texts.append(texts[0].replace("^", ""))
         if kind == "ps":
             texts += [_ps_ungroup(t) for t in texts]
+            texts += [_ps_block_statements(t) for t in texts[:1] if "{" in t or "}" in t]
             texts += [_ps_unescape_everywhere(t) for t in texts if "`" in t]
         out += [(t, kind == "ps") for t in texts]
     return list(dict.fromkeys(out))
@@ -1298,7 +1437,22 @@ _PS_GROUP_RE = re.compile(r"""[$@]?\([ \t]*('[^']*'|"[^"]*"|[^\s()'"]+)[ \t]*\)"
 _PS_BRACE_RE = re.compile(r"(\$\{[^{}]*\})|[{}]")
 
 
-def _ps_ungroup(text: str) -> str:
+def _ps_keep_group(m):
+    """A lone variable in a statement's condition (`if ($x)`), which the tool's ungrouped
+    reading leaves alone: `if $x` would read the condition as a command word. Anywhere
+    else the group is opened as usual: `git push ($x) --force` is `git push $x --force`."""
+    return (_PS_VAR_WORD_RE.fullmatch(m.group(1).lstrip("!"))
+            and _PS_CONDITION_RE.search(m.string[:m.start()].rstrip().lower()))
+
+
+def _ps_block_statements(text: str) -> str:
+    """Every brace outside ${...} read as a statement end: `if ($a) { $x = 1 } else
+    { git push --force }` runs its blocks' commands. An added reading: a brace inside a
+    string stays in its word."""
+    return _PS_BRACE_RE.sub(lambda m: m.group(1) or " ; ", text)
+
+
+def _ps_ungroup(text: str, keep_variables: bool = False) -> str:
     """PowerShell's grouping read away: `git reset ("--hard")`, `$("--force")`, `& ('git')`
     and `& {git reset --hard}` pass the grouped value on as the word itself. Only a group
     around a single word is opened (nested up to 4 deep), so `(Join-Path $HOME x)` stays a
@@ -1306,7 +1460,8 @@ def _ps_ungroup(text: str) -> str:
     inside the same word, and no quote character changes, so quoting is unaffected."""
     out = _PS_BRACE_RE.sub(lambda m: m.group(1) or " ", text)
     for _ in range(4):
-        new = _PS_GROUP_RE.sub(lambda m: " " + m.group(1) + " ", out)
+        new = _PS_GROUP_RE.sub(lambda m: (m.group(0) if keep_variables and _ps_keep_group(m)
+                                          else " " + m.group(1) + " "), out)
         if new == out:
             break
         out = new
@@ -1461,6 +1616,13 @@ def _shell_words(s: str):
     """
     words, buf, has_word, state, ansi_cut = _Words(), [], False, "", False
     i, n = 0, len(s)
+    opens_quoted = value_quoted = False
+
+    def word():
+        text = "".join(buf)
+        return (_QuotedWord(text) if opens_quoted
+                else _QuotedValueWord(text) if value_quoted else text)
+
     while i < n:
         c = s[i]
         if state == "$'":                            # bash ANSI-C string: \ escapes, ' ends
@@ -1509,18 +1671,23 @@ def _shell_words(s: str):
             i += 2
             continue
         elif c in "'\"":
+            if not (buf or has_word):
+                opens_quoted = True
+            elif (buf[-1:] == ["="] and not value_quoted
+                  and _PS_VALUE_PREFIX_RE.fullmatch("".join(buf))):
+                value_quoted = True
             state, has_word = c, True
         elif c in " \t\r\n":                         # shlex's default whitespace
             if buf or has_word:
-                words.append("".join(buf))
-            buf, has_word = [], False
+                words.append(word())
+            buf, has_word, opens_quoted, value_quoted = [], False, False, False
         elif c in _OP_CHARS:
             if c == "`" or (c == "(" and buf and buf[-1] == "$"):
                 words.subst = True
             glued = bool(buf or has_word)
             if glued:
-                words.append("".join(buf))
-            buf, has_word = [], False
+                words.append(word())
+            buf, has_word, opens_quoted, value_quoted = [], False, False, False
             j = i
             while j < n and s[j] in _OP_CHARS:
                 j += 1
@@ -1535,8 +1702,16 @@ def _shell_words(s: str):
     if state:
         raise ValueError("No closing quotation")
     if buf or has_word:
-        words.append("".join(buf))
+        words.append(word())
     return words
+
+
+class _QuotedWord(str):
+    """A word _shell_words read as opening with a ' or " quote."""
+
+
+class _QuotedValueWord(str):
+    """A word holding an assignment whose value opens with a quote: `$x='a b'`, `key="v"`."""
 
 
 class _Seg(list):
@@ -1547,12 +1722,21 @@ class _Seg(list):
     tokens, kept so extraPatterns can still match them. ps_script: the segment is part of
     a script handed to pwsh/powershell (see _runner_scripts). xargs_fed: the segment is
     part of an inline script that xargs runs (`xargs sh -c '...'`), so its arguments
-    include xargs' items.
+    include xargs' items. ps_tool: the segment is the PowerShell tool's own payload, not
+    a script nested in it. ps_call: it follows a call operator, starts a group in argument
+    position, is or holds a method call's object, or comes at or after a group that is
+    called or passed to a program runner. ps_foreach: it is a foreach header. ps_quoted,
+    ps_quoted_value: the indexes of the words that open with a quote, and of those whose
+    assignment's value does. (The last five: see _ps_statement_tail.)
     """
     piped = False
     redirs = ()
     ps_script = False
     xargs_fed = False
+    ps_tool = False
+    ps_call = False
+    ps_foreach = False
+    ps_quoted = ps_quoted_value = frozenset()
 
 
 def _new_seg(toks, piped, redirs=()):
@@ -1571,7 +1755,52 @@ def _xargs_fed_copy(seg):
     return out
 
 
-def _words_to_segments(words, split_words: bool = True):
+def _ps_command_mode(cur, quoted):
+    """Has a command name started the statement these words begin? Past an expression
+    chain (`$x =`, `$a -eq`, `$f in`, `$x=`), a word that is not a variable, a number or a
+    quoted string names a command (`$x = git ...`), and after it every word is an
+    argument, `-is`, `in` and `--repo=` included. quoted: indexes of quoted words."""
+    i = 1 if len(cur) > 1 and cur[0].lower() in _PS_STATEMENT_PREFIX else 0
+    while i < len(cur):
+        word = cur[i]
+        glued = _PS_GLUED_ASSIGN_RE.fullmatch(word)
+        if glued:
+            word = glued[3]
+            if not word:
+                i += 1
+                continue
+        elif (_PS_VAR_WORD_RE.fullmatch(word) and i + 1 < len(cur)
+              and (cur[i + 1].lower() in _PS_EXPR_NEXT or cur[i + 1].lower() == "in")):
+            i += 2
+            continue
+        return not (i in quoted or word[:1] in "$@-'\"" or word[:1].isdigit())
+    return False
+
+
+def _ps_argument_group(values, cur, quoted):
+    """Does a `(` after these words open a group in a command's argument position?
+    Not a keyword's header (`if (`, `} else { if (`). After a command name, yes
+    (`git push --repo=(...)`, `curl -is (...)`); in an expression, not where a value goes
+    (`$x = (`, `$a -eq @(`, `$x=(`). values: see close() in _words_to_segments."""
+    words = [v.lower() for v in (values[:-1] if values[-1:] in (["@"], ["$"]) else values)]
+    if not words:
+        return False
+    if words[-1] in _PS_HEADER_KEYWORDS and _PS_BLOCK_WORDS.issuperset(words[:-1]):
+        return False
+    if _ps_command_mode(cur, quoted):
+        return True
+    return bool(words[-1]) and words[-1] not in _PS_EXPR_NEXT and words[-1] != "in"
+
+
+class _Latch(list):
+    """The state _words_to_segments shares across the lines of one text: non-empty once a
+    called or runner-argument group has opened; last, the latest segment; closer, the
+    operator that ended the words before the current ones."""
+    last = None
+    closer = None
+
+
+def _words_to_segments(words, split_words: bool = True, latch=None):
     """Operator pieces end a segment; group/negation punctuation is stripped.
 
     A run of operators (`;>`, `(>`) is split into single operators. A redirection
@@ -1582,21 +1811,59 @@ def _words_to_segments(words, split_words: bool = True):
     like `bash -c`. A pipe marks the next segment piped, through a `( ... )` group
     but not `||`; `<( ... )` marks the command it feeds, `>( ... )` its own body.
     Tokens are lowercased, except short-flag bundles (-P, -Rf): wrapper options are
-    case-sensitive (xargs -P takes a value, -p does not).
+    case-sensitive (xargs -P takes a value, -p does not). latch: shared by the lines of one
+    text, since a group can span lines (see _Latch, ps_call on _Seg and close() below).
     """
     segments, cur, redirs, herestr = [], [], [], []
     piped, pending = False, None           # pending: redirect awaiting its target
+    call_next = arg_next = foreach_next = False   # see ps_call and ps_foreach on _Seg
+    quoted, quoted_value = set(), set()
+    latch = _Latch() if latch is None else latch
 
-    def close(next_piped, fed=False):
-        nonlocal cur, redirs, herestr, piped, pending
+    def close(next_piped, fed=False, op=None, glued_op=False, real_op=False):
+        nonlocal cur, redirs, herestr, piped, pending, call_next, arg_next, foreach_next
+        nonlocal quoted, quoted_value
         toks = cur + [w for target in herestr for w in ("-c", target)]
+        # Each word's value: `$x=.` and `$x=sudo` hold a `.` and a `sudo`.
+        values = [w.rsplit("=", 1)[-1] for w in cur]
+        calls = op in ("&", "`") or (op == "(" and (
+            values[-1:] in (["."], [".@"], [".$"])
+            or (values[-1:] in (["@"], ["$"]) and values[-2:-1] == ["."])))
+        held, held_arg = call_next, arg_next
+        # A method call's `(`, glued to its name: `$w.Run(`, `$w. Run(`, and `($w).Run(`,
+        # `($w)[0].Run(`, `($w)::Run(`, `($w)?.Run(`, whose object is the segment before,
+        # perhaps on an earlier line (latch.last).
+        method = bool(op == "(" and glued_op and cur and (
+            _PS_CALLED_WORD_RE.search(cur[-1])
+            or (cur[-2:-1] and cur[-2].endswith(".") and "$" in cur[-2])))
+        if (op == "(" and glued_op and cur and latch.closer == ")"
+                and cur[0].startswith((".", "[", "::", "?.")) and latch.last is not None):
+            latch.last.ps_call = True
+        latch.closer = op
         if toks:
             # A here-string feeds stdin too: `bash - <<< '...'` reads it as its script.
-            segments.append(_new_seg(toks, piped or fed or bool(herestr), redirs))
+            seg = _new_seg(toks, piped or fed or bool(herestr), redirs)
+            seg.ps_call = held or held_arg or bool(latch) or method
+            seg.ps_foreach = foreach_next
+            seg.ps_quoted, seg.ps_quoted_value = frozenset(quoted), frozenset(quoted_value)
+            segments.append(seg)
+            latch.last = seg
             piped = next_piped
         else:
             piped = piped or next_piped        # `| (bash)`: the group keeps the pipe
+        call_next = calls
+        # The first statement of a group in argument position: `git push ($x) --force`.
+        # real_op: a `(` the quote-blind pass found may be inside a string.
+        arg_next = op == "(" and real_op and (_ps_argument_group(values, cur, quoted | quoted_value)
+                                              or (held_arg and not toks))
+        # `& @(1; $y)` calls what the group yields; `sudo @(1; $c)` passes it to a program
+        # that runs it, so a variable in it is no more ordinary than `sudo $c` is. A latch,
+        # not a depth count: this reader counts a `)` that PowerShell may not (`# )`, `--% )`).
+        if op == "(" and (held or calls or any(_cmd_word(v) in _PS_PROGRAM_RUNNERS for v in values)):
+            latch.append(True)
+        foreach_next = op == "(" and cur[-1:] == ["foreach"]
         cur, redirs, herestr, pending = [], [], [], None
+        quoted, quoted_value = set(), set()
 
     for word in words:
         is_op = isinstance(word, _Op)
@@ -1615,13 +1882,15 @@ def _words_to_segments(words, split_words: bool = True):
                     if _REDIR_RE.match(op):
                         if glued and cur and (cur[-1].isdigit() or _NAMED_FD_RE.match(cur[-1])):
                             cur.pop()
+                            quoted.discard(len(cur))
+                            quoted_value.discard(len(cur))
                         pending = op
                     elif op == "(" and prev_op == "<":
                         close(False, fed=True)     # <(...): its output feeds this command
                     elif op == "(" and prev_op == ">":
                         close(True)                # >(...): this command feeds its body
                     else:
-                        close(op in ("|", "|&"))
+                        close(op in ("|", "|&"), op=op, glued_op=glued, real_op=is_op)
                     glued, prev_op = False, op
                 continue
             prev_op = None
@@ -1634,6 +1903,10 @@ def _words_to_segments(words, split_words: bool = True):
                 (herestr if pending == "<<<" else redirs).append(piece)
                 pending = None
                 continue
+            if isinstance(word, _QuotedWord):
+                quoted.add(len(cur))
+            elif isinstance(word, _QuotedValueWord):
+                quoted_value.add(len(cur))
             cur.append(piece)
             glued = True
     close(False)
@@ -1691,7 +1964,8 @@ _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
 
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
               piped: bool = False, lenient_on_error: bool = False,
-              windows_paths: bool = True, ps_script: bool = False):
+              windows_paths: bool = True, ps_script: bool = False,
+              ps_tool: bool = False):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -1701,17 +1975,18 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     drive-letter or UNC path is also read without the path rewrite (windows_paths
     False; see the end of this function). ps_script: raw is a script a Windows
     runner hands to pwsh/powershell; its own segments are marked so (scripts nested
-    inside it are not).
+    inside it are not). ps_tool: raw is the PowerShell tool's own payload; its segments
+    are marked so, and what their statements run is added (see _ps_statement_tails).
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
                   lenient_on_error=lenient_on_error, windows_paths=windows_paths,
-                  ps_script=ps_script)
+                  ps_script=ps_script, ps_tool=ps_tool)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
-    segments, lenient, lenient_runs = [], [], []
+    segments, lenient, lenient_runs, latch = [], [], [], _Latch()
     slashed = _slashify_windows_paths(raw) if windows_paths else raw
     text = _expand_ifs(slashed)
     if shell == "powershell" and ps_slashes:
@@ -1729,7 +2004,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                 raise                    # unbalanced quoting -> caller blocks
             words = None                 # judged piecewise only, below
         if words is not None:
-            segments.extend(_words_to_segments(words, split_words=False))
+            segments.extend(_words_to_segments(words, split_words=False, latch=latch))
         # The piecewise pass: for a multi-line logical line, and for any line with a
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
@@ -1739,6 +2014,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # joining `git push \` + newline + `--force`, which bash still joins.
             for line in dict.fromkeys(physical + _cont_chains(physical)):
                 for toks in _words_to_segments(_lenient_words(line)):
+                    toks.ps_tool = ps_tool
                     lenient.append(toks)
                     lenient.extend(_lenient_inline(toks))
                     lenient_runs.extend(_lenient_runner(toks))
@@ -1761,6 +2037,11 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         for seg in segments + lenient:
             if isinstance(seg, _Seg):
                 seg.ps_script = True
+    if ps_tool:                    # not _lenient_inline's segments: those are bash text
+        for seg in segments:
+            seg.ps_tool = True
+        segments += _ps_statement_tails(
+            segments + [s for s in lenient if isinstance(s, _Seg) and s.ps_tool])
     # Re-tokenize inline `sh -c` scripts. Depth-bounded so a nested
     # `sh -c 'sh -c "..."'` chain cannot recurse without limit.
     if _depth < 3:
@@ -1810,7 +2091,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     if slashed != raw and not (shell == "powershell" and ps_slashes):
         segments += _segments(raw, _depth, shell=shell, ps_slashes=ps_slashes,
                               piped=piped, lenient_on_error=True, windows_paths=False,
-                              ps_script=ps_script)
+                              ps_script=ps_script, ps_tool=ps_tool)
     return segments
 
 
@@ -2169,16 +2450,26 @@ def _powershell_segments(raw: str):
     segments = []
     texts = [raw, raw.translate(_PS_AS_SPACE)]
     if "(" in raw or "{" in raw:
-        texts += [_ps_ungroup(t) for t in texts]
+        texts += [_ps_ungroup(t, keep_variables=True) for t in texts]
+    if "{" in raw or "}" in raw:
+        texts += [_ps_block_statements(t) for t in texts[:2]]
+    if ".'" in raw or '."' in raw:
+        texts += [_PS_DOT_QUOTE_RE.sub(r"\1. ", t) for t in texts]
+    # A <# #> comment reads as two redirects, whose targets take the words beside it. An
+    # added reading, and lenient: a `<#` in a string can leave an odd quote behind.
+    if "<#" in raw:
+        for text in dict.fromkeys(texts):
+            segments += _segments(_PS_BLOCK_COMMENT_RE.sub(" ", text), shell="powershell",
+                                  lenient_on_error=True, ps_tool=True)
     for text in dict.fromkeys(texts):
-        segments += _segments(text, shell="powershell")
+        segments += _segments(text, shell="powershell", ps_tool=True)
         # PowerShell reads `\` as a path separator, but a script it hands to bash
         # (`bash -c "git push \` + newline + `--force"`) reads it as an escape or a
         # line continuation. Judge the POSIX reading too and add its segments; a line
         # of it that does not tokenize is judged piecewise (quote-blind) instead of
         # being dropped.
         segments += _segments(text, shell="powershell", ps_slashes=False,
-                              lenient_on_error=True)
+                              lenient_on_error=True, ps_tool=True)
         # ...and the text PowerShell itself produces from its escapes and typographic
         # quotes, which is what a native program such as bash receives: _ps_unescape()
         # follows PowerShell's quoting, and _ps_unescape_everywhere() decodes every
@@ -2196,7 +2487,7 @@ def _powershell_segments(raw: str):
             for reading in dict.fromkeys(readings):
                 if reading != text:
                     segments += _segments(reading, shell="powershell", ps_slashes=False,
-                                          lenient_on_error=True)
+                                          lenient_on_error=True, ps_tool=True)
     return segments
 
 
@@ -2237,7 +2528,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     for toks in segments:
         key = (tuple(toks), getattr(toks, "piped", False),
                tuple(getattr(toks, "redirs", ())), getattr(toks, "ps_script", False),
-               getattr(toks, "xargs_fed", False))
+               getattr(toks, "ps_tool", False), getattr(toks, "ps_call", False),
+               getattr(toks, "ps_foreach", False), getattr(toks, "xargs_fed", False))
         if key not in seen:
             seen.add(key)
             unique.append(toks)
