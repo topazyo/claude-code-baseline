@@ -315,13 +315,22 @@ hbad_row "definition check without its entry point fails closed" 's/^def bcl_def
 hbad_row "definition check with a syntax error fails closed" 's/^_D_WALK_BOUND = 20000$/_D_WALK_BOUND = (/' 2
 # Windows with a Python older than 3.8: the check refuses every write that names a file
 # (through the prime, and through the standalone run when the prime cannot encode the
-# payload), with a message saying what to install; a payload naming no file still passes.
+# payload: the same ud800 payload as the row "payload the prime cannot encode" above),
+# with a message saying what to install; a payload naming no file still passes.
 # The interpreter here is not that old, so the flag is set in the copy, as above.
 OLDNT='s/^_D_OLD_NT = .*/_D_OLD_NT = True/'
 hbad_row "old Windows Python: an ordinary write is refused" "$OLDNT" 2 "" "needs Python 3.8 or later on Windows"
 hbad_row "old Windows Python: the standalone check refuses too" "$OLDNT" 2 \
   "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":"x \\%s"}}' "$WT/src/x.py" ud800)" "needs Python 3.8 or later on Windows"
 hbad_row "old Windows Python: a payload naming no file passes" "$OLDNT" 0 '{"tool_name":"Write","tool_input":{"content":"x"}}'
+# A path whose text names a protected place is still a violation, refused in every
+# posture, as it is with any Python: failClosed:false must not let it through.
+hbad_row "old Windows Python: a protected path is still REFUSED" "$OLDNT" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+setcfg "c['failClosed']=False"
+hbad_row "old Windows Python, failClosed:false: a protected path is still REFUSED" "$OLDNT" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+setcfg "c['failClosed']=True"
 rm -rf "$HOMETMP/hbad"
 # Only scope-guard asks for the verdict: a plain prime (every other hook) computes none.
 ( source "$H/lib/common.sh"; bcl_prime "$(write_payload "$WT/.claude/agents/x.md")"
@@ -2348,7 +2357,8 @@ pyprobe 'PYVER=3.7 nt
 if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is Python 3.7." && printf '%s' "$pyout" | grep -qF "On Windows the hooks need Python 3.8 or later" \
    && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Windows Python 3.7 must refuse before writing: rc=$pyrc]"; fi
 pyprobe "$(printf 'PYVER=3.7 nt\r\n')"
-if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is Python 3.7." && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Windows Python 3.7 answering with CRLF must refuse: rc=$pyrc]"; fi
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is Python 3.7." && printf '%s' "$pyout" | grep -qF "On Windows the hooks need Python 3.8 or later" \
+   && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Windows Python 3.7 answering with CRLF must refuse: rc=$pyrc]"; fi
 pyprobe 'PYVER=3.7 posix
 '
 if [ "$pyrc" = 0 ] && [ -f "$PYT/.claude/settings.json" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a non-Windows Python 3.7 installs: rc=$pyrc]"; fi

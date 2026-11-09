@@ -296,10 +296,17 @@ verdict_fn = D["bcl_definition_verdict"]
 saved_flag = D["_D_OLD_NT"]
 D["_D_OLD_NT"] = True
 try:
-    check("old Windows Python: protected path -> oldpython",
-          verdict_fn(payload(".claude/agents/h.md"), ".", {})[0], "oldpython")
+    # A path whose text names a protected place is still a violation (yes), as on
+    # main; only an answer that needed the filesystem becomes oldpython.
+    check("old Windows Python: protected path text -> yes",
+          verdict_fn(payload(".claude/agents/h.md"), ".", {})[0], "yes")
     check("old Windows Python: ordinary path -> oldpython",
           verdict_fn(payload("src/app.py"), ".", {})[0], "oldpython")
+    check("old Windows Python: ordinary Windows path, nt reading -> oldpython",
+          verdict_fn(payload("C:/x/y.md"), ".", {}, nt=True)[0], "oldpython")
+    check("old Windows Python: protected and ordinary paths -> yes",
+          verdict_fn({"a": {"file_path": "src/app.py"}, "b": {"file_path": ".claude/agents/h.md"}},
+                     ".", {})[0], "yes")
     check("old Windows Python: no file_path -> nopath",
           verdict_fn({"tool_name": "Write", "tool_input": {"content": "x"}}, ".", {})[0], "nopath")
     check("old Windows Python: file_path not a string -> cannot",

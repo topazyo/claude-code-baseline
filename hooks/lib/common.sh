@@ -922,8 +922,6 @@ def bcl_definition_verdict(obj, project, env=None, nt=_D_NT, link_names=None):
     acc = [p for p in acc if p]
     if not acc:
         return "nopath", ""
-    if _D_OLD_NT:
-        return "oldpython", ""
     out, shown = "no", ""
     for p in acc:
         try:
@@ -935,6 +933,10 @@ def bcl_definition_verdict(obj, project, env=None, nt=_D_NT, link_names=None):
         if v != "no":
             out = "cannot"
         shown = shown or real
+    # A path the text already shows protected was refused above, as everywhere. Any
+    # other answer on Windows with Python < 3.8 is not one this check can give.
+    if _D_OLD_NT:
+        return "oldpython", ""
     return out, shown
 DEFPATHPY
 

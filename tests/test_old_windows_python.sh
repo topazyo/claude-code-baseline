@@ -48,14 +48,16 @@ else no "install with a Windows Python 3.7 must refuse before writing: rc=$rc"; 
 out="$(PATH="$NEW_PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$RW" 2>&1 </dev/null)"; rc=$?
 if [ "$rc" = 0 ] && [ -f "$R/.claude/settings.json" ]; then ok
 else no "install with a newer Python: rc=$rc"; printf '%s\n' "$out" | tail -n 5; fi
-PATH="$NEW_PATH" "$NEWER_PY" -I -S -c "import json,sys;p=sys.argv[1];c=json.load(open(p,encoding='utf-8'));c['modules']['scopeGuard']['enabled']=True;json.dump(c,open(p,'w',encoding='utf-8'))" "$RW/.claude/baseline.config.json"
 
 # 3. Its hooks, finding Python 3.7 first on PATH, refuse a write naming a file (an
-#    ordinary one: the newer Python lets it through) and pass one naming none.
+#    ordinary one: the newer Python lets it through), refuse one naming a protected
+#    path as a violation, and pass one naming no file. (The definition-path check runs
+#    whether or not the scopeGuard module is on.)
 H="$R/.claude/hooks/baseline"
 sg() { printf '%s' "$2" | PATH="$1" CLAUDE_PROJECT_DIR="$RW" HOME="$TMP/home" timeout -k 5 60 bash "$H/modules/scope-guard.sh" 2>&1; }
 WRITE='{"tool_name":"Write","tool_input":{"file_path":"src/x.py","content":"x"}}'
 NOFILE='{"tool_name":"Write","tool_input":{"content":"x"}}'
+PROTECTED='{"tool_name":"Write","tool_input":{"file_path":".claude/agents/x.md","content":"x"}}'
 out="$(sg "$NEW_PATH" "$WRITE")"; rc=$?
 [ "$rc" = 0 ] && ok || { no "control: an ordinary write under the newer Python passes: rc=$rc"; printf '%s\n' "$out" | tail -n 3; }
 out="$(sg "$OLD_PATH" "$WRITE")"; rc=$?
@@ -63,7 +65,10 @@ if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "needs Python 3.8 or later on 
 else no "an ordinary write under Windows Python 3.7 must be refused: rc=$rc"; printf '%s\n' "$out" | tail -n 3; fi
 out="$(sg "$OLD_PATH" "$NOFILE")"; rc=$?
 [ "$rc" = 0 ] && ok || { no "a payload naming no file passes under Windows Python 3.7: rc=$rc"; printf '%s\n' "$out" | tail -n 3; }
+out="$(sg "$OLD_PATH" "$PROTECTED")"; rc=$?
+if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "REFUSED"; then ok
+else no "a protected path under Windows Python 3.7 is REFUSED: rc=$rc"; printf '%s\n' "$out" | tail -n 3; fi
 
 echo ""
 echo "test_old_windows_python: $pass passed, $fail failed"
-[ "$fail" -eq 0 ] && [ "$pass" -eq 5 ] || exit 1
+[ "$fail" -eq 0 ] && [ "$pass" -eq 6 ] || exit 1
