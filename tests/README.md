@@ -167,11 +167,11 @@ parts occur in order on one line), and each row's message must still be in it.
 ## CI
 
 `../.github/workflows/baseline-ci.yml` runs `run.sh` on every push/PR, on Ubuntu and
-Windows with the newest Python 3.x, and again on both with Python 3.7, the oldest
-version `install.sh` accepts (`Python floor (3.7, ubuntu-22.04)`, the only Linux image
-with a 3.7 build, and `Python floor (3.7, windows-latest)`). `run.sh` also compiles
-every Python body the hooks and the status tool carry as a quoted `<<'…PY…'` heredoc,
-so the 3.7 legs prove those parse even where no case runs them.
+Windows with the newest Python 3.x, and again on each with its oldest supported
+Python: `Python floor (3.7, ubuntu-22.04)`, the only Linux image with a 3.7 build, and
+`Python floor (3.8, windows-latest)`. `run.sh` also compiles every Python body the
+hooks and the status tool carry as a quoted `<<'…PY…'` heredoc, so the floor legs
+prove those parse even where no case runs them.
 
 Each leg sets `BCL_CI_LEG`, and `ci_expect.sh` holds a row per leg and suite: the skip
 IDs that leg may print (`SKIP [id: reason]`) and the suite's pass-count floor. A skip
@@ -179,7 +179,7 @@ outside the row, a count below the floor, a leg without a row, or a GitHub Actio
 with no `BCL_CI_LEG` fails the suite; above the floor it prints `floor stale by N`.
 Locally (`BCL_CI_LEG` unset) skips are printed and nothing is enforced. To update a
 row, take the numbers from the CI log of the change that alters them, and add a skip
-ID only with the reason the case cannot run on that runner. On the 3.7 legs a skip
+ID only with the reason the case cannot run on that runner. On the floor legs a skip
 caused by the old Python is the defect those legs exist to find, never a row to add.
 The suites also unset `PYTHONOPTIMIZE` and the translation fixtures refuse `python -O`,
 because both strip `assert`.
