@@ -252,7 +252,11 @@ limit — not a bug. Read it before you rely on any of the above.
   still refuses (fails closed on) a Write or Edit whose payload text names a
   human-only path; without Python it cannot resolve links or short names. On Windows
   the interpreter must be Python 3.8 or later: with an older one, scope-guard fails
-  closed on every Write and Edit that names a file. The opt-in `autoFormat`
+  closed on every Write and Edit that names a file. It must also be a native Windows
+  Python: a Cygwin or MSYS one reads Windows paths as POSIX paths, so scope-guard still
+  refuses a human-only path by its name but cannot place one by its location (user
+  settings, a `C:/` path, a junction); it fails closed on every Write and Edit that
+  names a file, which under `failClosed: false` is only announced. The opt-in `autoFormat`
   and `runTests` deliberately run the repo's own formatter and tests without this
   isolation.
 - **The hook environment is trusted up to the shell that runs the hook.** Every
@@ -380,12 +384,12 @@ What it does (idempotent — safe to re-run):
    existing file cannot be parsed, the merge **aborts** — it never treats an
    unreadable settings file as an empty one.
 
-Requires `bash` and Python 3.7 or later (3.8 or later on Windows) as `python3` (or
-`python`). The installer
+Requires `bash` and Python 3.7 or later (on Windows, a native Windows Python 3.8 or
+later, not a Cygwin or MSYS one) as `python3` (or `python`). The installer
 uses the interpreter the hooks will use (`python3` first, then `python`, skipping
 the Windows Store app execution alias unless it is all there is), launches it once,
 and stops before writing anything unless it runs, prints nothing else on stdout,
-and is 3.7+ (3.8+ for a Windows Python). The check sees the
+and is 3.7+ (3.8+ for a Windows Python, and never a Cygwin or MSYS one). The check sees the
 installer's `PATH`; if Claude Code runs with a different one, whatever the hooks
 resolve there must pass too. Designed to run under WSL, Git Bash, and macOS/Linux shells.
 CI runs the full test suite on Linux and Windows, each with its oldest supported Python

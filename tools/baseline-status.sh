@@ -70,6 +70,19 @@ PY="$(bcl_python)"
 # present those defaults as the repo's settings.
 "$PY" -I -S -X utf8 -c 'import json, os, re, shlex, sys' >/dev/null 2>&1 </dev/null \
   || { echo "python ($PY) is on PATH but cannot run the baseline's helpers; cannot read any config" >&2; exit 1; }
+# Only an interpreter the hooks accept (install.sh refuses the rest): on a Windows Python
+# older than 3.8 os.path.realpath does not resolve a junction, so the definition scan
+# below could not tell a junction loop from a tree; a Cygwin or MSYS Python reads the
+# repo's Windows paths as POSIX paths.
+PY_ANS="$(bcl_python_probe "$PY")"
+if ! bcl_python_floor "$PY_ANS"; then
+  case "$PY_ANS" in
+    badout) echo "python ($PY) prints at startup; the baseline hooks read its output, so they refuse it" >&2 ;;
+    norun)  echo "python ($PY) did not run" >&2 ;;
+    *)      echo "python ($PY) is not one the baseline hooks accept: they need Python 3.7+, 3.8+ for a Windows Python, and never a Cygwin or MSYS one" >&2 ;;
+  esac
+  exit 1
+fi
 [[ ${#REPOS[@]} -eq 0 ]] && { echo "usage: baseline-status.sh [--drift] [--strict] [--json <file>] <repo>..." >&2; exit 2; }
 
 # Read a top-level scalar key from the canonical SOURCE config (this tree).

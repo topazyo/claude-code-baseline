@@ -27,7 +27,8 @@
 #                           so a settings.json the real run would reject fails the
 #                           dry run too (exit 1).
 #
-# Requires: bash, Python 3.7+ (3.8+ on Windows) as python3 (or python), git (recommended).
+# Requires: bash, Python 3.7+ (on Windows a native Windows Python 3.8+, not a Cygwin or
+#           MSYS one) as python3 (or python), git (recommended).
 
 set -euo pipefail
 
@@ -65,7 +66,9 @@ done
 # anything is written, unless it is Python 3.7+ (lib/merge_settings.py and the
 # command-guard matcher need `from __future__ import annotations`), or 3.8+ when the
 # interpreter is a Windows one (os.name "nt"): scope-guard's definition-path check
-# needs 3.8 there, and on an older one it refuses every Write and Edit instead.
+# needs 3.8 there, and on an older one it refuses every Write and Edit instead. A
+# Cygwin or MSYS Python is refused outright: Claude Code on Windows hands the hooks
+# Windows paths, which it reads as POSIX paths (bcl_python_probe, bcl_python_floor).
 # Every launch below passes `-I -S -X utf8`, as the hooks do (see bcl_python): the
 # installer often runs from inside the repo it installs into, and nothing there may be
 # imported by it.
@@ -77,36 +80,35 @@ fi
 # The version comes back behind a marker, alone on stdout. A Python that prints
 # anything else at startup (a sitecustomize, say) is refused too: command-guard treats
 # any output from its matcher as a block reason, so the hooks would refuse every shell
-# command.
-PY_RC=1; PY_OUT=""; PY_VER=""; PY_OSN=""
+# command. bcl_python_probe answers "<major>.<minor> <nt|posix|posixwin>", "norun" or
+# "badout"; bcl_python_floor judges it. Both run in a subshell, as bcl_python above.
+PY_ANS="norun"; PY_VER=""; PY_OSN=""
 if [[ -n "$PY" ]]; then
-  PY_RC=0
-  PY_OUT="$("$PY" -I -S -X utf8 -c 'import os, sys; print("PYVER=%d.%d %s" % (sys.version_info[0], sys.version_info[1], os.name))' 2>/dev/null </dev/null)" || PY_RC=$?
-  PY_OUT="${PY_OUT//$'\r'/}"
+  PY_ANS="$(. "$SRC/hooks/lib/common.sh"; bcl_python_probe "$PY")" || PY_ANS="norun"
 fi
-PY_RE='^PYVER=([0-9]+)[.]([0-9]+) ([a-z]+)$'
-if [[ $PY_RC -eq 0 && "$PY_OUT" =~ $PY_RE ]]; then
-  PY_VER="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-  PY_OSN="${BASH_REMATCH[3]}"
-fi
-PY_MIN=7
-if [[ "$PY_OSN" == nt ]]; then PY_MIN=8; fi
-PY_OK=0
-if [[ -n "$PY_VER" ]] && (( ${PY_VER%%.*} > 3 || (${PY_VER%%.*} == 3 && ${PY_VER#*.} >= PY_MIN) )); then
-  PY_OK=1
-fi
-if [[ $PY_OK -ne 1 ]]; then
+case "$PY_ANS" in
+  *.*' '*) PY_VER="${PY_ANS%% *}"; PY_OSN="${PY_ANS#* }" ;;
+esac
+if ! (. "$SRC/hooks/lib/common.sh"; bcl_python_floor "$PY_ANS"); then
+  PY_PATH=""
+  [[ -n "$PY" ]] && PY_PATH="$(command -v "$PY" 2>/dev/null || true)"
+  if [[ "$PY_OSN" == posixwin ]]; then
+    echo "ERROR: '$PY' ($PY_PATH) is a Cygwin or MSYS Python. Claude Code on Windows hands the" >&2
+    echo "       hooks Windows paths, which it would read as POSIX paths. Install Python 3.8 or" >&2
+    echo "       later for Windows and put it first on PATH (python3 first, then python)." >&2
+    echo "       Nothing was written." >&2
+    exit 1
+  fi
   echo "ERROR: no working Python 3.7+ (3.8+ on Windows) found. The hooks and the settings merge need one." >&2
   if [[ -z "$PY" ]]; then
     echo "       Neither python3 nor python is on PATH." >&2
   else
-    PY_PATH="$(command -v "$PY" 2>/dev/null || true)"
     if [[ -n "$PY_VER" ]]; then
       echo "       '$PY' ($PY_PATH) is Python $PY_VER." >&2
       if [[ "$PY_OSN" == nt ]]; then
         echo "       On Windows the hooks need Python 3.8 or later." >&2
       fi
-    elif [[ $PY_RC -eq 0 ]]; then
+    elif [[ "$PY_ANS" == badout ]]; then
       echo "       '$PY' ($PY_PATH) ran but printed unexpected output on stdout. The" >&2
       echo "       hooks read its output, so it must not print anything at startup." >&2
     else

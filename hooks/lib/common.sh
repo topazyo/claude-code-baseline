@@ -165,6 +165,41 @@ bcl_python() {
   printf '%s' "$_BCL_PY"
 }
 
+# bcl_python_probe <python> -> stdout: "<major>.<minor> <kind>"; "norun" when it does not
+# run; "badout" when it prints anything else (a Python that writes at startup would
+# break the matcher, which reads its output). <kind> is "nt" for a Windows Python,
+# "posixwin" for a Cygwin or MSYS one (POSIX paths on a Windows host: Claude Code on
+# Windows hands the hooks Windows paths, which it would misread), else "posix". Shared
+# by install.sh and tools/baseline-status.sh, so both judge an interpreter alike.
+bcl_python_probe() {
+  local out re='^PYVER=([0-9]+)[.]([0-9]+) ([a-z]+)$'
+  out="$("$1" -I -S -X utf8 -c 'import os, sys
+k = "posixwin" if sys.platform.startswith(("cygwin", "msys")) else os.name
+print("PYVER=%d.%d %s" % (sys.version_info[0], sys.version_info[1], k))' 2>/dev/null </dev/null)" \
+    || { printf 'norun'; return 0; }
+  out="${out//$'\r'/}"
+  if [[ "$out" =~ $re ]]; then
+    printf '%s.%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  else
+    printf 'badout'
+  fi
+}
+
+# bcl_python_floor <probe answer> -> 0 when the hooks can use that interpreter: Python
+# 3.7+, 3.8+ for a Windows one, and never a Cygwin or MSYS one. The host is judged by
+# the interpreter's own answer; a wrapper reaching some other POSIX Python from Windows
+# would pass, which is why only python3/python on PATH are considered at all.
+bcl_python_floor() {
+  local re='^([0-9]{1,4})[.]([0-9]{1,4}) ([a-z]+)$' major minor kind min=7
+  [[ "$1" =~ $re ]] || return 1
+  major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; kind="${BASH_REMATCH[3]}"
+  case "$kind" in
+    posixwin) return 1 ;;
+    nt) min=8 ;;
+  esac
+  (( 10#$major > 3 || (10#$major == 3 && 10#$minor >= min) ))
+}
+
 # --- the hooks' own git -------------------------------------------------------
 # Every git the hooks run goes through this. A repository's config can make git start a
 # program, and the hooks run outside Claude Code's sandbox. Switched off for these calls
@@ -550,7 +585,8 @@ IFS='' read -r -d '' _BCL_DEFPATH_SRC <<'DEFPATHPY' || true
 # securityDefaults rules file. Path-only: no file content is read.
 # Verdicts: "yes" protected, "no" not, "nopath" the payload names no file_path,
 # "unparsed" the payload is not a JSON object, "cannot" could not judge (fail closed),
-# "oldpython" this check cannot run on this interpreter (Windows needs Python 3.8+).
+# "oldpython" this check cannot run on this interpreter (Windows needs Python 3.8+),
+# "posixpython" nor on a Cygwin or MSYS one (it needs a native Windows Python there).
 import os as _d_os
 import re as _d_re
 import sys as _d_sys
@@ -565,6 +601,17 @@ def _d_old_nt(name, version):
 
 # The real host, never the `nt` parameter below (which only picks how a path is read).
 _D_OLD_NT = _d_old_nt(_d_os.name, _d_sys.version_info)
+
+
+def _d_posix_on_windows(platform):
+    """True for a Cygwin or MSYS Python: it reads paths the POSIX way on a Windows host."""
+    return platform.startswith(("cygwin", "msys"))
+
+
+# Claude Code on Windows hands the hooks Windows paths. Such a Python still matches a
+# protected name (the raw check folds case and separators), but not a protected
+# location: user settings, CLAUDE_CONFIG_DIR, a C:/ path, a junction.
+_D_POSIX_WIN = _d_posix_on_windows(_d_sys.platform)
 # Under <project>/.claude and the user's config home.
 _D_DIRS = ("agents", "skills", "commands", "hooks")
 # main's rule: a ../ below .claude/ may step back into a protected directory.
@@ -932,7 +979,12 @@ def bcl_definition_verdict(obj, project, env=None, nt=_D_NT, link_names=None):
             out = "cannot"
         shown = shown or real
     # The paths were judged as with any Python, and a protected one was refused above.
-    # Any other answer on Windows with Python < 3.8 is not one this check can give.
+    # Any other answer from a Cygwin or MSYS Python, or on Windows with Python < 3.8, is
+    # not one this check can give. Nor is it from any non-Windows interpreter handed a
+    # drive-letter project (a wrapper reaching some other POSIX Python from Windows,
+    # whatever it reports): no POSIX host names a project that way.
+    if _D_POSIX_WIN or (not _D_NT and isinstance(project, str) and _D_DRIVE_RE.match(project)):
+        return "posixpython", ""
     if _D_OLD_NT:
         return "oldpython", ""
     return out, shown

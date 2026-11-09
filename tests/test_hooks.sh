@@ -336,6 +336,23 @@ hbad_row "old Windows Python, failClosed:false: CLAUDE_CONFIG_DIR settings is st
   "$(def_payload Write "$UH/cfg/settings.json" content "x")" "REFUSED"
 unset CLAUDE_CONFIG_DIR
 resetcfg
+# A Cygwin or MSYS Python on a Windows host: the check refuses what it cannot judge, as
+# above, with scopeGuard off as here (the pristine config). Ordering only: this
+# interpreter still reads paths its own way; tests/test_msys_python.sh runs a real one.
+POSIXWIN='s/^_D_POSIX_WIN = .*/_D_POSIX_WIN = True/'
+hbad_row "Cygwin or MSYS Python: an ordinary write is refused" "$POSIXWIN" 2 "" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python: the standalone check refuses too" "$POSIXWIN" 2 \
+  "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":"x \\%s"}}' "$WT/src/x.py" ud800)" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python: a payload naming no file passes" "$POSIXWIN" 0 '{"tool_name":"Write","tool_input":{"content":"x"}}'
+hbad_row "Cygwin or MSYS Python: a protected path is still REFUSED" "$POSIXWIN" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+setcfg "c['failClosed']=False"
+hbad_row "Cygwin or MSYS Python, failClosed:false: a protected path is still REFUSED" "$POSIXWIN" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+# Unlike an old Windows Python, this one cannot read a Windows path at all, so what it
+# cannot judge is only announced under failClosed:false.
+hbad_row "Cygwin or MSYS Python, failClosed:false: an ordinary write is announced" "$POSIXWIN" 0 "" "not a Cygwin, MSYS or other POSIX one"
+resetcfg
 rm -rf "$HOMETMP/hbad"
 # Only scope-guard asks for the verdict: a plain prime (every other hook) computes none.
 ( source "$H/lib/common.sh"; bcl_prime "$(write_payload "$WT/.claude/agents/x.md")"
@@ -2539,6 +2556,16 @@ if [ "$pyrc" = 0 ] && [ -f "$PYT/.claude/settings.json" ]; then pass=$((pass + 1
 pyprobe 'PYVER=3.9
 '
 if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "printed unexpected output" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a probe answer without the os name must refuse: rc=$pyrc]"; fi
+# bcl_python_floor judges only a well-formed probe answer: anything else is refused, and
+# never evaluated (bash arithmetic would run a command substitution in a subscript).
+( . "$H/lib/common.sh"; ! bcl_python_floor 'x[$(touch '"$TMP"'/floor-ran)].1 posix' ) && [ ! -e "$TMP/floor-ran" ] \
+  && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [a malformed probe answer is refused unevaluated]"; }
+# (l) A Cygwin or MSYS Python (POSIX paths on a Windows host), however new: refused,
+# with its own reason rather than "no working Python".
+pyprobe 'PYVER=3.12 posixwin
+'
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is a Cygwin or MSYS Python" \
+   && ! printf '%s' "$pyout" | grep -qF "no working Python" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Cygwin or MSYS Python must refuse before writing: rc=$pyrc]"; fi
 
 echo "== install.sh version check (R4) =="
 # Stub a fake 'claude' on PATH (prepended, so it wins over any real CLI) and assert
