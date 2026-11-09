@@ -291,8 +291,10 @@ run "payload the prime cannot encode, ordinary file -> 0" modules/scope-guard.sh
 # A broken definition check fails closed, for every target: a renamed entry point (the
 # prime survives, its call fails) and a syntax error (the prime and the standalone run
 # both fail). Run from a copy of the hook tree, outside the repo.
-# hbad_row <desc> <sed expression> <want>: a fresh copy, the edit proven applied, one run.
+# hbad_row <desc> <sed expression> <want> [payload] [text]: a fresh copy, the edit proven
+# applied, one run (default payload: an ordinary Write); with <text>, the output has it.
 hbad_row() {
+  local payload="${4:-}" hout
   rm -rf "$HOMETMP/hbad"; cp -R "$H" "$HOMETMP/hbad"
   if [ -n "$2" ]; then
     sed -i "$2" "$HOMETMP/hbad/lib/common.sh"
@@ -300,12 +302,40 @@ hbad_row() {
       fail=$((fail + 1)); echo "  FAIL [$1: the edit did not apply]"; return
     fi
   fi
-  def_payload Write "$WT/src/x.py" content "x" | bash "$HOMETMP/hbad/modules/scope-guard.sh" >/dev/null 2>&1; rc=$?
-  [ "$rc" = "$3" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [$1] want=$3 rc=$rc"; }
+  [ -n "$payload" ] || payload="$(def_payload Write "$WT/src/x.py" content "x")"
+  hout="$(printf '%s' "$payload" | bash "$HOMETMP/hbad/modules/scope-guard.sh" 2>&1)"; rc=$?
+  if [ "$rc" = "$3" ] && { [ -z "${5:-}" ] || printf '%s' "$hout" | grep -qF -- "$5"; }; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); echo "  FAIL [$1] want=$3 rc=$rc${5:+ text '$5'}"
+  fi
 }
 hbad_row "the unmodified copy allows an ordinary write" "" 0
 hbad_row "definition check without its entry point fails closed" 's/^def bcl_definition_verdict(/def bcl_definition_verdict_gone(/' 2
 hbad_row "definition check with a syntax error fails closed" 's/^_D_WALK_BOUND = 20000$/_D_WALK_BOUND = (/' 2
+# Windows with a Python older than 3.8: the check refuses every write that names a file
+# (through the prime, and through the standalone run when the prime cannot encode the
+# payload: the same ud800 payload as the row "payload the prime cannot encode" above),
+# with a message saying what to install; a payload naming no file still passes.
+# The interpreter here is not that old, so the flag is set in the copy, as above.
+OLDNT='s/^_D_OLD_NT = .*/_D_OLD_NT = True/'
+hbad_row "old Windows Python: an ordinary write is refused" "$OLDNT" 2 "" "needs Python 3.8 or later on Windows"
+hbad_row "old Windows Python: the standalone check refuses too" "$OLDNT" 2 \
+  "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":"x \\%s"}}' "$WT/src/x.py" ud800)" "needs Python 3.8 or later on Windows"
+hbad_row "old Windows Python: a payload naming no file passes" "$OLDNT" 0 '{"tool_name":"Write","tool_input":{"content":"x"}}'
+# A path whose text names a protected place is still a violation, refused in every
+# posture, as it is with any Python: failClosed:false must not let it through.
+hbad_row "old Windows Python: a protected path is still REFUSED" "$OLDNT" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+setcfg "c['failClosed']=False"
+hbad_row "old Windows Python, failClosed:false: a protected path is still REFUSED" "$OLDNT" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+# ...and one protected by where it is rather than by its name (user settings).
+export CLAUDE_CONFIG_DIR="$UH/cfg"
+hbad_row "old Windows Python, failClosed:false: CLAUDE_CONFIG_DIR settings is still REFUSED" "$OLDNT" 2 \
+  "$(def_payload Write "$UH/cfg/settings.json" content "x")" "REFUSED"
+unset CLAUDE_CONFIG_DIR
+resetcfg
 rm -rf "$HOMETMP/hbad"
 # Only scope-guard asks for the verdict: a plain prime (every other hook) computes none.
 ( source "$H/lib/common.sh"; bcl_prime "$(write_payload "$WT/.claude/agents/x.md")"
@@ -2271,13 +2301,17 @@ REALPY="$(winpath "$("$PY" -c 'import sys; sys.stdout.write(sys.executable)')")"
 [ -n "$REALPY" ] || { fail=$((fail + 1)); echo "  FAIL [cannot resolve a real interpreter for the B2 shims]"; }
 PYSTUBLOG="$TMP/pystub.log"
 PYT="$TMP/pytarget"
-mkpy() {  # mkpy <dir> <name> stub|real|broken|old|noisy
+mkpy() {  # mkpy <dir> <name> stub|real|broken|old|noisy|probe [answer]
   mkdir -p "$1"
   case "$3" in
+    # probe: answers the installer's version probe with <answer> (read from a file, so
+    # it may hold any bytes), and is the real interpreter for everything else.
+    probe)  printf '%s' "$4" > "$1/$2.answer"
+            printf '#!/usr/bin/env bash\ncase "$*" in *PYVER=*) cat "%s"; exit 0 ;; esac\nexec "%s" "$@"\n' "$1/$2.answer" "$REALPY" > "$1/$2" ;;
     stub)   printf '#!/usr/bin/env bash\necho "%s" >> "%s"\necho "Python was not found; run without arguments to install from the Microsoft Store." >&2\nexit 49\n' "$2" "$PYSTUBLOG" > "$1/$2" ;;
     real)   printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$REALPY" > "$1/$2" ;;
     broken) printf '#!/usr/bin/env bash\nexit 1\n' > "$1/$2" ;;
-    old)    printf '#!/usr/bin/env bash\necho PYVER=3.6\n' > "$1/$2" ;;  # answers the version probe as 3.6
+    old)    printf '#!/usr/bin/env bash\necho "PYVER=3.6 posix"\n' > "$1/$2" ;;  # answers the version probe as 3.6
     noisy)  printf '#!/usr/bin/env bash\necho "startup banner"\nexec "%s" "$@"\n' "$REALPY" > "$1/$2" ;;
   esac
   chmod +x "$1/$2"
@@ -2317,6 +2351,28 @@ if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is Python 3.6" && [ ! -e 
 mkpy "$TMP/py-f/bin" python3 noisy; mkpy "$TMP/py-f/bin" python real
 pyinstall "$TMP/py-f/bin"
 if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "printed unexpected output" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a python that prints at startup must refuse, named as such: rc=$pyrc]"; fi
+# (g)-(k) The floor depends on the interpreter's own os.name: 3.8 for a Windows one,
+# 3.7 elsewhere. The probe stub answers as each kind of interpreter on any host.
+pyprobe() {  # pyprobe <answer>: install with a python3 that answers the probe with it
+  rm -rf "$TMP/py-p"; mkpy "$TMP/py-p/bin" python3 probe "$1"; mkpy "$TMP/py-p/bin" python real
+  pyinstall "$TMP/py-p/bin"
+}
+pyprobe 'PYVER=3.7 nt
+'
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is Python 3.7." && printf '%s' "$pyout" | grep -qF "On Windows the hooks need Python 3.8 or later" \
+   && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Windows Python 3.7 must refuse before writing: rc=$pyrc]"; fi
+pyprobe "$(printf 'PYVER=3.7 nt\r\n')"
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is Python 3.7." && printf '%s' "$pyout" | grep -qF "On Windows the hooks need Python 3.8 or later" \
+   && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Windows Python 3.7 answering with CRLF must refuse: rc=$pyrc]"; fi
+pyprobe 'PYVER=3.7 posix
+'
+if [ "$pyrc" = 0 ] && [ -f "$PYT/.claude/settings.json" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a non-Windows Python 3.7 installs: rc=$pyrc]"; fi
+pyprobe 'PYVER=3.8 nt
+'
+if [ "$pyrc" = 0 ] && [ -f "$PYT/.claude/settings.json" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Windows Python 3.8 installs: rc=$pyrc]"; fi
+pyprobe 'PYVER=3.9
+'
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "printed unexpected output" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a probe answer without the os name must refuse: rc=$pyrc]"; fi
 
 echo "== install.sh version check (R4) =="
 # Stub a fake 'claude' on PATH (prepended, so it wins over any real CLI) and assert

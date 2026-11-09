@@ -549,11 +549,22 @@ IFS='' read -r -d '' _BCL_DEFPATH_SRC <<'DEFPATHPY' || true
 # scripts, plugins, user settings, .claude.json, .mcp.json and the default
 # securityDefaults rules file. Path-only: no file content is read.
 # Verdicts: "yes" protected, "no" not, "nopath" the payload names no file_path,
-# "unparsed" the payload is not a JSON object, "cannot" could not judge (fail closed).
+# "unparsed" the payload is not a JSON object, "cannot" could not judge (fail closed),
+# "oldpython" this check cannot run on this interpreter (Windows needs Python 3.8+).
 import os as _d_os
 import re as _d_re
+import sys as _d_sys
 
 _D_NT = _d_os.name == "nt"
+
+
+def _d_old_nt(name, version):
+    """True where this check cannot judge paths: Windows with Python older than 3.8."""
+    return name == "nt" and tuple(version[:2]) < (3, 8)
+
+
+# The real host, never the `nt` parameter below (which only picks how a path is read).
+_D_OLD_NT = _d_old_nt(_d_os.name, _d_sys.version_info)
 # Under <project>/.claude and the user's config home.
 _D_DIRS = ("agents", "skills", "commands", "hooks")
 # main's rule: a ../ below .claude/ may step back into a protected directory.
@@ -920,6 +931,10 @@ def bcl_definition_verdict(obj, project, env=None, nt=_D_NT, link_names=None):
         if v != "no":
             out = "cannot"
         shown = shown or real
+    # The paths were judged as with any Python, and a protected one was refused above.
+    # Any other answer on Windows with Python < 3.8 is not one this check can give.
+    if _D_OLD_NT:
+        return "oldpython", ""
     return out, shown
 DEFPATHPY
 

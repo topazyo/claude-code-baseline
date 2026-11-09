@@ -278,6 +278,56 @@ with tempfile.TemporaryDirectory(prefix="DefPathUC") as tmp:
             else:
                 os.environ[k] = v
 
+# --- Windows needs Python 3.8+: the check refuses on an older Windows interpreter ---
+old_nt = D["_d_old_nt"]
+for name, ver, want in [
+        ("nt", (3, 7, 9, "final", 0), True),
+        ("nt", (3, 7), True),
+        ("nt", (3, 8, 0, "final", 0), False),
+        ("nt", (3, 8, 10, "final", 0), False),
+        ("nt", (3, 15, 2, "final", 0), False),
+        ("posix", (3, 7, 17, "final", 0), False),
+        ("posix", (3, 6), False)]:
+    check(f"_d_old_nt({name!r}, {ver[:3]})", old_nt(name, ver), want)
+# Computed here, not by the code under test: is this host an old Windows Python?
+check("the flag reflects this interpreter", D["_D_OLD_NT"],
+      os.name == "nt" and sys.version_info < (3, 8))
+verdict_fn = D["bcl_definition_verdict"]
+saved_flag = D["_D_OLD_NT"]
+D["_D_OLD_NT"] = True
+try:
+    # A path whose text names a protected place is still a violation (yes), as on
+    # main; only an answer that needed the filesystem becomes oldpython.
+    check("old Windows Python: protected path text -> yes",
+          verdict_fn(payload(".claude/agents/h.md"), ".", {})[0], "yes")
+    check("old Windows Python: ordinary path -> oldpython",
+          verdict_fn(payload("src/app.py"), ".", {})[0], "oldpython")
+    check("old Windows Python: ordinary Windows path, nt reading -> oldpython",
+          verdict_fn(payload("C:/x/y.md"), ".", {}, nt=True)[0], "oldpython")
+    check("old Windows Python: protected and ordinary paths -> yes",
+          verdict_fn({"a": {"file_path": "src/app.py"}, "b": {"file_path": ".claude/agents/h.md"}},
+                     ".", {})[0], "yes")
+    check("old Windows Python: no file_path -> nopath",
+          verdict_fn({"tool_name": "Write", "tool_input": {"content": "x"}}, ".", {})[0], "nopath")
+    check("old Windows Python: file_path not a string -> cannot",
+          verdict_fn(payload(7), ".", {})[0], "cannot")
+    check("old Windows Python: not an object -> unparsed", verdict_fn(None, ".", {})[0], "unparsed")
+    # Protected by where it is rather than by its name: still judged and refused.
+    with tempfile.TemporaryDirectory() as cfg_tmp:
+        cfg_env = {"CLAUDE_CONFIG_DIR": cfg_tmp}
+        cfg_settings = os.path.join(cfg_tmp, "settings.json")
+        check("old Windows Python: CLAUDE_CONFIG_DIR settings.json -> yes",
+              verdict_fn(payload(cfg_settings), ".", cfg_env)[0], "yes")
+        check("old Windows Python: CLAUDE_CONFIG_DIR agent -> yes",
+              verdict_fn(payload(os.path.join(cfg_tmp, "agents", "x.md")), ".", cfg_env)[0], "yes")
+        check("old Windows Python: ordinary and CLAUDE_CONFIG_DIR settings -> yes",
+              verdict_fn({"a": {"file_path": "src/app.py"}, "b": {"file_path": cfg_settings}},
+                         ".", cfg_env)[0], "yes")
+        check("old Windows Python: CLAUDE_CONFIG_DIR, other file -> oldpython",
+              verdict_fn(payload(os.path.join(cfg_tmp, "notes.md")), ".", cfg_env)[0], "oldpython")
+finally:
+    D["_D_OLD_NT"] = saved_flag
+
 for f in failures:
     print("  FAIL " + f)
 print(f"test_definition_path: {count - len(failures)} passed, {len(failures)} failed")
