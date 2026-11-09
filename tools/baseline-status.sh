@@ -46,8 +46,13 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --drift)   shift ;;                      # default behaviour; accepted for clarity
     --strict)  STRICT=1; shift ;;
-    --json)    JSON_OUT="${2:-}"; shift 2 ;;
-    --json=*)  JSON_OUT="${1#*=}"; shift ;;
+    # A missing or empty file name is a usage error: `shift 2` with one argument left
+    # shifts nothing, and the loop would never end.
+    --json)    [[ $# -ge 2 && -n "$2" ]] || { echo "--json needs a file name" >&2; exit 2; }
+               JSON_OUT="$2"; shift 2 ;;
+    --json=*)  JSON_OUT="${1#*=}"
+               [[ -n "$JSON_OUT" ]] || { echo "--json needs a file name" >&2; exit 2; }
+               shift ;;
     -h|--help) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --)        shift; while [[ $# -gt 0 ]]; do REPOS+=("$1"); shift; done ;;
     -*)        echo "unknown option: $1" >&2; exit 2 ;;
@@ -141,7 +146,7 @@ for fname in ("settings.json", "settings.local.json"):
             deny_missing = list(expected_deny)
         continue
     env += [fname + ":" + name(k) for k in ms.risky_env_keys(data)]
-    if data.get("disableAllHooks", False) not in (False, 0, None, "", "false", "False", "0", "no", "off"):
+    if ms.disables_all_hooks(data):
         launch.add(fname + " disableAllHooks")   # same reading as config-guard (1)
     if fname == "settings.json":
         # The baseline deny-list (secrets + self-protection) lives here: config-guard (3).

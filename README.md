@@ -365,7 +365,13 @@ What it does (idempotent — safe to re-run):
    template's entries are added back, so a baseline script you wired there by hand,
    under any matcher, is gone after the next install. A baseline script wired under
    any other event is left as it is and reported. It unions the deny-list; your
-   `permissions.allow`, `model`, and everything else are left untouched. If the
+   `permissions.allow`, `model`, and everything else keep their values. Two
+   changes of form: `//` comments are dropped (the installer says so, and the
+   backup keeps them), and text is written as UTF-8 except the Unicode
+   default-ignorable characters (zero-width, bidi controls, variation selectors,
+   tags), non-ASCII spaces, controls, surrogates and private-use characters, which
+   are written as `\uXXXX` escapes. A `disableAllHooks` it finds is kept and
+   reported, since it turns every baseline hook off. If the
    existing file cannot be parsed, the merge **aborts** — it never treats an
    unreadable settings file as an empty one.
 
