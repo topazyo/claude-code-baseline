@@ -2046,6 +2046,63 @@ else
   echo "  note: linked-.claude case not run (no symlink or junction could be made here)"
 fi
 
+echo "== installer: --target value, worktree root, settings form, disableAllHooks (N2-N4) =="
+# A missing or empty --target is a usage error, and nothing is installed into the cwd.
+IA="$TMP/inst-args"; mkdir -p "$IA"
+for form in "--target" "--target=" "--target "; do
+  if [ "$form" = "--target " ]; then
+    IOUT="$(cd "$IA" && timeout -k 5 60 bash "$SRC/install.sh" --target "" 2>&1 </dev/null)"; IRC=$?
+  else
+    IOUT="$(cd "$IA" && timeout -k 5 60 bash "$SRC/install.sh" "$form" 2>&1 </dev/null)"; IRC=$?
+  fi
+  ok_if "'$form' with no directory: usage error (rc=$IRC: $IOUT)" '[ "$IRC" = 2 ] && [ "$IOUT" = "--target needs a directory" ]'
+done
+ok_if "a usage error installs nothing into the cwd" '[ -z "$(ls -A "$IA")" ]'
+# A linked worktree's .git is a file: it is a repository root, no NOTE (N3). Control: a
+# directory with no .git still gets the NOTE.
+IWM="$TMP/inst-wt-main"; IWT="$TMP/inst-wt"; mkdir -p "$IWM"
+( cd "$IWM" && git init -q && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init \
+  && git worktree add -q --detach "$(winpath "$IWT")" ) >/dev/null 2>&1
+ok_if "a linked worktree was made (its .git is a file)" '[ -f "$IWT/.git" ]'
+inst "$IWT"
+ok_if "a linked worktree is a repository root: no NOTE, install succeeds (rc=$IRC)" '[ "$IRC" = 0 ] && [ -f "$IWT/.claude/settings.json" ] && ! printf "%s" "$IOUT" | grep -qF "is not a git repository root"'
+IPL="$TMP/inst-plain"; mkdir -p "$IPL"
+IOUT="$(GIT_CEILING_DIRECTORIES="$(winpath "$TMP")" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$IPL")" 2>&1 </dev/null)"; IRC=$?
+ok_if "a directory with no .git gets the NOTE (rc=$IRC)" '[ "$IRC" = 0 ] && printf "%s" "$IOUT" | grep -qF "is not a git repository root"'
+# N4 + N2 end to end: UTF-8 text kept as UTF-8, a bidi override escaped, a // comment
+# dropped (reported, kept in the backup), disableAllHooks kept, warned and in the banner.
+utf8_ok() { "$PY" - "$(winpath "$1")" <<'PY'
+import sys
+b = open(sys.argv[1], "rb").read()
+sys.exit(0 if "\u00e9".encode() in b and "\u202e".encode() not in b and b"\\u202e" in b
+         and b"team model" not in b else 1)
+PY
+}
+IU="$TMP/inst-utf8"; mkdir -p "$IU/.claude"; ( cd "$IU" && git init -q )
+printf '{\n  // team model\n  "model": "\303\251 \342\200\256 x",\n  "disableAllHooks": true\n}\n' > "$IU/.claude/settings.json"
+cp "$IU/.claude/settings.json" "$TMP/inst-utf8.orig"
+inst "$IU" --dry-run
+ok_if "a dry run over the original names disableAllHooks in the banner, writes nothing (rc=$IRC)" '[ "$IRC" = 0 ] && printf "%s" "$IOUT" | grep -qF "NOT IN EFFECT: settings.json sets disableAllHooks" && cmp -s "$IU/.claude/settings.json" "$TMP/inst-utf8.orig" && [ "$(nbak "$IU")" = 0 ]'
+inst "$IU"
+ok_if "merge writes UTF-8, escapes the bidi override, drops the comment (rc=$IRC)" '[ "$IRC" = 0 ] && utf8_ok "$IU/.claude/settings.json"'
+ok_if "the comment is reported and kept in the backup" 'printf "%s" "$IOUT" | grep -qF "NOTE: settings.json has // comments." && [ "$(nbak "$IU")" = 1 ] && grep -qF "team model" "$IU"/.claude/settings.json.bak.*'
+ok_if "disableAllHooks is kept, warned about and named in the banner" 'grep -qF "\"disableAllHooks\": true" "$IU/.claude/settings.json" && printf "%s" "$IOUT" | grep -qF "WARNING: settings.json sets disableAllHooks=True." && printf "%s" "$IOUT" | grep -qF "NOT IN EFFECT: settings.json sets disableAllHooks"'
+inst "$IU"
+ok_if "re-install over the UTF-8 file changes nothing, banner still warns (rc=$IRC)" '[ "$IRC" = 0 ] && printf "%s" "$IOUT" | grep -qF "already up to date" && [ "$(nbak "$IU")" = 1 ] && printf "%s" "$IOUT" | grep -qF "NOT IN EFFECT"'
+IU2="$TMP/inst-dah-off"; mkdir -p "$IU2/.claude"; ( cd "$IU2" && git init -q )
+printf '{"disableAllHooks": "off"}\n' > "$IU2/.claude/settings.json"
+inst "$IU2"
+ok_if "an off disableAllHooks: no warning, no banner line (rc=$IRC)" '[ "$IRC" = 0 ] && ! printf "%s" "$IOUT" | grep -qF "disableAllHooks"'
+# A banner check that cannot run says so (a source copy whose load() exits 7 for the
+# existing settings; the merge itself reads that file through load_noting_comments).
+CK="$TMP/src-dah-check"; mkdir -p "$CK"
+cp -R "$SRC/install.sh" "$SRC/lib" "$SRC/hooks" "$SRC/settings.template.json" "$SRC/baseline.config.json" "$SRC/baseline.config.schema.json" "$CK/"
+"$PY" -c "import sys;p=sys.argv[1];t=open(p,encoding='utf-8').read();a='    return load_noting_comments(path, label)[0]';assert t.count(a)==1;open(p,'w',encoding='utf-8').write(t.replace(a,'    if label == \"existing settings\":\n        sys.exit(7)\n'+a))" "$(winpath "$CK/lib/merge_settings.py")"
+IU3="$TMP/inst-dah-unknown"; mkdir -p "$IU3/.claude"; ( cd "$IU3" && git init -q )
+printf '{"model": "m"}\n' > "$IU3/.claude/settings.json"
+IOUT="$(timeout -k 5 120 bash "$CK/install.sh" --target "$(winpath "$IU3")" 2>&1 </dev/null)"; IRC=$?
+ok_if "a banner check that cannot run is named in the banner (rc=$IRC)" '[ "$IRC" = 0 ] && printf "%s" "$IOUT" | grep -qF "could not check settings.json for disableAllHooks (exit 7)"'
+
 echo "== installer: no write through a link under .claude (M9) =="
 # mklink_file <target> <link>: a symbolic link to a file (or to a path that does not
 # exist). Git Bash's plain ln -s copies; a native symlink needs winsymlinks:nativestrict

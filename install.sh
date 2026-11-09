@@ -39,8 +39,11 @@ DRY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --target) TARGET="$2"; shift 2 ;;
-    --target=*) TARGET="${1#*=}"; shift ;;
+    --target) [[ $# -ge 2 && -n "$2" ]] || { echo "--target needs a directory" >&2; exit 2; }
+              TARGET="$2"; shift 2 ;;
+    --target=*) TARGET="${1#*=}"
+                [[ -n "$TARGET" ]] || { echo "--target needs a directory" >&2; exit 2; }
+                shift ;;
     --with-openclaw-rules) WITH_OPENCLAW=1; shift ;;
     --enable-security-defaults) ENABLE_SD=1; shift ;;
     --dry-run) DRY=1; shift ;;
@@ -138,7 +141,8 @@ if [[ -z "$TARGET" || ! -d "$TARGET" ]]; then
 fi
 # Re-check after canonicalisation: a symlink can resolve somewhere unexpected.
 assert_safe_path "$TARGET"
-if [[ ! -d "$TARGET/.git" ]]; then
+# A linked worktree or a submodule checkout has a .git FILE (a gitfile) at its root.
+if [[ ! -e "$TARGET/.git" ]]; then
   echo "NOTE: $TARGET is not a git repository root — installing anyway." >&2
 fi
 
@@ -614,6 +618,30 @@ else
     say "merged baseline hooks + deny-list into settings.json"
   fi
   ignore_backups
+fi
+# The merge keeps a disableAllHooks it found (and warned about on stderr); say it again
+# in the banner, whose "command-guard is on" would otherwise read as true. Same reading
+# as the merge's warning and config-guard (1). Exit 10: set; 11: not set; anything else
+# (a traceback exits 1) means the check could not run, and the banner says so.
+DAH_RC=11
+if [[ "$MERGE_IN" != "-" ]]; then
+  DAH_RC=0
+  "$PY" -I -S -X utf8 -c 'import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import merge_settings as ms
+sys.exit(10 if ms.disables_all_hooks(ms.load(sys.argv[2], "existing settings")) else 11)' \
+    "$SRC/lib" "$MERGE_IN" 2>/dev/null </dev/null || DAH_RC=$?
+fi
+if [[ $DAH_RC -eq 10 ]]; then
+  SETTINGS_BANNER="$SETTINGS_BANNER
+  • NOT IN EFFECT: settings.json sets disableAllHooks; while Claude Code reads it as
+    true it runs none of these hooks, command-guard included. Remove it unless you
+    set it on purpose"
+elif [[ $DAH_RC -ne 11 ]]; then
+  SETTINGS_BANNER="$SETTINGS_BANNER
+  • could not check settings.json for disableAllHooks (exit $DAH_RC); see the merge's
+    warnings above"
 fi
 
 # 4. Optional example rules for the securityDefaults module.

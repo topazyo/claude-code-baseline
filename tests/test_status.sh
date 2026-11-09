@@ -319,6 +319,37 @@ before="$(cd "$RO" && ls -a | sort)"
 after="$(cd "$RO" && ls -a | sort)"
 [ "$before" = "$after" ] && ok || no "running without --json wrote into CWD"
 
+echo "== baseline-status: --json needs a file name (review L12) =="
+# Last on the line, --json used to shift nothing and loop forever (timeout: rc 124).
+EJ="$(winpath "$TMP/ej")"; mkdir -p "$EJ"
+before="$(cd "$EJ" && ls -a | sort)"
+for form in "--json" "--json=" "--json "; do
+  if [ "$form" = "--json " ]; then
+    EOUT="$(cd "$EJ" && timeout -k 5 20 bash "$STATUS" "$A" --json "" 2>&1)"; erc=$?
+  else
+    EOUT="$(cd "$EJ" && timeout -k 5 20 bash "$STATUS" "$A" "$form" 2>&1)"; erc=$?
+  fi
+  case "$erc:$EOUT" in
+    "2:--json needs a file name") ok ;;
+    *) no "'$form' with no file name: want rc 2 and a usage message, got rc $erc: $EOUT" ;;
+  esac
+done
+after="$(cd "$EJ" && ls -a | sort)"
+[ "$before" = "$after" ] && ok || no "--json with no file name wrote into CWD"
+
+echo "== baseline-status: disableAllHooks reported per file (config-guard (1) reading) =="
+ASET="$A/.claude/settings.json"
+cp "$ASET" "$TMP/aset.keep"
+set_dah() { "$PY" -c "import json,sys;p=sys.argv[1];c=json.load(open(p,encoding='utf-8-sig'));c['disableAllHooks']=sys.argv[2];json.dump(c,open(p,'w',encoding='utf-8'))" "$ASET" "$1"; }
+set_dah yes
+OUT="$(winpath "$TMP/d.json")"
+timeout -k 5 60 bash "$STATUS" --json "$OUT" "$A" >/dev/null 2>&1
+if "$PY" -c "import json,sys;r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0];sys.exit(0 if 'settings.json disableAllHooks' in r['hookLaunchProblems'] else 1)" "$OUT"; then ok; else no "disableAllHooks=yes in settings.json is reported"; fi
+set_dah no
+timeout -k 5 60 bash "$STATUS" --json "$OUT" "$A" >/dev/null 2>&1
+if "$PY" -c "import json,sys;r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0];sys.exit(0 if not any('disableAllHooks' in p for p in r['hookLaunchProblems']) else 1)" "$OUT"; then ok; else no "disableAllHooks=no is not reported"; fi
+cp "$TMP/aset.keep" "$ASET"
+
 echo ""
 echo "test_status: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

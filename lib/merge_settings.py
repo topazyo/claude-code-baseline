@@ -16,10 +16,17 @@ Rules:
     event a past template wired and the current one no longer does is swept the same
     way, its key dropped only if removing our entries emptied it.
   * permissions.deny: union with the existing list (order-preserving, de-duplicated).
-  * Everything else in the existing file (model, permissions.allow, env, ...) is
-    left exactly as it was. An `env` key that can run code before the baseline
-    hooks, redirect them or set their posture (RISKY_ENV_NAMES) is reported on
-    stderr, not removed.
+  * Everything else in the existing file (model, permissions.allow, env, ...) keeps
+    its value. An `env` key that can run code before the baseline hooks, redirect
+    them or set their posture (RISKY_ENV_NAMES), and a `disableAllHooks` that turns
+    them all off, are reported on stderr, not removed.
+  * Form, not values: '//' comments are dropped (JSON has none; reported on stderr,
+    and the installer's backup keeps them). Text is written as UTF-8, except the
+    characters in ESCAPED_CHARS — the default-ignorable code points (zero-width,
+    bidi controls, variation selectors, tags), non-ASCII spaces, controls,
+    surrogates and private use — which are written as \\uXXXX escapes, so none of
+    them sits unseen in the file. (Other blank-looking or format characters, such as
+    U+2800 or U+0600, are written as is.)
 
 Failure model — deliberately FAIL LOUD. An existing settings.json that cannot be
 read, cannot be parsed, or has a shape this merge cannot preserve is *not* treated
@@ -75,6 +82,26 @@ RISKY_ENV_SUBSTRINGS = ["BASH_FUNC_"]
 # beside it that let it run as written. MIRRORS BASELINE_LAUNCH and
 # _entry_runs_as_written in hooks/modules/config-guard.sh, which explains them.
 BASELINE_LAUNCH = r'^[ \t]*bash[ \t]+-p[ \t]+("?)(?:\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR)/\.claude/hooks/baseline/([A-Za-z0-9_./-]+\.sh)\1[ \t]*\Z'
+
+# disableAllHooks values that leave hooks on. Any other value present is reported: a
+# truthy int or string is a tamper signal even if Claude Code honours only a real true.
+# MIRRORS config-guard (1) in hooks/modules/config-guard.sh; a test asserts the two
+# agree. (Python's False == 0 makes 0 and False one entry here, as there.)
+DISABLE_ALL_HOOKS_OFF = (False, 0, None, "", "false", "False", "0", "no", "off")
+
+# Code points written as \uXXXX escapes (a surrogate pair above U+FFFF) rather than as
+# UTF-8: the whole Default_Ignorable_Code_Point list (invisible characters, variation
+# selectors, tags, Hangul fillers, bidi controls), the non-ASCII space characters, the
+# line and paragraph separators, the interlinear-annotation controls, DEL and the C1
+# controls, surrogates (a lone one cannot be encoded as UTF-8) and the private-use areas.
+# A fixed list, not unicodedata, so the result does not depend on the Python build's
+# Unicode version. json.dumps already escapes U+0000-U+001F. JSON's structural characters
+# are ASCII, so these only occur inside strings, where an escape means the same.
+ESCAPED_CHARS = re.compile(
+    "[\u007f-\u00a0\u00ad\u034f\u061c\u115f\u1160\u1680\u17b4\u17b5\u180b-\u180f"
+    "\u2000-\u200f\u2028-\u202f\u205f-\u206f\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0"
+    "\ufff0-\ufffb\ud800-\udfff\ue000-\uf8ff"
+    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff\U000f0000-\U0010ffff]")
 
 EXIT_PARSE = 3
 EXIT_SHAPE = 4
@@ -135,11 +162,17 @@ def _strip_jsonc_comments(text: str) -> str:
 def load(path: str, label: str) -> dict:
     """Read and parse a settings document. Never returns {} for a file that
     exists but could not be understood — see the module docstring."""
+    return load_noting_comments(path, label)[0]
+
+
+def load_noting_comments(path: str, label: str) -> tuple[dict, bool]:
+    """load(), and whether '//' comments were dropped to parse the file. A '//' inside
+    a string value is kept by the stripper, so it does not count."""
     if path == "-":
-        return {}
+        return {}, False
     p = Path(path)
     if not p.exists():
-        return {}
+        return {}, False
     try:
         # utf-8-sig accepts plain UTF-8 too; it only strips a BOM if one is there.
         raw = p.read_text(encoding="utf-8-sig")
@@ -154,8 +187,9 @@ def load(path: str, label: str) -> dict:
         )
     except OSError as exc:
         fatal(EXIT_PARSE, f"{label} {p} could not be read: {exc}")
+    text = _strip_jsonc_comments(raw)
     try:
-        data: Any = json.loads(_strip_jsonc_comments(raw))
+        data: Any = json.loads(text)
     except ValueError as exc:
         fatal(
             EXIT_PARSE,
@@ -169,7 +203,25 @@ def load(path: str, label: str) -> dict:
             f"{label} {p} must hold a JSON object at the top level, found "
             f"{type(data).__name__}.",
         )
-    return data
+    return data, text != raw
+
+
+def _escape_char(match: re.Match) -> str:
+    cp = ord(match.group())
+    if cp > 0xFFFF:
+        cp -= 0x10000
+        return "\\u%04x\\u%04x" % (0xD800 | (cp >> 10), 0xDC00 | (cp & 0x3FF))
+    return "\\u%04x" % cp
+
+
+def to_json_text(obj: Any) -> str:
+    """The settings file's text: indented JSON in UTF-8 form, ESCAPED_CHARS escaped."""
+    return ESCAPED_CHARS.sub(_escape_char, json.dumps(obj, indent=2, ensure_ascii=False)) + "\n"
+
+
+def disables_all_hooks(settings: dict) -> bool:
+    """Whether settings sets disableAllHooks to anything but an off value (config-guard (1))."""
+    return "disableAllHooks" in settings and settings["disableAllHooks"] not in DISABLE_ALL_HOOKS_OFF
 
 
 def strip_comments(obj):
@@ -551,7 +603,7 @@ def main() -> int:
         sys.stderr.write("usage: merge_settings.py <existing|-> <template> <output>\n")
         return 2
 
-    existing = load(sys.argv[1], "existing settings")
+    existing, had_comments = load_noting_comments(sys.argv[1], "existing settings")
     template = strip_comments(load(sys.argv[2], "baseline template"))
     output_path = sys.argv[3]
 
@@ -570,9 +622,17 @@ def main() -> int:
         merged["permissions"] = perms
 
     try:
-        Path(output_path).write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        Path(output_path).write_text(to_json_text(merged), encoding="utf-8")
     except OSError as exc:
         fatal(EXIT_WRITE, f"could not write merged settings to {output_path}: {exc}")
+    # Reports, in this order: disableAllHooks, risky env, comments, outside-template.
+    if disables_all_hooks(existing):
+        shown = ascii(existing["disableAllHooks"])
+        shown = shown if len(shown) <= 200 else shown[:200] + "..."
+        sys.stderr.write(
+            f"WARNING: settings.json sets disableAllHooks={shown}. While Claude Code reads it as "
+            "true it runs no hooks except managed ones, so none of the baseline's hooks run. "
+            "Kept as is; remove it unless you set it on purpose.\n")
     # ascii()-escaped: a key name cannot carry control sequences to the terminal.
     risky = [ascii(k)[1:-1] for k in risky_env_keys(existing)]
     if risky:
@@ -580,6 +640,10 @@ def main() -> int:
             f"WARNING: settings.json env sets {', '.join(risky)}. Such values can run code "
             "before the baseline hooks, redirect them, or change their posture. Kept as is; "
             "remove them unless you set them on purpose.\n")
+    if had_comments:
+        sys.stderr.write(
+            "NOTE: settings.json has // comments. JSON has no comments, so the merged file "
+            "leaves them out; the backup the installer makes before writing keeps them.\n")
     outside = [ascii(e)[1:-1] for e in
                baseline_outside_template(merged["hooks"], as_object(template.get("hooks"), "hooks", "baseline template"))]
     if outside:

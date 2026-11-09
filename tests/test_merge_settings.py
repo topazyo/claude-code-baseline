@@ -264,6 +264,124 @@ def outside_template_runs():
             and out_hooks["SubagentStop"] == hooks["SubagentStop"])
 
 
+def run_main(text):
+    """main() on a settings.json holding text: (exit code, stderr, output text, output bytes)."""
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        existing, merged = os.path.join(d, "settings.json"), os.path.join(d, "out.json")
+        with open(existing, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        proc = subprocess.run(
+            [sys.executable, "-I", os.path.join(ROOT, "lib", "merge_settings.py"), existing,
+             os.path.join(ROOT, "settings.template.json"), merged],
+            capture_output=True, text=True, encoding="utf-8", timeout=60)
+        raw = open(merged, "rb").read() if os.path.exists(merged) else b""
+    return proc.returncode, proc.stderr, raw.decode("utf-8").replace("\r\n", "\n"), raw
+
+
+# Written as \uXXXX by the merge (review N4), stated here independently of
+# ms.ESCAPED_CHARS: Default_Ignorable_Code_Point, the non-ASCII spaces, U+2028/9, the
+# annotation controls, DEL + C1, surrogates, private use.
+ESCAPED_RANGES = [
+    (0x7F, 0x9F), (0xA0, 0xA0), (0xAD, 0xAD), (0x34F, 0x34F), (0x61C, 0x61C),
+    (0x115F, 0x1160), (0x1680, 0x1680), (0x17B4, 0x17B5), (0x180B, 0x180F),
+    (0x2000, 0x200A), (0x200B, 0x200F), (0x2028, 0x2029), (0x202A, 0x202E), (0x202F, 0x202F),
+    (0x205F, 0x205F), (0x2060, 0x206F), (0x3000, 0x3000), (0x3164, 0x3164), (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0xFFF9, 0xFFFB), (0xD800, 0xDFFF),
+    (0xE000, 0xF8FF), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+    (0xF0000, 0x10FFFF)]
+
+
+def should_escape(cp):
+    return any(lo <= cp <= hi for lo, hi in ESCAPED_RANGES)
+
+
+def escape_of(cp):
+    if cp > 0xFFFF:
+        v = cp - 0x10000
+        return "\\u%04x\\u%04x" % (0xD800 | (v >> 10), 0xDC00 | (v & 0x3FF))
+    return "\\u%04x" % cp
+
+
+def escape_mismatches():
+    """Every range endpoint and its outside neighbours, one character per string (two
+    adjacent lone surrogates would be read back as one pair): escaped exactly when in
+    the list, raw UTF-8 otherwise, and read back as the same text."""
+    points = sorted({p for lo, hi in ESCAPED_RANGES for p in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)
+                     if 0x7E <= p <= 0x10FFFF}
+                    | {0xE9, 0x5E8, 0x4E2D, 0x1F600, 0x1F3FB, 0xFFFC, 0x2E80})
+    bad = []
+    for cp in points:
+        obj = {"k": chr(cp)}
+        text = ms.to_json_text(obj)
+        want = escape_of(cp) if should_escape(cp) else chr(cp)
+        if text != '{\n  "k": "' + want + '"\n}\n' or json.loads(text) != obj:
+            bad.append(hex(cp))
+    return bad
+
+
+def utf8_written():
+    """main() writes non-ASCII text as UTF-8, escapes a bidi override, keeps the parsed
+    document, and a second merge of its output changes nothing."""
+    obj = {"model": "é 中 ריפו 😀", "x": "a\u202eb", "y": "\ud800", "z": "\U000e0041"}
+    rc, err, text, raw = run_main(json.dumps(obj))
+    rc2, _, text2, _ = run_main(text)
+    out = json.loads(text) if rc == 0 else {}
+    return (rc == 0 and "é 中 ריפו 😀".encode("utf-8") in raw and b"\xe2\x80\xae" not in raw
+            and "a\\u202eb" in text and "\\ud800" in text and "\\udb40\\udc41" in text
+            and {k: out.get(k) for k in obj} == obj and rc2 == 0 and text2 == text)
+
+
+def comment_notes():
+    """A // comment is dropped and reported; a // inside a string is neither."""
+    note = "NOTE: settings.json has // comments."
+    rc1, err1, text1, _ = run_main('{\n  // the team model\n  "model": "m"\n}\n')
+    rc2, err2, text2, _ = run_main('{"model": "m", "url": "https://x//y"}')
+    rc3, err3, _, _ = run_main('{"model": "m"}')
+    return (rc1 == 0 and note in err1 and "team model" not in text1
+            and json.loads(text1)["model"] == "m"
+            and rc2 == 0 and note not in err2 and json.loads(text2)["url"] == "https://x//y"
+            and rc3 == 0 and note not in err3)
+
+
+DAH_ON = [True, 1, 2, "true", "TRUE", "yes", "1", "on", [], {}, [False]]
+DAH_OFF = [False, 0, 0.0, None, "", "false", "False", "0", "no", "off"]
+
+
+def dah_warns():
+    """main() reports disableAllHooks=true and keeps it; no report for false or absent."""
+    warn = "WARNING: settings.json sets disableAllHooks=True."
+    rc1, err1, text1, _ = run_main('{"disableAllHooks": true}')
+    rc2, err2, text2, _ = run_main('{"disableAllHooks": false}')
+    rc3, err3, _, _ = run_main('{}')
+    return (rc1 == 0 and warn in err1 and json.loads(text1)["disableAllHooks"] is True
+            and rc2 == 0 and "disableAllHooks" not in err2
+            and json.loads(text2)["disableAllHooks"] is False
+            and rc3 == 0 and "disableAllHooks" not in err3)
+
+
+def report_order():
+    """The stderr reports come in a fixed order."""
+    text = ('{\n  // c\n  "disableAllHooks": true, "env": {"BASH_ENV": "x"},\n'
+            '  "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": '
+            + json.dumps(OLD) + '}]}]}\n}\n')
+    rc, err, _, _ = run_main(text)
+    marks = ["disableAllHooks=True", "env sets BASH_ENV", "// comments", "wires baseline scripts under"]
+    at = [err.find(m) for m in marks]
+    return rc == 0 and -1 not in at and at == sorted(at)
+
+
+def dah_mirrors():
+    """The off values equal config-guard (1)'s; baseline-status uses the helper itself."""
+    import ast
+    cg = open(os.path.join(ROOT, "hooks", "modules", "config-guard.sh"), encoding="utf-8").read()
+    st = open(os.path.join(ROOT, "tools", "baseline-status.sh"), encoding="utf-8").read()
+    m = re.search(r"^if dah not in (\(.*\)):$", cg, re.M)
+    return (m is not None and ast.literal_eval(m.group(1)) == ms.DISABLE_ALL_HOOKS_OFF
+            and "ms.disables_all_hooks(data)" in st and '"no", "off")' not in st)
+
+
 before = json.dumps(EXISTING), json.dumps(TEMPLATE)
 out = ms.merge_hooks(EXISTING, TEMPLATE)        # the real objects: neither may be mutated
 after = json.dumps(EXISTING), json.dumps(TEMPLATE)
@@ -339,6 +457,19 @@ checks = [
               "dispatcher/post-write.sh": 90, "modules/tracker-reminder.sh": 5,
               "modules/config-guard.sh": 10}),
     ("merge warns about a risky env key and keeps env as it was", merge_env_run()),
+    # disableAllHooks (review N2): reported, never changed; config-guard (1)'s reading
+    ("disableAllHooks: every value but an off one turns hooks off",
+     all(ms.disables_all_hooks({"disableAllHooks": v}) for v in DAH_ON)
+     and not any(ms.disables_all_hooks({"disableAllHooks": v}) for v in DAH_OFF)
+     and not ms.disables_all_hooks({})),
+    ("disableAllHooks: merge warns and keeps it; nothing for false or absent", dah_warns()),
+    ("disableAllHooks: off values mirror config-guard (1); status uses the helper", dah_mirrors()),
+    ("merge reports in a fixed order", report_order()),
+    # form (review N4): UTF-8 text, a fixed escape list, comments dropped and reported
+    ("escapes: each range's endpoints escaped, the code points beside them as the list says",
+     escape_mismatches() == []),
+    ("escapes: merge writes UTF-8, escapes a bidi override, and is idempotent", utf8_written()),
+    ("comments: dropped and reported; a // in a string is not a comment", comment_notes()),
     # where the template wires each script: event, group matcher, no `if`
     ("template wiring read for every baseline group",
      WIRING == [("dispatcher/post-write.sh", "PostToolUse", "Write|Edit"),
