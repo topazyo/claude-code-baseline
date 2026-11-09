@@ -34,9 +34,11 @@ for p in "$ROOT/hooks/lib/command_guard_match.py" "$ROOT/lib/merge_settings.py";
   "$PY" -m py_compile "$p" && echo "   ok $(basename "$p")" || { echo "  FAIL: py_compile $p"; fail=1; }
 done
 # The Python the hooks and the status tool carry as quoted heredocs (<<'...PY...') is
-# compiled too: a test only compiles the lines it reaches, and on the python-floor leg
-# this is what proves every body still parses on the oldest supported Python. The
-# minimum count stops a broken extraction from passing by compiling nothing.
+# compiled too, each body on its own: a test only compiles the code it reaches, so on
+# the python-floor legs this proves those bodies parse on the oldest supported Python
+# even where no case runs them. Python passed as `-c '...'` strings or held in quoted
+# variables (common.sh's _BCL_CFG_*_SRC) is not extracted here; the suites run it.
+# The minimum count stops a broken extraction from passing by compiling nothing.
 "$PY" - "$ROOT" <<'PY' || fail=1
 import re, sys
 from pathlib import Path

@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 import unicodedata
@@ -307,16 +308,30 @@ def is_repo_path(root: Path, span: str) -> bool:
         return False
     if PurePosixPath(span).is_absolute() or PureWindowsPath(span).anchor:
         return False
-    if ".." in PurePosixPath(span).parts:
+    parts = PurePosixPath(span).parts
+    if ".." in parts:
         return False
-    return (root / span).exists()
+    # Walk it with exact case, so a case-insensitive filesystem (Windows, macOS) does
+    # not accept a path that CI's Linux checkout would refuse.
+    here = root
+    for part in parts:
+        if part == ".":
+            continue
+        try:
+            if part not in os.listdir(here):
+                return False
+        except OSError:
+            return False
+        here = here / part
+    return True
 
 
 def in_hook_line(span: str, corpus_lines: list[str]) -> bool:
     """The span occurs in one line of the hook source. An elided message (`Blocked by …:`)
     matches when its parts occur in that order within a single line."""
     parts = [p for p in span.split(ELLIPSIS) if p]
-    if not parts:
+    # At least one part with substance: `…:` or `a…b` would match almost any line.
+    if not any(len("".join(p.split())) >= 3 for p in parts):
         return False
     for line in corpus_lines:
         pos = 0

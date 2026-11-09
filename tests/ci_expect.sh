@@ -21,8 +21,8 @@
 #
 # Updating a row: take the counts from the CI log of the change that alters them (the
 # "floor stale by N" note says by how much), and add a skip ID to a leg only with the
-# reason it cannot run there. On the python-floor leg a skip caused by the old Python is
-# exactly what that leg exists to catch, so it is a bug to fix, not a row to add.
+# reason it cannot run there. On the python-floor legs a skip caused by the old Python is
+# exactly what those legs exist to catch, so it is a bug to fix, not a row to add.
 
 skipped=0
 skip_ids=""
@@ -46,20 +46,30 @@ ci_expect() {
   fi
   case "$leg:$suite" in
     ubuntu-latest:test_hooks)        allowed="";  floor=660 ;;
-    ubuntu-latest:test_status)       allowed="";  floor=68 ;;
+    ubuntu-latest:test_status)       allowed="";  floor=73 ;;
     ubuntu-latest:test_policy_gate)  allowed="";  floor=53 ;;
     ubuntu-latest:test_latency)      allowed="";  floor=5 ;;
     windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=673 ;;
-    windows-latest:test_status)      allowed="symlinked-skill"; floor=67 ;;
+    windows-latest:test_status)      allowed="symlinked-skill"; floor=72 ;;
     windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=51 ;;
     windows-latest:test_latency)     allowed="";  floor=5 ;;
-    python-floor:test_hooks)         allowed="";  floor=660 ;;
-    python-floor:test_status)        allowed="";  floor=68 ;;
-    python-floor:test_policy_gate)   allowed="";  floor=53 ;;
-    python-floor:test_latency)       allowed="";  floor=5 ;;
+    python-floor-ubuntu-22.04:test_hooks)       allowed="";  floor=660 ;;
+    python-floor-ubuntu-22.04:test_status)      allowed="";  floor=73 ;;
+    python-floor-ubuntu-22.04:test_policy_gate) allowed="";  floor=53 ;;
+    python-floor-ubuntu-22.04:test_latency)     allowed="";  floor=5 ;;
+    python-floor-windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=673 ;;
+    python-floor-windows-latest:test_status)      allowed="symlinked-skill"; floor=72 ;;
+    python-floor-windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=51 ;;
+    python-floor-windows-latest:test_latency)     allowed="";  floor=5 ;;
+    # Not a runner: fixed values for test_status.sh's checks of this function.
+    selftest:test_status)            allowed="fifo symlinked-skill"; floor=10 ;;
     *)
       echo "  FAIL [$suite: no CI expectations for leg '$leg': add its row to tests/ci_expect.sh]"
       return 1 ;;
+  esac
+  # A count that is not a number would make both comparisons below false, not fail.
+  case "$passed" in
+    ''|*[!0-9]*) echo "  FAIL [$suite: pass count '$passed' is not a number]"; return 1 ;;
   esac
   for id in $skip_ids; do
     case " $allowed " in

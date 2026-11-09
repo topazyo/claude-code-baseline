@@ -283,6 +283,23 @@ def existing_file_above_the_repo_fails(root):
 
 
 @case
+def repo_path_in_the_wrong_case_fails(root):
+    # Exact case on every host: Windows and macOS would otherwise find Hooks/Guard.sh.
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `Hooks/Guard.sh`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `Hooks/Guard.sh`" in out, out)
+
+
+@case
+def elided_decoder_span_without_substance_fails(root):
+    # `…:` would match almost any hook line; one part needs 3+ non-space characters.
+    build(root, he=HE.replace("<!-- he-decoder:end -->",
+                              "הודעה כמו `…: $`.\n\n<!-- he-decoder:end -->"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `…: $`" in out, out)
+
+
+@case
 def elided_decoder_parts_out_of_order_fail(root):
     # Both parts on one hook line, but in the other order.
     build(root, hook_src='echo "Blocked by test guard: $X"\necho "zebra before Blocked by it"\n',
@@ -313,9 +330,9 @@ def elided_decoder_parts_on_different_lines_fail(root):
 @case
 def hook_source_outside_the_decoder_table_fails(root):
     # Quoting the hook source is allowed only inside the table that decodes it.
-    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `$X`.\n"))
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `test guard`.\n"))
     rc, out = run_check(root)
-    check(rc == 1 and f"{HE_ONLY_FAIL}: `$X`" in out, out)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `test guard`" in out, out)
 
 
 @case

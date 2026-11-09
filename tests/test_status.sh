@@ -359,14 +359,19 @@ cp "$TMP/aset.keep" "$ASET"
 
 # tests/ci_expect.sh judges every suite's skips and pass count on CI, so it is checked
 # here: each call runs in a subshell with its own skip list, leg and Actions flag.
-ce() { ( skip_ids="$1"; BCL_CI_LEG="$2"; GITHUB_ACTIONS="$3"; ci_expect test_status "$4" >/dev/null 2>&1 ); }
-ce "" ubuntu-latest "" 999 && ok || no "ci_expect: no skips, above the floor, must pass"
-ce " fifo" ubuntu-latest "" 999 && no "ci_expect: a skip the leg does not allow must fail" || ok
-ce " symlinked-skill" windows-latest "" 999 && ok || no "ci_expect: a skip the leg allows must pass"
-ce "" ubuntu-latest "" 1 && no "ci_expect: a pass count below the floor must fail" || ok
+ce() { ( skip_ids="$1"; BCL_CI_LEG="$2"; GITHUB_ACTIONS="$3"; ci_expect "${5:-test_status}" "$4" >/dev/null 2>&1 ); }
+ce "" selftest "" 10 && ok || no "ci_expect: no skips, exactly at the floor, must pass"
+ce "" selftest "" 9 && no "ci_expect: one below the floor must fail" || ok
+ce " fifo symlinked-skill" selftest "" 11 && ok || no "ci_expect: two skips the leg allows must pass"
+ce " fifo venv-pth-inert" selftest "" 11 && no "ci_expect: an allowed and an unexpected skip must fail" || ok
+ce " fifo" ubuntu-latest "" 999 && no "ci_expect: a skip the ubuntu leg does not allow must fail" || ok
+ce " symlinked-skill" windows-latest "" 999 && ok || no "ci_expect: a skip the windows leg allows must pass"
 ce "" no-such-leg "" 999 && no "ci_expect: a leg with no row must fail" || ok
 ce "" "" "" 0 && ok || no "ci_expect: a local run (no leg, not on Actions) is not judged"
 ce "" "" true 999 && no "ci_expect: GitHub Actions without BCL_CI_LEG must fail" || ok
+ce " newline-name unix-modes" windows-latest "" 9999 test_hooks && ok || no "ci_expect: the windows test_hooks row allows these two skips"
+ce "" selftest "" "" && no "ci_expect: an empty pass count must fail" || ok
+ce "" selftest "" 1x && no "ci_expect: a pass count that is not a number must fail" || ok
 
 ci_expect test_status "$pass" || fail=$((fail + 1))
 
