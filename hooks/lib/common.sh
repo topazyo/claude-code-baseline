@@ -684,8 +684,6 @@ def _d_classify(path, nt, trim=True):
 
 
 def _d_real(path):
-    if _D_OLD_NT:  # bcl_definition_verdict stops first; any other caller fails closed too
-        raise _DCannot()
     try:
         return _d_os.path.realpath(path)
     except (OSError, ValueError):
@@ -933,8 +931,8 @@ def bcl_definition_verdict(obj, project, env=None, nt=_D_NT, link_names=None):
         if v != "no":
             out = "cannot"
         shown = shown or real
-    # A path the text already shows protected was refused above, as everywhere. Any
-    # other answer on Windows with Python < 3.8 is not one this check can give.
+    # The paths were judged as with any Python, and a protected one was refused above.
+    # Any other answer on Windows with Python < 3.8 is not one this check can give.
     if _D_OLD_NT:
         return "oldpython", ""
     return out, shown

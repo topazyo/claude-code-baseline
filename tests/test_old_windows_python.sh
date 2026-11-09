@@ -69,6 +69,14 @@ out="$(sg "$OLD_PATH" "$PROTECTED")"; rc=$?
 if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "REFUSED"; then ok
 else no "a protected path under Windows Python 3.7 is REFUSED: rc=$rc"; printf '%s\n' "$out" | tail -n 3; fi
 
+# A path protected by where it is, not by its name: user settings under CLAUDE_CONFIG_DIR.
+CFGW="$(cygpath -m "$TMP/cfg")"
+out="$(printf '%s' "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$CFGW/settings.json\",\"content\":\"x\"}}" \
+  | PATH="$OLD_PATH" CLAUDE_PROJECT_DIR="$RW" HOME="$TMP/home" CLAUDE_CONFIG_DIR="$CFGW" \
+    timeout -k 5 60 bash "$H/modules/scope-guard.sh" 2>&1)"; rc=$?
+if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "REFUSED"; then ok
+else no "user settings under CLAUDE_CONFIG_DIR under Windows Python 3.7 is REFUSED: rc=$rc"; printf '%s\n' "$out" | tail -n 3; fi
+
 echo ""
 echo "test_old_windows_python: $pass passed, $fail failed"
-[ "$fail" -eq 0 ] && [ "$pass" -eq 6 ] || exit 1
+[ "$fail" -eq 0 ] && [ "$pass" -eq 7 ] || exit 1

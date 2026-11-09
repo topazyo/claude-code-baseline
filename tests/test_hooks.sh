@@ -330,7 +330,12 @@ hbad_row "old Windows Python: a protected path is still REFUSED" "$OLDNT" 2 \
 setcfg "c['failClosed']=False"
 hbad_row "old Windows Python, failClosed:false: a protected path is still REFUSED" "$OLDNT" 2 \
   "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
-setcfg "c['failClosed']=True"
+# ...and one protected by where it is rather than by its name (user settings).
+export CLAUDE_CONFIG_DIR="$UH/cfg"
+hbad_row "old Windows Python, failClosed:false: CLAUDE_CONFIG_DIR settings is still REFUSED" "$OLDNT" 2 \
+  "$(def_payload Write "$UH/cfg/settings.json" content "x")" "REFUSED"
+unset CLAUDE_CONFIG_DIR
+resetcfg
 rm -rf "$HOMETMP/hbad"
 # Only scope-guard asks for the verdict: a plain prime (every other hook) computes none.
 ( source "$H/lib/common.sh"; bcl_prime "$(write_payload "$WT/.claude/agents/x.md")"

@@ -312,12 +312,19 @@ try:
     check("old Windows Python: file_path not a string -> cannot",
           verdict_fn(payload(7), ".", {})[0], "cannot")
     check("old Windows Python: not an object -> unparsed", verdict_fn(None, ".", {})[0], "unparsed")
-    try:
-        D["_d_real"]("src")
-        refused = False
-    except D["_DCannot"]:
-        refused = True
-    check("old Windows Python: _d_real refuses", refused, True)
+    # Protected by where it is rather than by its name: still judged and refused.
+    with tempfile.TemporaryDirectory() as cfg_tmp:
+        cfg_env = {"CLAUDE_CONFIG_DIR": cfg_tmp}
+        cfg_settings = os.path.join(cfg_tmp, "settings.json")
+        check("old Windows Python: CLAUDE_CONFIG_DIR settings.json -> yes",
+              verdict_fn(payload(cfg_settings), ".", cfg_env)[0], "yes")
+        check("old Windows Python: CLAUDE_CONFIG_DIR agent -> yes",
+              verdict_fn(payload(os.path.join(cfg_tmp, "agents", "x.md")), ".", cfg_env)[0], "yes")
+        check("old Windows Python: ordinary and CLAUDE_CONFIG_DIR settings -> yes",
+              verdict_fn({"a": {"file_path": "src/app.py"}, "b": {"file_path": cfg_settings}},
+                         ".", cfg_env)[0], "yes")
+        check("old Windows Python: CLAUDE_CONFIG_DIR, other file -> oldpython",
+              verdict_fn(payload(os.path.join(cfg_tmp, "notes.md")), ".", cfg_env)[0], "oldpython")
 finally:
     D["_D_OLD_NT"] = saved_flag
 
