@@ -52,13 +52,13 @@ _BCL_SOURCED=([1]=1)
 # costs ~20ms under Git Bash on Windows — per prefix, on every one of the six
 # processes in a PostToolUse chain. This expansion forks nothing.
 for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@} ${!_BCL_NOTICE@}; do unset -v "$_bcl_v"; done
-# BCL_READ_ERROR, _BCL_LOOKUP, _BCL_STDIN_TIMEOUT and _BCL_STDIN_MAX are reassigned
-# below; unsetting them first also drops the export an inherited copy carries, so it
+# BCL_READ_ERROR, _BCL_LOOKUP, _BCL_STDIN_TIMEOUT, _BCL_STDIN_MAX, _BCL_KILL_GRACE and
+# _BCL_BUDGET are reassigned below; unsetting them first also drops the export an inherited copy carries, so it
 # is not handed on to every child process. A new global needs adding here too — but
 # never widen this to ${!_BCL_@}, which would also unset the source guard above.
 # _BCL_PY must stay UNSET, not empty: bcl_python tests ${_BCL_PY+x}, and an empty
 # value would be cached as "no interpreter".
-unset -v _BCL_PY BCL_READ_ERROR _BCL_LOOKUP _BCL_STDIN_TIMEOUT _BCL_STDIN_MAX _bcl_v
+unset -v _BCL_PY BCL_READ_ERROR _BCL_LOOKUP _BCL_STDIN_TIMEOUT _BCL_STDIN_MAX _BCL_KILL_GRACE _BCL_BUDGET _bcl_v
 
 # The hook tree this library belongs to: the parent of lib/, as this file was sourced.
 # Every hook sources "$HERE/../lib/common.sh" with HERE made absolute, so this is an
@@ -84,7 +84,7 @@ unset -v FUNCNEST POSIXLY_CORRECT BASH_COMPAT EXECIGNORE CDPATH GLOBIGNORE BASH_
 
 # Primed state. Declared unconditionally so `set -u` is safe and so an inherited
 # scalar of the same name cannot masquerade as one of these arrays.
-_BCL_PRIME_STATE=""     # "" | ok | failed | nopy   (only "ok" is authoritative)
+_BCL_PRIME_STATE=""     # "" | ok | failed | timeout | nopy   (only "ok" is authoritative)
 _BCL_PRIME_DIR=""       # CLAUDE_PROJECT_DIR as it stood when we primed
 _BCL_PRIME_KEY=""       # resolved baseline.config.json path we primed from
 _BCL_CFG_STATE=""       # ok | absent | malformed
@@ -326,9 +326,9 @@ def bcl_read_cfg(path):
 #    carried as ARRAY ELEMENTS, never as variable names.
 #  * `_BCL_PRIME_STATE=ok` is assigned by BASH, after the eval. eval parses its whole
 #    argument before running any of it, so a truncated or malformed Python block sets
-#    nothing and the state stays unset — which routes every helper back to its own
-#    per-call check. A prime failure can only read as "unknown", never as
-#    "config fine".
+#    nothing and the state is `failed` (or `timeout` when we killed the interpreter),
+#    never `ok` — which routes every helper back to its own per-call check. A prime
+#    failure can only read as "unknown", never as "config fine".
 _BCL_PRIME_TIMEOUT=10
 
 IFS='' read -r -d '' _BCL_PRIME_SRC <<'PRIMEPY' || true
@@ -343,7 +343,7 @@ MANAGED_PATH = sys.argv[4] if len(sys.argv) > 4 else ""
 
 # Bounds. A repo-supplied config or a hostile payload must not be able to make this
 # emit a multi-megabyte eval string or spend the hook's budget walking itself. Going
-# over is reported as a prime FAILURE (exit 3 -> _BCL_PRIME_STATE stays unset), which
+# over is reported as a prime FAILURE (exit 3 -> _BCL_PRIME_STATE=failed), which
 # degrades to the original per-call helpers rather than to a truncated view of policy.
 MAX_CFG_ENTRIES = 4096
 MAX_PL_KEYS = 512
@@ -1041,8 +1041,15 @@ bcl_prime() {
   if [[ $rc -ne 0 || -z "$out" ]]; then
     # Bounds exceeded, interpreter error, or we killed it. Leave every primed value
     # unset so the helpers fall back to their own per-call checks: a broken prime
-    # must read as "unknown", never as "config fine" / "payload clean".
-    _BCL_PRIME_STATE=failed
+    # must read as "unknown", never as "config fine" / "payload clean". A kill gets
+    # its own state: the interpreter just took the whole bound, so a caller that has
+    # to finish inside a budget (the post-write dispatcher) can stop here instead of
+    # re-running it once per helper. Every helper reads both states the same way.
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+      _BCL_PRIME_STATE=timeout
+    else
+      _BCL_PRIME_STATE=failed
+    fi
     return 0
   fi
   # eval parses its whole argument before executing any of it, so truncated or
@@ -1536,15 +1543,28 @@ bcl_repo_relative() {
 # each child ourselves converts "hook was killed" (fail-open) into "child was
 # killed, rc=124" (which callers route through bcl_failclosed_exit). Where `timeout` is absent (stock macOS, minimal images) the
 # command still runs, just unbounded — bcl_timeout_available says so honestly.
+_BCL_KILL_GRACE=2
 bcl_timeout_available() { command -v timeout >/dev/null 2>&1; }
 bcl_timeout() {
   local secs="$1"; shift
   if bcl_timeout_available; then
-    # -k: if the child ignores TERM, KILL it 2s later. 124 = killed by timeout.
-    timeout -k 2 "$secs" "$@"
+    # -k: if the child ignores TERM, KILL it _BCL_KILL_GRACE seconds later.
+    # 124 = killed by TERM, 137 = needed the KILL.
+    timeout -k "$_BCL_KILL_GRACE" "$secs" "$@"
   else
     "$@"
   fi
+}
+
+# bcl_clamp_budget <cap> <end> <elapsed> -> _BCL_BUDGET
+# The seconds a child may run so that it ends, KILL grace included, by <end> seconds
+# of the caller's life: min(cap, end - elapsed - grace - 1). The -1 covers bash's
+# SECONDS, which truncates and so under-reports elapsed time by up to a second. In
+# this shell, no fork. The result can be 0 or negative, and the caller must not run
+# the child then: `timeout 0` means NO limit, not "no time".
+bcl_clamp_budget() {
+  local left=$(( $2 - $3 - _BCL_KILL_GRACE - 1 ))
+  if (( left < $1 )); then _BCL_BUDGET=$left; else _BCL_BUDGET=$1; fi
 }
 
 # --- bounded payload read ---------------------------------------------------
