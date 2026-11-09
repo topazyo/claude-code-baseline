@@ -25,6 +25,7 @@ on any failure. Runs under Linux, WSL, macOS, and Git Bash on Windows.
 | `test_latency.sh` | **Latency regression gate** (`run.sh` step 7). Installs the baseline into a throwaway repo and times the hot-path hooks — command-guard (every Bash call), the post-write dispatcher (every Write/Edit), scope-guard, and config-guard — failing if one exceeds its budget. |
 | `translation_sync.py` | **Hebrew-docs drift gate** (`run.sh` step 8). Fails when an English section of `ONBOARDING.md` or a translated section of `README.md` changed after its Hebrew counterpart was translated, or when a translation altered, dropped or invented a command, carries a bidi-control character, lacks its direction wrappers, links to a missing anchor, or quotes a hook message that no longer exists. Also the maintainer tool for `stamp` / `mark-stale` (below). |
 | `test_translation_sync.py` | Fixtures for the drift gate: each defect class above is planted in a throwaway repo and must fail; `mark-stale` → `stamp` round-trips. |
+| `ci_expect.sh` | Sourced by the integration suites: `skip ID REASON` prints and records a skip; `ci_expect` checks, on a CI leg, that each suite skipped only what that leg allows and passed at least its floor (see [CI](#ci)). |
 | `policy-change-gate.sh` | **Release gate.** Fails a change to what the baseline enforces — `hooks/`, `lib/`, `tools/`, `managed/`, `examples/`, `tests/`, `.github/`, `install.sh`, `settings.template.json`, `baseline.config.json` (beyond its version line), the schema, `.gitattributes`, `.gitmodules`, matched in any case; root-level `*.md`, any `README*.md`, `hooks/VERSION` and `.github/CODEOWNERS` are exempt — unless an enforcement fixture file at the root `tests/` (`test_command_guard.py`, `test_hooks.sh`, `test_managed.sh`, `test_merge_settings.py`, `test_status.sh`, `test_policy_gate.sh`) was added or modified. Renames count on both sides. |
 | `test_policy_gate.sh` | Regression suite for the gate (`run.sh` step 9): scratch repositories, one kind of change per case — what is policy, what is exempt, what satisfies it, renames, deletions, and every way of not knowing the change set failing closed. |
 
@@ -125,7 +126,8 @@ hook, not in the constant.
 
 **Skips cleanly** (exit 0, with a message) where `date +%s%N` has no nanosecond
 precision — BSD/macOS `date` prints a literal `N`. A latency test that reports a
-false failure on a developer's machine gets deleted, not fixed.
+false failure on a developer's machine gets deleted, not fixed. On a CI leg the
+skip fails instead (see [CI](#ci)): every runner has the clock.
 
 ## Hebrew translations (`translation_sync.py`)
 
@@ -154,14 +156,36 @@ Never `stamp` a section you did not retranslate: that hides exactly the drift th
 gate exists to show. Commands, JSON and every inline code span must stay
 byte-identical to the English; diagrams may be explained in Hebrew below the
 original. A translator's own note goes between `<!-- he-note:start -->` and
-`<!-- he-note:end -->`, and Hebrew-only appendices after `<!-- he-only -->`; the
-message decoder (`<!-- he-decoder:start -->` … `end`) is checked against the hook
-source instead.
+`<!-- he-note:end -->`, and Hebrew-only appendices after `<!-- he-only -->`. That
+content is not compared with an English section, but it cannot invent a command:
+each inline code span in it must occur in the English file or name an existing file
+in the repository, and each fenced block must be a block of the English file. Inside
+the message decoder (`<!-- he-decoder:start -->` … `end`) a span may instead quote
+one line of the hook source (an elided message, `Blocked by …:`, matches when its
+parts occur in order on one line), and each row's message must still be in it.
 
 ## CI
 
 `../.github/workflows/baseline-ci.yml` runs `run.sh` on every push/PR, on Ubuntu and
-Windows. `../.github/workflows/policy-gate.yml` runs the policy gate on pull requests
+Windows with the newest Python 3.x, and once more on Python 3.7 (`Python floor (3.7)`,
+on `ubuntu-22.04`, the only image with a 3.7 build), the oldest version `install.sh`
+accepts. There is no 3.7 leg on Windows: no Windows 3.7 build exists for
+`setup-python`. `run.sh` also compiles every Python body the hooks and the status tool
+carry as a quoted heredoc, so the 3.7 leg proves they parse even where no case runs
+them.
+
+Each leg sets `BCL_CI_LEG`, and `ci_expect.sh` holds a row per leg and suite: the skip
+IDs that leg may print (`SKIP [id: reason]`) and the suite's pass-count floor. A skip
+outside the row, a count below the floor, a leg without a row, or a GitHub Actions run
+with no `BCL_CI_LEG` fails the suite; above the floor it prints `floor stale by N`.
+Locally (`BCL_CI_LEG` unset) skips are printed and nothing is enforced. To update a
+row, take the numbers from the CI log of the change that alters them, and add a skip
+ID only with the reason the case cannot run on that runner. On the 3.7 leg a skip
+caused by the old Python is the defect that leg exists to find, never a row to add.
+The suites also unset `PYTHONOPTIMIZE` and the translation fixtures refuse `python -O`,
+because both strip `assert`.
+
+`../.github/workflows/policy-gate.yml` runs the policy gate on pull requests
 only — the **base branch's** copy of `policy-change-gate.sh`, so a PR that weakens the
 gate is judged by the gate it changes. It is its own workflow because a skipped job
 reports "Success": as a job in the push-and-PR workflow it posted a skipped "Success"

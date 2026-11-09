@@ -7,6 +7,10 @@ patterns, the 8.3 heuristic, the verdict rules, hard-link lookups through a stub
 the POSIX inode walk. test_hooks.sh runs the hook itself against real links on each OS.
 Run:  python tests/test_definition_path.py   (exits non-zero on any failure)
 """
+# Annotations stay unevaluated: `failures: list[str]` at module level is a TypeError on
+# Python 3.7 and 3.8 otherwise, and the suite runs on the 3.7 floor in CI.
+from __future__ import annotations
+
 import os
 import sys
 import tempfile

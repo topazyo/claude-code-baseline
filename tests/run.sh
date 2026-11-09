@@ -10,6 +10,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$(command -v python3 || command -v python || true)"
 [ -z "$PY" ] && { echo "python3 (or python) is required" >&2; exit 1; }
 fail=0
+# The fixture suites check with bare `assert` in places, which PYTHONOPTIMIZE strips:
+# every such check would pass without looking. The suites guard themselves too.
+unset PYTHONOPTIMIZE
+# A suite that cannot run is a skip locally but a failure on CI, where git is always
+# installed and a missing one means the job lost a whole suite without a word.
+no_git() {
+  if [ -n "${BCL_CI_LEG:-}" ] || [ "${GITHUB_ACTIONS:-}" = true ]; then
+    echo "  FAIL: git not available on a CI leg; $1 did not run"; fail=1
+  else
+    echo "   SKIP (git not available)"
+  fi
+}
 
 echo "== 1. shell syntax (bash -n) =="
 while IFS= read -r f; do
@@ -21,6 +33,46 @@ echo "== 2. python sources compile =="
 for p in "$ROOT/hooks/lib/command_guard_match.py" "$ROOT/lib/merge_settings.py"; do
   "$PY" -m py_compile "$p" && echo "   ok $(basename "$p")" || { echo "  FAIL: py_compile $p"; fail=1; }
 done
+# The Python the hooks and the status tool carry as quoted heredocs (<<'...PY...') is
+# compiled too: a test only compiles the lines it reaches, and on the python-floor leg
+# this is what proves every body still parses on the oldest supported Python. The
+# minimum count stops a broken extraction from passing by compiling nothing.
+"$PY" - "$ROOT" <<'PY' || fail=1
+import re, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+start = re.compile(r"<<'([A-Za-z_]*PY[A-Za-z_]*)'")
+files = sorted(root.glob("hooks/**/*.sh")) + sorted(root.glob("tools/*.sh")) + [root / "install.sh"]
+n, bad = 0, 0
+for f in files:
+    # chr() rather than escapes: CRLF and LF only, as bash reads the file.
+    lines = f.read_bytes().decode("utf-8").replace(chr(13) + chr(10), chr(10)).split(chr(10))
+    i = 0
+    while i < len(lines):
+        m = start.search(lines[i])
+        if not m:
+            i += 1
+            continue
+        end = next((j for j in range(i + 1, len(lines)) if lines[j] == m.group(1)), None)
+        where = "%s:%d" % (f.relative_to(root).as_posix(), i + 1)
+        if end is None:
+            print("  FAIL: heredoc %s has no closing %s line" % (where, m.group(1)))
+            bad += 1
+            break
+        try:
+            compile(chr(10).join(lines[i + 1:end]), where, "exec")
+        except SyntaxError as exc:
+            print("  FAIL: embedded Python at %s does not compile: %s" % (where, exc))
+            bad += 1
+        n += 1
+        i = end + 1
+if n < 8:
+    print("  FAIL: found %d embedded Python heredocs, expected at least 8" % n)
+    bad += 1
+if not bad:
+    print("   ok %d embedded Python heredocs compile" % n)
+sys.exit(1 if bad else 0)
+PY
 
 echo "== 3. command-guard matcher + settings merge fixtures =="
 "$PY" "$ROOT/tests/test_command_guard.py" || fail=1
@@ -31,7 +83,7 @@ echo "== 4. hook integration suite =="
 if command -v git >/dev/null 2>&1; then
   bash "$ROOT/tests/test_hooks.sh" || fail=1
 else
-  echo "   SKIP (git not available)"
+  no_git test_hooks.sh
 fi
 
 echo "== 5. managed-settings + allowlist profiles (R6/R7) =="
@@ -64,7 +116,7 @@ echo "== 7. hot-path hook latency budgets =="
 if command -v git >/dev/null 2>&1; then
   bash "$ROOT/tests/test_latency.sh" || fail=1
 else
-  echo "   SKIP (git not available)"
+  no_git test_latency.sh
 fi
 
 echo "== 8. Hebrew translations in sync with the English docs =="
@@ -83,7 +135,7 @@ echo "== 9. policy-change release gate =="
 if command -v git >/dev/null 2>&1; then
   bash "$ROOT/tests/test_policy_gate.sh" || fail=1
 else
-  echo "   SKIP (git not available)"
+  no_git test_policy_gate.sh
 fi
 
 echo ""

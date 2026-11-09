@@ -18,6 +18,10 @@ PY="$(command -v python3 || command -v python || true)"
 [ -z "$PY" ] && { echo "python3 (or python) is required" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
 winpath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
+# The `"$PY" -` checks below assert with a bare `assert`, which PYTHONOPTIMIZE strips.
+unset PYTHONOPTIMIZE
+# skip / ci_expect: visible skips, and on CI the skips and pass count each leg expects.
+. "$SRC/tests/ci_expect.sh"
 
 STATUS="$SRC/tools/baseline-status.sh"
 COMMON="$SRC/hooks/lib/common.sh"
@@ -196,12 +200,15 @@ case "$(uname -s)" in Linux|Darwin)
   got="$(findings)"
   [ "$got" = "[] ['.claude/skills/shared/SKILL.md names the baseline hook directory']" ] && ok || no "symlinked skill folder not followed once: $got"
   rm -rf "$A/.claude/skills" "$TMP/shared-skill" ;;
+  *) skip symlinked-skill "symlinked skill folder: ln -s makes a real symbolic link only on Linux and macOS" ;;
 esac
 # a FIFO is not read (it would block). Exercised on Linux and macOS: Git Bash's mkfifo
 # makes a file native Python sees as a regular .lnk file, so there it is only listed.
 if mkfifo "$A/.claude/agents/pipe" 2>/dev/null; then
   got="$(findings)"
   [ "$got" = "[] []" ] && ok || no "a FIFO in .claude/agents should be skipped: $got"
+else
+  skip fifo "a FIFO in .claude/agents: mkfifo failed here"
 fi
 rm -rf "$A/.claude/agents"
 # A PreToolUse guard entry without onFailure "block" is reported, as config-guard reports
@@ -350,6 +357,19 @@ timeout -k 5 60 bash "$STATUS" --json "$OUT" "$A" >/dev/null 2>&1
 if "$PY" -c "import json,sys;r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0];sys.exit(0 if not any('disableAllHooks' in p for p in r['hookLaunchProblems']) else 1)" "$OUT"; then ok; else no "disableAllHooks=no is not reported"; fi
 cp "$TMP/aset.keep" "$ASET"
 
+# tests/ci_expect.sh judges every suite's skips and pass count on CI, so it is checked
+# here: each call runs in a subshell with its own skip list, leg and Actions flag.
+ce() { ( skip_ids="$1"; BCL_CI_LEG="$2"; GITHUB_ACTIONS="$3"; ci_expect test_status "$4" >/dev/null 2>&1 ); }
+ce "" ubuntu-latest "" 999 && ok || no "ci_expect: no skips, above the floor, must pass"
+ce " fifo" ubuntu-latest "" 999 && no "ci_expect: a skip the leg does not allow must fail" || ok
+ce " symlinked-skill" windows-latest "" 999 && ok || no "ci_expect: a skip the leg allows must pass"
+ce "" ubuntu-latest "" 1 && no "ci_expect: a pass count below the floor must fail" || ok
+ce "" no-such-leg "" 999 && no "ci_expect: a leg with no row must fail" || ok
+ce "" "" "" 0 && ok || no "ci_expect: a local run (no leg, not on Actions) is not judged"
+ce "" "" true 999 && no "ci_expect: GitHub Actions without BCL_CI_LEG must fail" || ok
+
+ci_expect test_status "$pass" || fail=$((fail + 1))
+
 echo ""
-echo "test_status: $pass passed, $fail failed"
+echo "test_status: $pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ] || exit 1

@@ -12,6 +12,12 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$(command -v python3 || command -v python || true)"
 [ -z "$PY" ] && { echo "python3 (or python) is required" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
+# Several checks below are `"$PY" -` scripts that assert with a bare `assert`, which
+# PYTHONOPTIMIZE strips: each would pass without checking anything. (The hooks start
+# their Python with -I, which ignores the variable, so only these checks need it gone.)
+unset PYTHONOPTIMIZE
+# skip / ci_expect: visible skips, and on CI the skips and pass count each leg expects.
+. "$SRC/tests/ci_expect.sh"
 
 # On Git Bash (Windows), Python is the native Windows interpreter and cannot open
 # MSYS '/tmp/...' paths, so feed Python a Windows-form path. On Linux/WSL/macOS,
@@ -224,7 +230,7 @@ case "$(uname -s)" in
     elif [ "${CI:-}" = true ]; then
       fail=$((fail + 1)); echo "  FAIL [8.3 row: no short name for .claude and fsutil could not set one on CI]"
     else
-      echo "  SKIP [8.3 row: no short name for .claude and fsutil could not set one here]"
+      skip short-name "8.3 row: no short name for .claude and fsutil could not set one here"
     fi
     # Every spelling Windows (or the Node/Bun runtimes) turns into a protected file.
     jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g'; }
@@ -259,7 +265,7 @@ case "$(uname -s)" in
         run "volume GUID, ordinary file -> 0"    modules/scope-guard.sh "$(def_payload Write "$(jesc "${vol%\\}${WTW:2}\\src\\vplain.md")" content "x")" 0 ;;
       *)
         if [ "${CI:-}" = true ]; then fail=$((fail + 1)); echo "  FAIL [volume GUID row: mountvol gave no volume name on CI]"
-        else echo "  SKIP [volume GUID row: mountvol gave no volume name here]"; fi ;;
+        else skip volume-guid "volume GUID row: mountvol gave no volume name here"; fi ;;
     esac
     run "remote UNC, protected text -> 2"        modules/scope-guard.sh "$(def_payload Write '\\\\no-such-host.invalid\\s\\.claude\\agents\\x.md' content "x")" 2
     run "remote UNC, ordinary -> 0"              modules/scope-guard.sh "$(def_payload Write '\\\\no-such-host.invalid\\s\\x.md' content "x")" 0
@@ -398,7 +404,7 @@ if command -v timeout >/dev/null 2>&1; then
   quiet_ok "matcher timeout: nothing on stdout"
   err_has "matcher timeout is reported" "exceeded its 5s budget"
 else
-  echo "  SKIP [matcher over its 5s budget: no timeout(1) on PATH]"
+  skip no-timeout "matcher over its 5s budget: no timeout(1) on PATH"
 fi
 setcfg "c['failClosed']=False"
 plant_matcher "raise SystemExit(3)"
@@ -584,7 +590,7 @@ l22_check() {  # l22_check <desc> <control command...>
   if [ -e "$GMARK" ]; then pass=$((pass + 1))
   else
     case "$(uname -s)" in
-      MINGW*|MSYS*|CYGWIN*) echo "  SKIP [$desc: plain git did not run the planted program on this Windows host]" ;;
+      MINGW*|MSYS*|CYGWIN*) skip planted-program "$desc: plain git did not run the planted program on this Windows host" ;;
       *) fail=$((fail + 1)); echo "  FAIL [$desc: control: plain git did not run the planted program, so the case proves nothing]" ;;
     esac
   fi
@@ -629,7 +635,7 @@ if git hook list post-index-change 2>/dev/null | tr -d '\r' | grep -qx l22; then
   printf 'n\n' > "$WT/l22f.txt"
   l22_check "config-based post-index-change hook: auto-stage's git add" git add -- l22f.txt
 else
-  echo "  SKIP [config-based hook: this git has no hook.<name>.* hooks ($(git --version))]"
+  skip config-hooks "config-based hook: this git has no hook.<name>.* hooks ($(git --version))"
 fi
 git config --remove-section hook.l22
 # Each configured hook is also switched off by name (git 2.54 has config-based hooks but
@@ -691,7 +697,7 @@ run "an added line that begins with ++ is checked -> 2" modules/fix-tags.sh "$(w
 git checkout -q -- l22pp.py
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    echo "  SKIP [a newline in a file name, and a file named *: not creatable on Windows]" ;;
+    skip newline-name "a newline in a file name, and a file named *: not creatable on Windows" ;;
   *)
     NLNAME="$(printf 'l22\nnl.py')"
     printf 'a = 1\n' > "$WT/$NLNAME"; git add -- "$NLNAME"; git commit -qm l22nl </dev/null
@@ -968,7 +974,7 @@ fi
 if [ -e "$WT/.claude/hooks/baseline/lib/common.sh" ]; then
   probe_is "a repo link to the managed tree leaves it managed" "$MH" "$SAFE"
 else
-  echo "  SKIP [repo link to the managed tree: neither ln -s nor mklink /J worked here]"
+  skip managed-link "repo link to the managed tree: neither ln -s nor mklink /J worked here"
 fi
 rm -rf "$WT/.claude/hooks/baseline" 2>/dev/null; [ -L "$WT/.claude/hooks/baseline" ] && rm -f "$WT/.claude/hooks/baseline"
 mv "$TMP/mprefix/installed.keep" "$WT/.claude/hooks/baseline"
@@ -1194,19 +1200,19 @@ if "$PY" -m venv --without-pip "$(winpath "$VENV")" >/dev/null 2>&1; then
   pth_runs=0; [ -e "$PMARK" ] && pth_runs=1; rm -f "$PMARK"
   vres="$(PATH="$VBIN:$PATH" bash -c '. "$1"; command -v "$(bcl_python)"' _ "$H/lib/common.sh" 2>/dev/null)"
   if [ "$pth_runs" != 1 ]; then
-    echo "  SKIP [venv .pth: the planted .pth file does not run in this venv]"
+    skip venv-pth-inert "venv .pth: the planted .pth file does not run in this venv"
   else
     case "$vres" in
       "$VBIN"/*)
         PL="$(bash_payload 'git push --force origin main')"
         plant_run "command-guard with a venv first on PATH" 2 "Blocked by Claude Code baseline command-guard" "$WT" \
           env PATH="$VBIN:$PATH" bash "$H/guardrails/command-guard.sh" ;;
-      *) echo "  SKIP [venv .pth: bcl_python resolves to ${vres:-nothing}, not the venv]" ;;
+      *) skip venv-pth-elsewhere "venv .pth: bcl_python resolves to ${vres:-nothing}, not the venv" ;;
     esac
   fi
   [ -n "$VSITE" ] && rm -f "$VSITE/zz_plant.pth"
 else
-  echo "  SKIP [venv .pth: python -m venv is unavailable here]"
+  skip no-venv "venv .pth: python -m venv is unavailable here"
 fi
 rm -f "$PMARK"; PL=""
 # An interpreter that is found but cannot run the helpers — a stub, a broken shim, one
@@ -2137,7 +2143,7 @@ mklink_dir() {
 # works, so failing to make one is a broken setup that would silently drop the coverage.
 no_link() {
   case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) echo "  SKIP [$1: no symbolic link could be made on this Windows host]" ;;
+    MINGW*|MSYS*|CYGWIN*) skip no-link "$1: no symbolic link could be made on this Windows host" ;;
     *) fail=$((fail + 1)); echo "  FAIL [$1: ln -s made no symbolic link on this host]" ;;
   esac
 }
@@ -2189,7 +2195,7 @@ else no_link "config link through a hop in .claude/hooks (no link naming the hop
 # exist only where `..` follows the link: Linux and macOS.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    echo "  SKIP [config link through d/.. and through a replaced sub-directory: Windows resolves .. lexically]" ;;
+    skip dotdot-lexical "config link through d/.. and through a replaced sub-directory: Windows resolves .. lexically" ;;
   *)
     R="$(m9repo cfgdotdot)"; mkdir -p "$R/.claude/hooks/baseline/deep"; printf '{}\n' > "$R/.claude/hooks/baseline/x.json"
     if mklink_dir "$R/.claude/hooks/baseline/deep" "$R/.claude/d" && mklink_file "$R/.claude/d/../x.json" "$R/.claude/baseline.config.json"; then
@@ -2240,7 +2246,7 @@ R="$(m9repo mode)"; printf '{"model": "x"}\n' > "$R/.claude/settings.json"
 inst "$R"
 ok_if "no merge temp file is left behind (rc=$IRC)" '[ "$IRC" = 0 ] && [ -z "$(ls -A "$R/.claude" | grep "^\.settings\.merge\.")" ]'
 case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*) echo "  SKIP [merged settings.json mode: Windows has no Unix modes]" ;;
+  MINGW*|MSYS*|CYGWIN*) skip unix-modes "merged settings.json mode: Windows has no Unix modes" ;;
   *) ok_if "the merged settings.json gets a new file's mode, not mktemp's 0600" '[ "$("$PY" -c "import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))" "$R/.claude/settings.json")" = "$("$PY" -c "import os;u=os.umask(0);print(oct(0o666 & ~u))")" ]' ;;
 esac
 
@@ -2351,6 +2357,8 @@ rm -rf "$VTARGET"; mkdir -p "$VTARGET"; ( cd "$VTARGET" && git init -q )
 out="$(PATH="$VBIN:$PATH" timeout -k 5 120 bash "$SRC/install.sh" --target "$(winpath "$VTARGET")" --dry-run 2>&1 </dev/null)"
 if printf '%s' "$out" | grep -qF "Claude Code v$PIN detected"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [marker anchoring picks Claude Code semver]"; fi
 
+ci_expect test_hooks "$pass" || fail=$((fail + 1))
+
 echo ""
-echo "test_hooks: $pass passed, $fail failed"
+echo "test_hooks: $pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ] || exit 1

@@ -1209,7 +1209,8 @@ def _split_inline_script(toks):
                 # rules again.
                 walked_script = "env " + script.replace("\\_", " ")   # GNU: \_ is a space
                 if toks[end:]:
-                    walked_script += " " + shlex.join(toks[end:])
+                    # shlex.join is 3.8+; this is its body, for the 3.7 floor.
+                    walked_script += " " + " ".join(shlex.quote(t) for t in toks[end:])
                 extras.append(walked_script)
             loose = _env_split_loose(toks, i)
             if loose:

@@ -16,6 +16,8 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -51,7 +53,7 @@ HE = """<div dir="rtl">
 # מדריך
 
 <!-- he-note:start -->
-הערת מתרגם עם `SOMETHING-ONLY-IN-HEBREW`.
+הערת מתרגם, בלי מקבילה באנגלית, עם `install.sh`.
 <!-- he-note:end -->
 
 פתיחה עם `install.sh`.
@@ -144,6 +146,13 @@ def run_cmd(root: Path, *argv: str) -> int:
         return ts.main(["--root", str(root), *argv])
 
 
+def check(cond: bool, msg: str = "") -> None:
+    # Not `assert`: python -O and PYTHONOPTIMIZE strip asserts, and every case would
+    # then pass without checking anything. main() also refuses to run optimized.
+    if not cond:
+        raise AssertionError(msg)
+
+
 CASES = []
 
 
@@ -156,7 +165,7 @@ def case(fn):
 def clean_pair_passes(root):
     build(root)
     rc, out = run_check(root)
-    assert rc == 0, out
+    check(rc == 0, out)
 
 
 @case
@@ -165,8 +174,8 @@ def english_edit_fails_and_names_the_section(root):
     en = (root / "ONBOARDING.md").read_text(encoding="utf-8").replace("never.", "never, ever.")
     (root / "ONBOARDING.md").write_bytes(en.encode("utf-8"))
     rc, out = run_check(root)
-    assert rc == 1 and "section 'part-1--basics': the English text changed" in out, out
-    assert "preamble" not in out, "an unrelated section was reported:\n" + out
+    check(rc == 1 and "section 'part-1--basics': the English text changed" in out, out)
+    check("preamble" not in out, "an unrelated section was reported:\n" + out)
 
 
 @case
@@ -174,86 +183,192 @@ def mark_stale_passes_with_visible_banner_then_stamp_removes_it(root):
     build(root)
     en = (root / "ONBOARDING.md").read_text(encoding="utf-8").replace("never.", "never, ever.")
     (root / "ONBOARDING.md").write_bytes(en.encode("utf-8"))
-    assert run_cmd(root, "mark-stale", "ONBOARDING.he.md", "part-1--basics") == 0
+    check(run_cmd(root, "mark-stale", "ONBOARDING.he.md", "part-1--basics") == 0)
     he = (root / "ONBOARDING.he.md").read_text(encoding="utf-8")
-    assert ts.STALE_MARK in he and "ייתכן שהסעיף הזה לא מעודכן" in he, he
+    check(ts.STALE_MARK in he and "ייתכן שהסעיף הזה לא מעודכן" in he, he)
     rc, out = run_check(root)
-    assert rc == 0 and "possibly outdated" in out and "part-1--basics" in out, out
-    assert run_cmd(root, "stamp", "ONBOARDING.he.md", "part-1--basics") == 0
+    check(rc == 0 and "possibly outdated" in out and "part-1--basics" in out, out)
+    check(run_cmd(root, "stamp", "ONBOARDING.he.md", "part-1--basics") == 0)
     he = (root / "ONBOARDING.he.md").read_text(encoding="utf-8")
-    assert ts.STALE_MARK not in he and "ייתכן" not in he, he
+    check(ts.STALE_MARK not in he and "ייתכן" not in he, he)
     rc, out = run_check(root)
-    assert rc == 0 and "possibly outdated" not in out, out
+    check(rc == 0 and "possibly outdated" not in out, out)
 
 
 @case
 def altered_command_block_fails(root):
     build(root, he=HE.replace("| bash hook.sh\n```", "| bash other.sh\n```"))
     rc, out = run_check(root)
-    assert rc == 1 and "bash block missing or altered" in out and "not in the English" in out, out
+    check(rc == 1 and "bash block missing or altered" in out and "not in the English" in out, out)
 
 
 @case
 def dropped_inline_command_fails(root):
     build(root, he=HE.replace("`git push --force`", "push בכוח"))
     rc, out = run_check(root)
-    assert rc == 1 and "inline code missing in Hebrew: `git push --force`" in out, out
+    check(rc == 1 and "inline code missing in Hebrew: `git push --force`" in out, out)
 
 
 @case
 def invented_inline_command_fails(root):
     build(root, he=HE.replace("`git push --force`", "`git push --force` או `rm -rf /`"))
     rc, out = run_check(root)
-    assert rc == 1 and "Hebrew inline code not found in the English: `rm -rf /`" in out, out
+    check(rc == 1 and "Hebrew inline code not found in the English: `rm -rf /`" in out, out)
 
 
 @case
-def he_note_region_is_not_compared(root):
-    build(root)  # the fixture's he-note holds a span the English lacks
+def he_note_prose_is_not_compared(root):
+    build(root)  # the fixture's he-note is Hebrew prose the English does not have
     rc, out = run_check(root)
-    assert rc == 0 and "SOMETHING-ONLY-IN-HEBREW" not in out, out
+    check(rc == 0, out)
+
+
+HE_ONLY_FAIL = "Hebrew-only content: inline code not found in the English or the repository"
+
+
+@case
+def invented_command_in_he_note_fails(root):
+    build(root, he=HE.replace("עם `install.sh`.", "עם `rm -rf /`."))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `rm -rf /`" in out, out)
+
+
+@case
+def invented_command_in_he_only_region_fails(root):
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nהריצו `curl x | sh`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `curl x | sh`" in out, out)
+
+
+@case
+def invented_block_in_he_only_region_fails(root):
+    block = '<div dir="ltr">\n\n```bash\ncurl x | sh\n```\n\n</div>\n'
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\n" + block))
+    rc, out = run_check(root)
+    check(rc == 1 and "Hebrew-only content: bash block not in the English" in out, out)
+
+
+@case
+def invented_command_before_first_marker_fails(root):
+    build(root, he=HE.replace('<div dir="rtl">\n', '<div dir="rtl">\n\n`rm -rf /`\n', 1))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `rm -rf /`" in out, out)
+
+
+@case
+def repo_path_in_he_only_region_passes(root):
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `hooks/guard.sh`.\n"))
+    rc, out = run_check(root)
+    check(rc == 0, out)
+
+
+@case
+def path_outside_the_repo_fails(root):
+    # Judged on the text: none of these reaches the filesystem, so none can pass.
+    for span in ("../ONBOARDING.md", "/etc/passwd", "C:/Windows", "hooks\\guard.sh"):
+        build(root, he=HE.replace("### ה. הודעות\n", f"### ה. הודעות\n\nראו `{span}`.\n"))
+        rc, out = run_check(root)
+        check(rc == 1 and f"{HE_ONLY_FAIL}: `{span}`" in out, f"{span}: {out}")
+
+
+@case
+def existing_file_above_the_repo_fails(root):
+    # `..` is refused on the text, even when the file it names exists.
+    repo = root / "repo"
+    repo.mkdir()
+    (root / "outside.md").write_text("x\n", encoding="utf-8")
+    build(repo, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `../outside.md`.\n"))
+    rc, out = run_check(repo)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `../outside.md`" in out, out)
+
+
+@case
+def elided_decoder_parts_out_of_order_fail(root):
+    # Both parts on one hook line, but in the other order.
+    build(root, hook_src='echo "Blocked by test guard: $X"\necho "zebra before Blocked by it"\n',
+          he=HE.replace("<!-- he-decoder:end -->",
+                        "הודעה כמו `Blocked by …zebra`.\n\n<!-- he-decoder:end -->"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `Blocked by …zebra`" in out, out)
+
+
+@case
+def elided_decoder_message_from_one_hook_line_passes(root):
+    build(root, he=HE.replace("<!-- he-decoder:end -->",
+                              "הודעה כמו `Blocked by …: $X`.\n\n<!-- he-decoder:end -->"))
+    rc, out = run_check(root)
+    check(rc == 0, out)
+
+
+@case
+def elided_decoder_parts_on_different_lines_fail(root):
+    # Each part is in the hook source, but not in order on one line.
+    build(root, hook_src='echo "Blocked by test guard: $X"\necho "elsewhere: zebra"\n',
+          he=HE.replace("<!-- he-decoder:end -->",
+                        "הודעה כמו `Blocked by …zebra`.\n\n<!-- he-decoder:end -->"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `Blocked by …zebra`" in out, out)
+
+
+@case
+def hook_source_outside_the_decoder_table_fails(root):
+    # Quoting the hook source is allowed only inside the table that decodes it.
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `$X`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `$X`" in out, out)
+
+
+@case
+def refuses_to_run_with_assertions_disabled(root):
+    if os.environ.get("BCL_TS_OPT_PROBE"):
+        return  # this is the probe child itself; the parent judges it
+    env = dict(os.environ, BCL_TS_OPT_PROBE="1")
+    r = subprocess.run([sys.executable, "-O", str(Path(__file__).resolve())], env=env,
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    check(r.returncode == 1 and "assertions are disabled" in r.stdout,
+          f"rc={r.returncode} out={r.stdout[-400:]!r} err={r.stderr[-400:]!r}")
 
 
 @case
 def bidi_control_character_fails(root):
-    build(root, he=HE.replace("`git push --force`", "`git push ‮--force`"))
+    build(root, he=HE.replace("`git push --force`", "`git push \u202e--force`"))
     rc, out = run_check(root)
-    assert rc == 1 and "bidirectional-control characters" in out, out
+    check(rc == 1 and "bidirectional-control characters" in out, out)
 
 
 @case
 def missing_ltr_wrapper_fails(root):
     build(root, he=HE.replace('<div dir="ltr">\n\n```bash', "```bash"))
     rc, out = run_check(root)
-    assert rc == 1 and "not wrapped in <div dir=\"ltr\">" in out, out
+    check(rc == 1 and "not wrapped in <div dir=\"ltr\">" in out, out)
 
 
 @case
 def missing_rtl_wrapper_fails(root):
     build(root, he=HE.replace('<div dir="rtl">\n', "", 1))
     rc, out = run_check(root)
-    assert rc == 1 and 'first line must be <div dir="rtl">' in out, out
+    check(rc == 1 and 'first line must be <div dir="rtl">' in out, out)
 
 
 @case
 def broken_anchor_fails(root):
     build(root, he=HE.replace("ONBOARDING.md#part-1--basics", "ONBOARDING.md#part-1-basics"))
     rc, out = run_check(root)
-    assert rc == 1 and "anchor not found in ONBOARDING.md: #part-1-basics" in out, out
+    check(rc == 1 and "anchor not found in ONBOARDING.md: #part-1-basics" in out, out)
 
 
 @case
 def broken_local_anchor_fails(root):
     build(root, he=HE.replace("(#ה-הודעות)", "(#ה-הודעה)"))
     rc, out = run_check(root)
-    assert rc == 1 and "anchor not found in this file" in out, out
+    check(rc == 1 and "anchor not found in this file" in out, out)
 
 
 @case
 def decoder_message_gone_from_source_fails(root):
     build(root, hook_src='echo "Refused by test guard: $X"\n')
     rc, out = run_check(root)
-    assert rc == 1 and "decoder message no longer in the hook source" in out, out
+    check(rc == 1 and "decoder message no longer in the hook source" in out, out)
 
 
 @case
@@ -261,7 +376,7 @@ def untranslated_english_section_fails(root):
     en = EN.replace("## Appendix", "## New part\n\nNew text.\n\n## Appendix")
     build(root, en=en)
     rc, out = run_check(root)
-    assert rc == 1 and "English section 'new-part' has no Hebrew translation marker" in out, out
+    check(rc == 1 and "English section 'new-part' has no Hebrew translation marker" in out, out)
 
 
 @case
@@ -270,7 +385,7 @@ def renamed_english_heading_fails(root):
     en = (root / "ONBOARDING.md").read_text(encoding="utf-8").replace("Part 1 — Basics", "Part 1 — Basic")
     (root / "ONBOARDING.md").write_bytes(en.encode("utf-8"))
     rc, out = run_check(root)
-    assert rc == 1 and "marker 'part-1--basics': no such English section" in out, out
+    check(rc == 1 and "marker 'part-1--basics': no such English section" in out, out)
 
 
 @case
@@ -279,19 +394,23 @@ def crlf_and_bom_hash_the_same_as_lf(root):
     lf = (root / "ONBOARDING.md").read_bytes()
     (root / "ONBOARDING.md").write_bytes(b"\xef\xbb\xbf" + lf.replace(b"\n", b"\r\n"))
     rc, out = run_check(root)
-    assert rc == 0, "a Windows checkout (CRLF/BOM) must not read as drift:\n" + out
+    check(rc == 0, "a Windows checkout (CRLF/BOM) must not read as drift:\n" + out)
 
 
 @case
 def readme_partial_translation_is_allowed(root):
     build(root)  # README.he.md translates only the "Limits" section, and that is fine
     rc, out = run_check(root)
-    assert rc == 0, out
+    check(rc == 0, out)
 
 
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
+    if sys.flags.optimize:
+        print("  FAIL assertions are disabled (python -O / PYTHONOPTIMIZE): a case that"
+              " used a bare assert would pass without checking anything")
+        return 1
     failed = 0
     for fn in CASES:
         with tempfile.TemporaryDirectory() as tmp:

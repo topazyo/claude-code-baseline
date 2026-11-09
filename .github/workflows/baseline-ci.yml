@@ -53,6 +53,36 @@ jobs:
         # verified it: the interpreter-resolution and CRLF defects were both
         # Windows-only and both reached main.
         shell: bash
+        # Names this leg for tests/ci_expect.sh, which checks each suite's skips and
+        # pass count against what this runner is expected to produce.
+        env:
+          BCL_CI_LEG: ${{ matrix.os }}
+        run: bash tests/run.sh
+
+  # The docs and install.sh accept Python 3.7, and the job above only ever sees the
+  # newest 3.x. A 3.8+ API (shlex.join) and a runtime `list[str]` both reached main
+  # that way, so the whole suite also runs on the oldest Python it claims to support.
+  # 3.7 builds exist for ubuntu-22.04 x64 only (actions/python-versions manifest; there
+  # is no Windows 3.7 build), hence the pinned image. When ubuntu-22.04 is retired,
+  # raise the documented floor (README, install.sh) to the oldest version setup-python
+  # still ships for a supported image, or run this job in a container, and rename it.
+  python-floor:
+    name: Python floor (3.7)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.7"
+      - name: Confirm the suite will run on Python 3.7
+        # Without this a resolution change could quietly test the image's own Python.
+        shell: bash
+        run: |
+          python3 -c 'import sys; print(sys.version); sys.exit(sys.version_info[:2] != (3, 7))'
+      - name: Run baseline test suite
+        shell: bash
+        env:
+          BCL_CI_LEG: python-floor
         run: bash tests/run.sh
 
 # The policy-change release gate lives in policy-gate.yml, which runs on
