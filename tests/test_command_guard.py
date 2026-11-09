@@ -1595,17 +1595,30 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 REASON_FLOOR = 31
 
 
+def _str_value(node):
+    """The text of a str literal node, else None. Python 3.7 parses str literals as
+    ast.Str (removed in 3.14), 3.8+ as ast.Constant; the suite runs on both."""
+    import ast
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if sys.version_info < (3, 8) and isinstance(node, ast.Str):
+        return node.s
+    return None
+
+
 def _str_shape(node):
     """(text, is_exact) for a str literal or the constant head of an f-string, else None."""
     import ast
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value, True
+    text = _str_value(node)
+    if text is not None:
+        return text, True
     if isinstance(node, ast.JoinedStr):
         head = ""
         for v in node.values:
-            if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
+            part = _str_value(v)
+            if part is None:
                 break
-            head += v.value
+            head += part
         return head, False
     return None
 

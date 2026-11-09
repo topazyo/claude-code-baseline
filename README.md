@@ -382,6 +382,8 @@ and stops before writing anything unless it runs, prints nothing else on stdout,
 and is 3.7+. The check sees the
 installer's `PATH`; if Claude Code runs with a different one, whatever the hooks
 resolve there must pass too. Designed to run under WSL, Git Bash, and macOS/Linux shells.
+CI runs the full test suite on Linux and Windows, each with its oldest supported Python
+and with the newest 3.x.
 `.gitattributes` pins shipped shell scripts to LF so a contributor's `autocrlf`
 cannot publish a CRLF hook, and value extraction inside the hooks strips `\r`
 defensively.

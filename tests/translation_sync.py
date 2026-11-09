@@ -39,6 +39,13 @@ What `check` verifies, per Hebrew file
   5. every inline code span of the English section appears in the Hebrew section,
      and every Hebrew inline code span is a substring of the English section, so a
      translation can neither drop a command nor invent one;
+  5a. content that exists only in Hebrew (before the first marker, he-only regions,
+     he-note boxes) is not compared with a section, but it cannot invent a command
+     either: each inline code span is in the English file or names an existing file in
+     the repository (judged on the text first: no absolute, drive, backslash or `..`
+     path), and inside the he-decoder table it may also quote one line of the hook
+     source (an elided message's parts in order on that line); each fenced block is a
+     block of the English file;
   6. no bidirectional-control characters anywhere (U+200E/F, U+202A-E, U+2066-9,
      U+061C): inside a command they are a copy-paste hazard ("Trojan Source");
   7. the file is wrapped in <div dir="rtl"> and every fenced block in
@@ -53,11 +60,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 import unicodedata
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # (Hebrew file, English source, every English section must be translated?)
 PAIRS: list[tuple[str, str, bool]] = [
@@ -70,8 +78,11 @@ MARKER_RE = re.compile(r"^<!-- he-sync: (\S+) sha256=([0-9a-f]+|PENDING) -->$")
 HE_ONLY_RE = re.compile(r"^<!-- he-only\b.*-->$")
 STALE_MARK = "<!-- he-stale -->"
 HE_NOTE_RE = re.compile(r"<!-- he-note:start -->.*?<!-- he-note:end -->", re.DOTALL)
+DECODER_RE = re.compile(r"<!-- he-decoder:start -->(.*?)<!-- he-decoder:end -->", re.DOTALL)
+ELLIPSIS = "…"  # U+2026: the decoder table elides the variable part of a message with it
+REPO_PATH_RE = re.compile(r"[A-Za-z0-9._/-]*[A-Za-z0-9][A-Za-z0-9._/-]*")
 FENCE_RE = re.compile(r"^(?:>\s?)*\s*(```+)(.*)$")
-BIDI_RE = re.compile("[‎‏‪-‮⁦-⁩؜]")
+BIDI_RE = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c]")
 QUOTE_PREFIX_RE = re.compile(r"^(?:\s*>\s?)+", re.MULTILINE)
 SPAN_RE = re.compile(r"(`+)(.+?)\1", re.DOTALL)
 LINK_RE = re.compile(r"\]\(([^)\s]*)\)")
@@ -241,10 +252,8 @@ def check_links(he_path: Path, he_text: str, root: Path) -> list[str]:
     return problems
 
 
-def check_decoder(he_text: str, root: Path) -> list[str]:
-    m = re.search(r"<!-- he-decoder:start -->(.*?)<!-- he-decoder:end -->", he_text, re.DOTALL)
-    if not m:
-        return []
+def hook_corpus(root: Path) -> str:
+    """The hook source the decoder table quotes (hooks/ *.sh and *.py, install.sh)."""
     corpus_parts = []
     for name in DECODER_SOURCES:
         path = root / name
@@ -252,7 +261,14 @@ def check_decoder(he_text: str, root: Path) -> list[str]:
             p for p in path.rglob("*") if p.is_file() and p.suffix in (".sh", ".py")
         )
         corpus_parts += [read_text(p) for p in files]
-    corpus = "\n".join(corpus_parts)
+    return "\n".join(corpus_parts)
+
+
+def check_decoder(he_text: str, root: Path) -> list[str]:
+    m = DECODER_RE.search(he_text)
+    if not m:
+        return []
+    corpus = hook_corpus(root)
     problems, checked = [], 0
     for line in m.group(1).split("\n"):
         if not line.startswith("|") or re.match(r"^\|[\s:|-]+\|?$", line):
@@ -269,6 +285,101 @@ def check_decoder(he_text: str, root: Path) -> list[str]:
     return problems
 
 
+def hebrew_only_regions(he_text: str) -> list[str]:
+    """Text that exists only in Hebrew, so no English section is compared against it:
+    what precedes the first he-sync marker, each he-only region (to the next marker or
+    the end of the file), and each he-note box."""
+    lines = he_text.split("\n")
+    markers = [i for i, line in enumerate(lines) if MARKER_RE.match(line)]
+    regions = ["\n".join(lines[: markers[0] if markers else len(lines)])]
+    for i, line in enumerate(lines):
+        if HE_ONLY_RE.match(line):
+            end = next((j for j in markers if j > i), len(lines))
+            regions.append("\n".join(lines[i + 1 : end]))
+    regions += HE_NOTE_RE.findall(he_text)
+    return regions
+
+
+def is_repo_path(root: Path, span: str) -> bool:
+    """A relative path inside the repository that exists. Judged on the text first, so a
+    span that is absolute, anchored, has a drive, a backslash (a UNC or Windows path) or
+    a `..` part never reaches the filesystem; the character set rules out the rest."""
+    if not REPO_PATH_RE.fullmatch(span):
+        return False
+    if PurePosixPath(span).is_absolute() or PureWindowsPath(span).anchor:
+        return False
+    parts = PurePosixPath(span).parts
+    if ".." in parts:
+        return False
+    # Walk it with exact case, so a case-insensitive filesystem (Windows, macOS) does
+    # not accept a path that CI's Linux checkout would refuse.
+    here = root
+    for part in parts:
+        if part == ".":
+            continue
+        try:
+            if part not in os.listdir(here):
+                return False
+        except OSError:
+            return False
+        here = here / part
+    return True
+
+
+def in_hook_line(span: str, corpus_lines: list[str]) -> bool:
+    """The span occurs in one line of the hook source. An elided message (`Blocked by …:`)
+    matches when its parts occur in that order within a single line."""
+    parts = [p for p in span.split(ELLIPSIS) if p]
+    # At least one part with substance: `…:` or `a…b` would match almost any line.
+    if not any(len("".join(p.split())) >= 3 for p in parts):
+        return False
+    for line in corpus_lines:
+        pos = 0
+        for part in parts:
+            k = line.find(part, pos)
+            if k < 0:
+                break
+            pos = k + len(part)
+        else:
+            return True
+    return False
+
+
+def check_hebrew_only(he_text: str, en_text: str, root: Path) -> list[str]:
+    """Hebrew-only content is not a translation, but it may not invent a command either:
+    every code span in it comes from the English file or names a file in the repository,
+    and inside the he-decoder table it may also quote the hook source the table decodes.
+    Every fenced block in it is a block of the English file."""
+    en_flat = normalize_ws(en_text)
+    en_blocks = fenced_blocks(en_text)
+    en_tagged = {b for b in en_blocks if b[0]}
+    en_untagged = {b[1] for b in en_blocks if not b[0]}
+    corpus_lines: list[str] | None = None
+    problems: list[str] = []
+    for region in hebrew_only_regions(he_text):
+        pieces = [(DECODER_RE.sub("", region), False)]
+        pieces += [(table, True) for table in DECODER_RE.findall(region)]
+        for text, in_decoder in pieces:
+            for span in inline_spans(text):
+                if span in en_flat or is_repo_path(root, span):
+                    continue
+                if in_decoder:
+                    if corpus_lines is None:
+                        # whitespace collapsed as inline_spans collapses it in the span
+                        corpus_lines = [re.sub(r"\s+", " ", x) for x in hook_corpus(root).split("\n")]
+                    if in_hook_line(span, corpus_lines):
+                        continue
+                problems.append(
+                    f"Hebrew-only content: inline code not found in the English or the repository: `{span}`"
+                )
+            for tag, body in fenced_blocks(text):
+                if (tag and (tag, body) not in en_tagged) or (not tag and body not in en_untagged):
+                    problems.append(
+                        f"Hebrew-only content: {tag or 'untagged'} block not in the English: {body[:60]!r}"
+                    )
+    return list(dict.fromkeys(problems))
+
+
 def check_pair(root: Path, he_name: str, en_name: str, complete: bool) -> tuple[list[str], list[str]]:
     he_path, en_path = root / he_name, root / en_name
     if not he_path.exists():
@@ -283,6 +394,7 @@ def check_pair(root: Path, he_name: str, en_name: str, complete: bool) -> tuple[
     problems += check_direction(he_text)
     problems += check_links(he_path, he_text, root)
     problems += check_decoder(he_text, root)
+    problems += check_hebrew_only(he_text, en_text, root)
 
     sections = hebrew_sections(he_text)
     if not sections:

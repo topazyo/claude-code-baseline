@@ -202,6 +202,9 @@ a fixture in `tests/` before bumping the pin.
 - [ ] **Bump `FP_FLOOR`:** if `test_command_guard.py`'s run printed `allow-floor stale by N`,
       raise `FP_FLOOR` to the printed allow count before release (the floor is a non-shrink
       corpus floor, not a field-FP rate — see `tests/README.md`).
+- [ ] **Raise the CI pass floors:** if a CI leg's log printed `floor stale by N` for a
+      suite, raise that leg's floor in `tests/ci_expect.sh` to the printed count, so a
+      block of cases that later stops running cannot hide behind the cases added since.
 - [ ] `install.sh --dry-run` against a scratch repo completes and prints the version line.
 - [ ] **`baselineVersion` lockstep:** `baseline.config.json → baselineVersion` equals
       `hooks/VERSION` (`tests/run.sh` step 6 asserts this — a mismatch makes

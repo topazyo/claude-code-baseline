@@ -53,6 +53,55 @@ jobs:
         # verified it: the interpreter-resolution and CRLF defects were both
         # Windows-only and both reached main.
         shell: bash
+        # Names this leg for tests/ci_expect.sh, which checks each suite's skips and
+        # pass count against what this runner is expected to produce.
+        env:
+          BCL_CI_LEG: ${{ matrix.os }}
+        run: bash tests/run.sh
+
+  # The job above only ever sees the newest 3.x. A 3.8+ API (shlex.join) and a
+  # runtime `list[str]` both reached main that way, so the whole suite also runs on
+  # the oldest Python each operating system is supported on: 3.7 on Linux, 3.8 on
+  # Windows. In the actions/python-versions manifest the Linux 3.7 builds are for
+  # ubuntu-22.04 x64 only (3.7.17), hence that image. When ubuntu-22.04 is retired,
+  # raise the documented floor (README, install.sh) to the oldest version setup-python
+  # still ships for a supported image, or run that leg in a container.
+  python-floor:
+    name: Python floor (${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.7"
+          - os: windows-latest
+            python: "3.8"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Confirm the suite will run on the floor version
+        # run.sh and the hooks take python3, else python, from PATH. Each of the two
+        # that resolves must be the floor version, or this leg would quietly test
+        # another Python.
+        shell: bash
+        env:
+          WANT: ${{ matrix.python }}
+        run: |
+          found=0
+          for py in python3 python; do
+            command -v "$py" >/dev/null 2>&1 || continue
+            found=1
+            echo "$py -> $(command -v "$py")"
+            "$py" -c 'import os, sys; print(sys.version); sys.exit("%d.%d" % sys.version_info[:2] != os.environ["WANT"])' || exit 1
+          done
+          [ "$found" = 1 ]
+      - name: Run baseline test suite
+        shell: bash
+        env:
+          BCL_CI_LEG: python-floor-${{ matrix.os }}
         run: bash tests/run.sh
 
 # The policy-change release gate lives in policy-gate.yml, which runs on

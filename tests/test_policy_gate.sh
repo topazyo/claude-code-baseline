@@ -22,6 +22,8 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
 GATE="${POLICY_GATE_UNDER_TEST:-$SRC/tests/policy-change-gate.sh}"
 [ -s "$GATE" ] || { echo "gate script not found: $GATE" >&2; exit 1; }
+# skip / ci_expect: visible skips, and on CI the skips and pass count each leg expects.
+. "$SRC/tests/ci_expect.sh"
 winpath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
 
 TMP="$(mktemp -d)"
@@ -181,7 +183,7 @@ begin; touchf tests/re.py; commit
 expect 1 "$NOFIX" "a new module under tests/ (it would shadow the stdlib for the suites)"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    echo "   SKIP: newline in a file name (not creatable on Windows)" ;;
+    skip newline-name "newline in a file name (not creatable on Windows)" ;;
   *)
     begin; touchf "hooks/README.md
 x"; commit
@@ -189,7 +191,7 @@ x"; commit
 esac
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Darwin*)
-    echo "   SKIP: invalid-UTF-8 file name (refused by NTFS and APFS)" ;;
+    skip invalid-utf8-name "invalid-UTF-8 file name (refused by NTFS and APFS)" ;;
   *)
     begin; touchf "hooks/modules/$(printf '\377').sh"; commit
     expect 1 "$NOFIX" "an invalid-UTF-8 path under hooks/ is still classified" ;;
@@ -227,6 +229,8 @@ begin; touchf README.md; commit
 git checkout -q main; touchf hooks/lib/common.sh; commit; git checkout -q "case$n"
 expect 0 "$NA" "policy commits on the base after the fork are not this branch's"
 
+ci_expect test_policy_gate "$pass" || fail=$((fail + 1))
+
 echo ""
-echo "test_policy_gate: $pass passed, $fail failed"
+echo "test_policy_gate: $pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ] || exit 1

@@ -108,9 +108,14 @@ if strict is not None:
         fails.append("strict: allowManagedHooksOnly must be true")
     if strict.get("allowManagedPermissionRulesOnly") is not True:
         fails.append("strict: allowManagedPermissionRulesOnly must be true")
+    # Exactly the four surfaces Claude Code knows. It silently ignores an unknown name,
+    # so a misspelling ("skill") would leave that surface open while the profile reads
+    # as locked down; a missing one leaves it open too.
     spc = strict.get("strictPluginOnlyCustomization")
-    if not isinstance(spc, list) or not spc:
-        fails.append("strict: strictPluginOnlyCustomization must be a non-empty array")
+    want_spc = ["agents", "hooks", "mcp", "skills"]
+    if (not isinstance(spc, list) or not all(isinstance(x, str) for x in spc)
+            or sorted(spc) != want_spc):
+        fails.append(f"strict: strictPluginOnlyCustomization must be exactly {want_spc} (any order), got {spc!r}")
 
 # R7 allowlist-primary profile
 allowlist = load("managed/allowlist.example.json")

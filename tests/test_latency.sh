@@ -27,6 +27,8 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$(command -v python3 || command -v python || true)"
 [ -z "$PY" ] && { echo "python3 (or python) is required" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
+# skip / ci_expect: visible skips, and on CI the skips and pass count each leg expects.
+. "$SRC/tests/ci_expect.sh"
 
 # Same Git Bash shim as test_hooks.sh: Windows Python cannot open MSYS '/tmp/...'
 # paths, so anything Python or a payload will see gets the Windows form.
@@ -52,11 +54,13 @@ case "$probe" in
 esac
 if [ -z "$probe" ]; then
   echo "== hot-path hook latency =="
-  echo "   SKIP: 'date +%s%N' does not provide nanosecond precision on this host"
+  skip no-ns-clock "'date +%s%N' does not provide nanosecond precision on this host"
   echo "         (BSD/macOS date prints a literal 'N'). Install GNU coreutils to"
   echo "         enable the latency gate; nothing here is asserted meanwhile."
+  # A CI leg expects the clock: skipping the whole gate there must fail, not pass.
+  ci_expect test_latency 0 || { echo ""; echo "test_latency: 0 passed, 1 failed, 1 skipped"; exit 1; }
   echo ""
-  echo "test_latency: 0 passed, 0 failed (skipped: no nanosecond clock)"
+  echo "test_latency: 0 passed, 0 failed, 1 skipped (no nanosecond clock)"
   exit 0
 fi
 
@@ -232,6 +236,8 @@ measure "scope-guard.sh"       modules/scope-guard.sh       "$P_SCOPE"  "$BUDGET
 measure "scope-guard.sh, agent file" modules/scope-guard.sh "$P_DEF"  "$BUDGET_SCOPE_GUARD"   2
 measure "config-guard.sh"      modules/config-guard.sh      "$P_CONFIG" "$BUDGET_CONFIG_GUARD"  0
 
+ci_expect test_latency "$pass" || fail=$((fail + 1))
+
 echo ""
-echo "test_latency: $pass passed, $fail failed"
+echo "test_latency: $pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ] || exit 1
