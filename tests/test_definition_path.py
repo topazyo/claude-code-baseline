@@ -278,6 +278,42 @@ with tempfile.TemporaryDirectory(prefix="DefPathUC") as tmp:
             else:
                 os.environ[k] = v
 
+# --- Windows needs Python 3.8+: the check refuses on an older Windows interpreter ---
+old_nt = D["_d_old_nt"]
+for name, ver, want in [
+        ("nt", (3, 7, 9, "final", 0), True),
+        ("nt", (3, 7), True),
+        ("nt", (3, 8, 0, "final", 0), False),
+        ("nt", (3, 8, 10, "final", 0), False),
+        ("nt", (3, 15, 2, "final", 0), False),
+        ("posix", (3, 7, 17, "final", 0), False),
+        ("posix", (3, 6), False)]:
+    check(f"_d_old_nt({name!r}, {ver[:3]})", old_nt(name, ver), want)
+# Computed here, not by the code under test: is this host an old Windows Python?
+check("the flag reflects this interpreter", D["_D_OLD_NT"],
+      os.name == "nt" and sys.version_info < (3, 8))
+verdict_fn = D["bcl_definition_verdict"]
+saved_flag = D["_D_OLD_NT"]
+D["_D_OLD_NT"] = True
+try:
+    check("old Windows Python: protected path -> oldpython",
+          verdict_fn(payload(".claude/agents/h.md"), ".", {})[0], "oldpython")
+    check("old Windows Python: ordinary path -> oldpython",
+          verdict_fn(payload("src/app.py"), ".", {})[0], "oldpython")
+    check("old Windows Python: no file_path -> nopath",
+          verdict_fn({"tool_name": "Write", "tool_input": {"content": "x"}}, ".", {})[0], "nopath")
+    check("old Windows Python: file_path not a string -> cannot",
+          verdict_fn(payload(7), ".", {})[0], "cannot")
+    check("old Windows Python: not an object -> unparsed", verdict_fn(None, ".", {})[0], "unparsed")
+    try:
+        D["_d_real"]("src")
+        refused = False
+    except D["_DCannot"]:
+        refused = True
+    check("old Windows Python: _d_real refuses", refused, True)
+finally:
+    D["_D_OLD_NT"] = saved_flag
+
 for f in failures:
     print("  FAIL " + f)
 print(f"test_definition_path: {count - len(failures)} passed, {len(failures)} failed")

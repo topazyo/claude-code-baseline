@@ -45,19 +45,19 @@ ci_expect() {
     return 0
   fi
   case "$leg:$suite" in
-    ubuntu-latest:test_hooks)        allowed="";  floor=660 ;;
+    ubuntu-latest:test_hooks)        allowed="";  floor=668 ;;
     ubuntu-latest:test_status)       allowed="";  floor=73 ;;
     ubuntu-latest:test_policy_gate)  allowed="";  floor=53 ;;
     ubuntu-latest:test_latency)      allowed="";  floor=5 ;;
-    windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=673 ;;
+    windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=681 ;;
     windows-latest:test_status)      allowed="symlinked-skill"; floor=72 ;;
     windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=51 ;;
     windows-latest:test_latency)     allowed="";  floor=5 ;;
-    python-floor-ubuntu-22.04:test_hooks)       allowed="";  floor=660 ;;
+    python-floor-ubuntu-22.04:test_hooks)       allowed="";  floor=668 ;;
     python-floor-ubuntu-22.04:test_status)      allowed="";  floor=73 ;;
     python-floor-ubuntu-22.04:test_policy_gate) allowed="";  floor=53 ;;
     python-floor-ubuntu-22.04:test_latency)     allowed="";  floor=5 ;;
-    python-floor-windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=673 ;;
+    python-floor-windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=681 ;;
     python-floor-windows-latest:test_status)      allowed="symlinked-skill"; floor=72 ;;
     python-floor-windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=51 ;;
     python-floor-windows-latest:test_latency)     allowed="";  floor=5 ;;

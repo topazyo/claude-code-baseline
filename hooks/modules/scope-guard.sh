@@ -108,6 +108,9 @@ case "$def_verdict" in
       bcl_say "[scope-guard] CONTROL COULD NOT RUN — the edit may target a path only a human may write, but its payload could not be parsed (no working Python, or not JSON); it was NOT checked."
       bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc
     fi ;;
+  oldpython)
+    bcl_say "[scope-guard] CONTROL COULD NOT RUN — this check needs Python 3.8 or later on Windows, so whether the edit targets a path only a human may write was NOT checked. Install Python 3.8 or later and put it first on PATH."
+    bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc ;;
   *)
     bcl_say "[scope-guard] CONTROL COULD NOT RUN — whether the edit targets a path only a human may write could not be decided (a link, UNC or device path it may not resolve, or the check failed); it was NOT checked."
     bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc ;;

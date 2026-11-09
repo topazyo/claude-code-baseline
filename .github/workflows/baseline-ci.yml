@@ -104,6 +104,27 @@ jobs:
           BCL_CI_LEG: python-floor-${{ matrix.os }}
         run: bash tests/run.sh
 
+  # Below the Windows floor: the installer must refuse a Windows Python 3.7, and a
+  # baseline installed with a newer one must have its hooks refuse when they find 3.7.
+  # The other jobs never run a Windows Python that old, so only this one proves it.
+  old-python-refused:
+    name: Old Python refused (3.7, windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: newer
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.7"
+      - name: Installer and hooks refuse Python 3.7 on Windows
+        shell: bash
+        env:
+          NEWER_PY: ${{ steps.newer.outputs.python-path }}
+        run: bash tests/test_old_windows_python.sh
+
 # The policy-change release gate lives in policy-gate.yml, which runs on
 # pull_request only. It used to be a job here with `if: github.event_name ==
 # 'pull_request'`: on a push run that job was SKIPPED, a skipped job reports
