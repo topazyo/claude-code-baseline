@@ -594,6 +594,101 @@ run_out "inherited _BCL_NOTICE_TMP, clean write -> 0" dispatcher/post-write.sh 0
 if [ -f "$TMP/keepme" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [an inherited _BCL_NOTICE_TMP made the dispatcher delete another file]"; fi
 rm -f "$TMP/keepme" "$TMP/_err" "$TMP/_nerr"
 
+# The dispatcher's deadline (N1). Every child gets at most what is left before
+# DISPATCH_END seconds of the dispatcher's life, and a prime that ran past its bound
+# ends the hook at once. Rows run copies of the hook tree, inside the work tree so the
+# children find the config, each edit proven applied.
+# dcopy <name> <file in the tree> <sed expression>...
+dcopy() {
+  local name="$1" d="$TMP/$1" f="$2" e; shift 2
+  rm -rf "$d"; cp -r "$H" "$d"
+  for e in "$@"; do
+    cp "$d/$f" "$TMP/_dcopy_prev"
+    sed -i "$e" "$d/$f"
+    if cmp -s "$TMP/_dcopy_prev" "$d/$f"; then
+      fail=$((fail + 1)); echo "  FAIL [copy $name: '$e' did not apply to $f]"; return 1
+    fi
+  done
+}
+# The clamp: min(cap, end - elapsed - KILL grace - 1), down to zero and below.
+got="$( . "$H/lib/common.sh"; for a in "25 85 0" "25 85 60" "25 85 81" "25 85 82" "25 85 100"; do bcl_clamp_budget $a; printf '%s ' "$_BCL_BUDGET"; done )"
+if [ "$got" = "25 22 1 0 -18 " ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [bcl_clamp_budget: got '$got']"; fi
+# The deadline leaves at least 5 s of the dispatcher's wired timeout, in every file
+# that wires it.
+dend="$(sed -n 's/^DISPATCH_END=\([0-9][0-9]*\)$/\1/p' "$H/dispatcher/post-write.sh")"
+for wf in settings.template.json managed/managed-settings.json managed/managed-settings.strict.json; do
+  dwired="$("$PY" -c "import json,sys;t=json.load(open(sys.argv[1],encoding='utf-8'));print([h['timeout'] for g in t['hooks']['PostToolUse'] for h in g['hooks'] if 'post-write.sh' in h['command']][0])" "$(winpath "$SRC/$wf")")"
+  if [ -n "$dend" ] && [ -n "$dwired" ] && [ $((dend + 5)) -le "$dwired" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [DISPATCH_END='$dend' leaves under 5 s of the timeout '$dwired' wired in $wf]"; fi
+done
+# A prime that fails without running out of time stays "failed" (a payload it cannot encode).
+BS="$(printf '\134')"
+got="$( . "$H/lib/common.sh"; bcl_prime "$(printf '{"tool_name":"Write","tool_input":{"file_path":"x","content":"x %sud800"}}' "$BS")" 2>/dev/null; printf '%s' "$_BCL_PRIME_STATE" )"
+if [ "$got" = failed ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a prime that cannot encode its payload: state '$got', want failed]"; fi
+if command -v timeout >/dev/null 2>&1; then
+  # A prime past its bound: state "timeout", never primed; the dispatcher fails closed
+  # whatever the posture (it could not read it), and runs no child.
+  if dcopy dprime lib/common.sh 's/^_BCL_PRIME_TIMEOUT=10$/_BCL_PRIME_TIMEOUT=1/' \
+       's/^import json, os, shlex, sys$/import json, os, shlex, sys, time; time.sleep(5)/'; then
+    got="$( . "$TMP/dprime/lib/common.sh"; bcl_prime "$(write_payload "$WT/notes.txt")"; printf '%s' "$_BCL_PRIME_STATE"; _bcl_primed && printf ' primed' )"
+    if [ "$got" = timeout ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a prime past its bound: state '$got', want timeout]"; fi
+    setcfg "c['enforcement']='warn'; c['failClosed']=False"
+    H0="$H"; H="$TMP/dprime"
+    run_out "post-write, prime past its bound, warn + failClosed:false -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/notes.txt")"
+    H="$H0"
+    err_has "a prime past its bound is reported" "exceeded its 1s budget"
+    err_has "a prime past its bound: no check ran" "No PostToolUse check ran for this edit"
+    quiet_ok "a prime past its bound: nothing on stdout"
+    resetcfg
+  fi
+  # The same slow prime after a stdin read that failed: failClosed is read inside the
+  # prime's bound, so it fails closed instead of reading failClosed:false per call.
+  if dcopy dread lib/common.sh 's/^_BCL_PRIME_TIMEOUT=10$/_BCL_PRIME_TIMEOUT=1/' \
+       's/^import json, os, shlex, sys$/import json, os, shlex, sys, time; time.sleep(5)/' \
+       's/^_BCL_STDIN_TIMEOUT=5$/_BCL_STDIN_TIMEOUT=1/'; then
+    setcfg "c['failClosed']=False"
+    out="$( { sleep 3; } | bash "$TMP/dread/dispatcher/post-write.sh" 2>&1 )"; rc=$?
+    if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "exceeded its 1s budget"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [post-write, stdin read and prime both past their bounds, failClosed:false: want 2 rc=$rc]"; fi
+    resetcfg
+  fi
+  # A gate the deadline cuts short: killed at what was left, not at its 25 s cap.
+  if dcopy dslow dispatcher/post-write.sh 's/^DISPATCH_END=85$/DISPATCH_END=12/'; then
+    printf '#!/usr/bin/env bash\nexec sleep 20\n' > "$TMP/dslow/modules/security-defaults.sh"
+    H0="$H"; H="$TMP/dslow"
+    t0=$(date +%s)
+    run_out "post-write, a gate cut short by the deadline -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/notes.txt")"
+    t1=$(date +%s)
+    H="$H0"
+    err_has "a gate cut short is reported as killed" "security-defaults exceeded its"
+    err_has "a gate cut short says the deadline cut it" "Cut from 25s"
+    case "$ERR" in *"exceeded its 25s"*) fail=$((fail + 1)); echo "  FAIL [a gate cut short ran to its 25s cap]" ;; *) pass=$((pass + 1)) ;; esac
+    if [ $((t1 - t0)) -lt 20 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a gate cut short held the dispatcher for $((t1 - t0))s]"; fi
+    # One that ignores TERM needs the KILL (rc 137): still a kill, not a script error.
+    printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 20 </dev/null >/dev/null 2>&1\n' > "$TMP/dslow/modules/security-defaults.sh"
+    H0="$H"; H="$TMP/dslow"
+    run_out "post-write, a gate that ignores TERM -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/notes.txt")"
+    H="$H0"
+    err_has "a gate that needed the KILL is reported as killed" "security-defaults exceeded its"
+  fi
+else
+  skip no-timeout "dispatcher deadline and prime bound: no timeout(1) on PATH"
+fi
+# No time left: a gate fails closed without starting; under failClosed:false the edit
+# passes with a notice naming every child that did not start.
+if dcopy dend dispatcher/post-write.sh 's/^DISPATCH_END=85$/DISPATCH_END=3/'; then
+  H0="$H"; H="$TMP/dend"
+  run_out "post-write, no time left for a gate -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/notes.txt")"
+  err_has "a gate with no time left says so" "security-defaults did not start"
+  # An inherited negative SECONDS must not lift the deadline.
+  run_out "post-write, no time left, inherited SECONDS=-100000 -> 2" dispatcher/post-write.sh 2 SECONDS=-100000 <<< "$(write_payload "$WT/notes.txt")"
+  err_has "an inherited negative SECONDS does not lift the deadline" "security-defaults did not start"
+  setcfg "c['failClosed']=False"
+  run_out "post-write, no time left, failClosed:false -> 0" dispatcher/post-write.sh 0 <<< "$(write_payload "$WT/notes.txt")"
+  notice_ok "no time left: every child that did not start is named" PostToolUse '"security-defaults did not start" in m and "run-tests did not start" in m and "auto-format did not start" in m and "auto-stage did not start" in m'
+  H="$H0"
+  resetcfg
+fi
+rm -rf "$TMP/dprime" "$TMP/dread" "$TMP/dslow" "$TMP/dend"; rm -f "$TMP/_dcopy_prev"
+
 echo "== fix-tags (PostToolUse) =="
 printf 'x = 1\n' > "$WT/app.py"; git add app.py; git commit -qm add </dev/null
 printf 'x = 1\ny = 2\n' > "$WT/app.py"   # untagged added line
@@ -1074,6 +1169,11 @@ for inherited in '_BCL_SOURCED=1' '_BCL_SOURCED=([1]=1)' '_BCL_SOURCED[1]=1'; do
   run_env "command-guard, inherited $inherited"     "$inherited" guardrails/command-guard.sh "$(bash_payload 'git push --force origin main')" 2 "Blocked by Claude Code baseline command-guard"
   run_env "post-write, inherited $inherited"        "$inherited" dispatcher/post-write.sh "$(write_payload "$WT/docker-compose.yml")" 2 "REGRESSION BLOCKER"
   run_env "security-defaults, inherited $inherited" "$inherited" modules/security-defaults.sh "$(write_payload "$WT/docker-compose.yml")" 2 "REGRESSION BLOCKER"
+done
+# bash seeds SECONDS from the environment, even under -p, and the dispatcher's deadline
+# counts with it: an inherited value must not skip the gates (or lift the deadline).
+for inherited in 'SECONDS=100000' 'SECONDS=-100000'; do
+  run_env "post-write, inherited $inherited" "$inherited" dispatcher/post-write.sh "$(write_payload "$WT/docker-compose.yml")" 2 "REGRESSION BLOCKER"
 done
 resetcfg
 if [ -f "$TMP/rules.saved" ]; then cp "$TMP/rules.saved" "$RULES"; else rm -f "$RULES"; fi

@@ -59,6 +59,9 @@ exists but cannot be read (invalid JSON, or not a JSON object) is one of these:
 its own `enforcement` and `failClosed` are unknown, so every guard refuses every
 call it watches until a human fixes or deletes the file (Claude's edit tools are denied it),
 and tracker-reminder reports it. A byte order mark or UTF-16 text is read normally.
+The post-write dispatcher treats its own read of the config and the payload running
+past its time bound the same way: it cannot learn `enforcement` or `failClosed` in
+time, so it reports the edit as unchecked with exit 2.
 
 ### Guardrails
 
@@ -447,7 +450,9 @@ start, times out, or exits with anything but 0 or 2 blocks even under
 `enforcement: "warn"` or `failClosed: false`. To let a failed guard through, set
 its `onFailure` to `"continue"` in `.claude/settings.json`. `failClosed` still
 governs the failures a hook observes from inside itself — no Python, an
-unparseable payload, a deleted or truncated matcher, a child past its time budget.
+unparseable payload, a deleted or truncated matcher, a child past its time budget —
+except when the hook cannot read it: a malformed config, or the post-write
+dispatcher's config read running past its time bound.
 
 **Before enabling `autoFormat`:** it runs `./node_modules/.bin/prettier` and
 `./node_modules/.bin/eslint` from the repo you are working in, honouring that
