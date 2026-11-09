@@ -252,7 +252,9 @@ machine, e.g. `/opt/claude-code-baseline/hooks` (POSIX) or
    image / via config management (it must be present for the managed hooks to run).
    Never copy a repo's installed `.claude/hooks/baseline/`: `install.sh` marks that tree
    per-repo with an `INSTALL_SCOPE` file, and the source tree has none. The deployed
-   tree must not contain `INSTALL_SCOPE` (acceptance step 0 checks this).
+   tree must not contain `INSTALL_SCOPE` (acceptance step 0 checks this). The reverse
+   mistake, a repo's `.claude/hooks/baseline/` without the marker, makes those hooks run
+   as a managed tree and ignore the repo's posture; `tools/baseline-status.sh` reports it.
 2. Substitute `<BASELINE_PREFIX>` in the deployed `managed-settings.json` with that
    absolute path (forward slashes work on all platforms).
 3. **Posture comes from you, not from the repo.** Run from `<BASELINE_PREFIX>`, the

@@ -344,6 +344,70 @@ done
 after="$(cd "$EJ" && ls -a | sort)"
 [ "$before" = "$after" ] && ok || no "--json with no file name wrote into CWD"
 
+echo "== baseline-status: a hook tree without its INSTALL_SCOPE marker (H2 follow-up) =="
+# Hooks that read the marker and do not find it run as a managed tree: posture and the
+# guardrail and runTests switches come from managed.config.json beside them (safe defaults
+# without one), never from the repo. The report reads that tree as those hooks do, and
+# says so; a tree from before the marker follows the repo and gets no such finding.
+HB="$A/.claude/hooks/baseline"
+CFGA="$A/.claude/baseline.config.json"
+cp "$CFGA" "$TMP/cfgA.saved"
+"$PY" -c "import json,sys;p=sys.argv[1];c=json.load(open(p,encoding='utf-8'));c['enforcement']='warn';c['guardrails']['commandGuard']['enabled']=False;json.dump(c,open(p,'w',encoding='utf-8'))" "$CFGA"
+# posture <field>...: the JSON report's fields, one line.
+posture() {
+  rm -f "$OUT2"
+  timeout -k 5 60 bash "$STATUS" --json "$OUT2" "$A" >/dev/null 2>&1
+  "$PY" -c "import json,sys; r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0]; print(r['enforcement'], r['failClosed'], r['enabledGuardrails'], r['hookLaunchProblems'])" "$OUT2" 2>&1
+}
+got="$(posture)"
+[ "$got" = "warn True [] []" ] && ok || no "marked tree reports the repo's posture: $got"
+# A managed.config.json in a MARKED tree is ignored by its hooks, and by the report.
+printf '{"enforcement":"block"}\n' > "$HB/managed.config.json"
+got="$(posture)"
+[ "$got" = "warn True [] []" ] && ok || no "marked tree ignores a managed.config.json beside it: $got"
+rm -f "$HB/managed.config.json"
+rm -f "$HB/INSTALL_SCOPE"
+got="$(posture)"
+[ "$got" = "block True ['commandGuard'] ['no INSTALL_SCOPE marker (hooks run as a managed tree)']" ] && ok || no "unmarked tree reports what its hooks read: $got"
+rep="$(timeout -k 5 60 bash "$STATUS" "$A" 2>&1)"
+case "$rep" in *"has no INSTALL_SCOPE marker"*"use the safe defaults"*) ok ;; *) no "the report explains the unmarked tree: $rep" ;; esac
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then no "--strict should FAIL on a tree without its marker"; else ok; fi
+# The next repo in the same run is read per-repo again.
+C="$(winpath "$TMP/repoC")"; mkdir -p "$C"; ( cd "$C" && git init -q )
+timeout -k 5 120 bash "$SRC/install.sh" --target "$C" >/dev/null 2>&1 </dev/null
+"$PY" -c "import json,sys;p=sys.argv[1];c=json.load(open(p,encoding='utf-8'));c['enforcement']='warn';json.dump(c,open(p,'w',encoding='utf-8'))" "$C/.claude/baseline.config.json"
+rm -f "$OUT2"
+timeout -k 5 60 bash "$STATUS" --json "$OUT2" "$A" "$C" >/dev/null 2>&1
+got="$("$PY" -c "import json,sys; r=json.load(open(sys.argv[1],encoding='utf-8'))['repos']; print(r[0]['enforcement'], r[1]['enforcement'], r[1]['hookLaunchProblems'])" "$OUT2" 2>&1)"
+[ "$got" = "block warn []" ] && ok || no "a marked repo after an unmarked one is read per-repo: $got"
+rm -rf "$TMP/repoC"
+printf '{"enforcement":"warn"}\n' > "$HB/managed.config.json"
+got="$(posture)"
+[ "$got" = "warn True ['commandGuard'] ['no INSTALL_SCOPE marker (hooks run as a managed tree)']" ] && ok || no "unmarked tree reads the managed config beside it: $got"
+rep="$(timeout -k 5 60 bash "$STATUS" "$A" 2>&1)"
+case "$rep" in *"has no INSTALL_SCOPE marker"*"from the managed.config.json beside them"*) ok ;; *) no "the report names the managed config: $rep" ;; esac
+printf '{"modules":{"runTests":{"enabled":true}}}\n' > "$HB/managed.config.json"
+rm -f "$OUT2"
+timeout -k 5 60 bash "$STATUS" --json "$OUT2" "$A" >/dev/null 2>&1
+got="$("$PY" -c "import json,sys; r=json.load(open(sys.argv[1],encoding='utf-8'))['repos'][0]; print('runTests' in r['enabledModules'], r['enforcement'])" "$OUT2" 2>&1)"
+[ "$got" = "True block" ] && ok || no "a managed runTests switch is reported: $got"
+printf '[]\n' > "$HB/managed.config.json"
+got="$(posture)"
+[ "$got" = "unknown None [] ['managed.config.json unreadable', 'no INSTALL_SCOPE marker (hooks run as a managed tree)']" ] && ok || no "unreadable managed config beside an unmarked tree: $got"
+rm -f "$HB/managed.config.json"
+# A tree from before the marker: neither the marker nor the code that reads it.
+cp "$HB/lib/common.sh" "$TMP/common.saved"
+sed -i 's/INSTALL_SCOPE/INSTALL_SC0PE/g; s/_bcl_cfg_scope/_bcl_cfg_sc0pe/g' "$HB/lib/common.sh"
+got="$(posture)"
+[ "$got" = "warn True [] []" ] && ok || no "a tree from before the marker follows the repo, no finding: $got"
+cp "$TMP/common.saved" "$HB/lib/common.sh"
+# install.sh restores the marker, and with it the repo's posture and a clean --strict.
+cp "$TMP/cfgA.saved" "$CFGA"
+timeout -k 5 120 bash "$SRC/install.sh" --target "$A" >/dev/null 2>&1 </dev/null
+[ -f "$HB/INSTALL_SCOPE" ] && ok || no "install.sh restores the marker"
+if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else no "--strict should PASS once the marker is back"; fi
+rm -f "$TMP/cfgA.saved" "$TMP/common.saved"
+
 echo "== baseline-status: disableAllHooks reported per file (config-guard (1) reading) =="
 ASET="$A/.claude/settings.json"
 cp "$ASET" "$TMP/aset.keep"

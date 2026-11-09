@@ -23,7 +23,8 @@
 #     --strict          exit non-zero if ANY installed repo has drifted from the
 #                       source version, or has a settings finding (a risky env value,
 #                       or a baseline hook not run, or not wired, as the template
-#                       wires it). An un-installed repo does NOT trip this.
+#                       wires it, or a hook tree without its INSTALL_SCOPE marker).
+#                       An un-installed repo does NOT trip this.
 #     --json <outfile>  ALSO write the full per-repo report as JSON to <outfile>
 #                       (the only filesystem write this tool ever performs).
 #
@@ -38,6 +39,8 @@ source "$SRC_ROOT/hooks/lib/common.sh"
 # ignore the repo's posture keys (see _bcl_cfg_scope). Set after sourcing: common.sh
 # unsets every _BCL_CFG_ name when it loads, so a hook can never inherit this.
 _BCL_CFG_PER_REPO=1
+# The source tree's own root, restored after reading a repo whose tree is read as managed.
+SRC_CFG_ROOT="$_BCL_CFG_ROOT"
 
 STRICT=0
 JSON_OUT=""
@@ -227,17 +230,34 @@ echo
 
 for repo in "${REPOS[@]}"; do
   installed=0; enf=""; fc=""; guards=""; mods=""; minver=""; minok=0; instver=""; drift="not-installed"
-  envrisk=""; launch=""; denymiss=""; cfg_bad=""
+  envrisk=""; launch=""; denymiss=""; cfg_bad=""; unmarked=0; cfg_bad_file=""
   hooks_dir="$repo/.claude/hooks/baseline"
   ver_file="$hooks_dir/VERSION"
 
   if [[ -d "$hooks_dir" ]]; then
     installed=1
     export CLAUDE_PROJECT_DIR="$repo"
+    # install.sh marks the tree it copies with INSTALL_SCOPE. Hooks that look for the
+    # marker and do not find it run as a managed tree: enforcement, failClosed and the
+    # guardrail and runTests switches come from managed.config.json beside them (safe defaults
+    # without one), not from this repo's config. Read such a tree the way its hooks do,
+    # so the posture below is what they enforce. A tree from before the marker existed
+    # has neither the marker nor the code that reads it and follows the repo's config;
+    # the version drift below already reports it.
+    # The hooks take their tree as lib/.. of the common.sh they source, so a linked lib/
+    # decides it; read the same path.
+    scope_root="$hooks_dir/lib/.."
+    if [[ ! -f "$scope_root/INSTALL_SCOPE" ]] && grep -qF "_bcl_cfg_scope() {" "$hooks_dir/lib/common.sh" 2>/dev/null; then
+      unmarked=1
+      _BCL_CFG_PER_REPO=""; _BCL_CFG_ROOT="$scope_root"
+    fi
     # A config that exists but cannot be read makes the hooks fail closed, so its
     # defaults are not the repo's posture: report "unknown" and a finding instead.
     cfg_bad=""
-    if bcl_config_malformed; then cfg_bad="${_BCL_CFG_ERROR:-unreadable}"; fi
+    if bcl_config_malformed; then
+      cfg_bad="${_BCL_CFG_ERROR:-unreadable}"
+      if [[ "$_BCL_CFG_BAD_FILE" == managed ]]; then cfg_bad_file="managed.config.json"; else cfg_bad_file="baseline.config.json"; fi
+    fi
     if [[ -n "$cfg_bad" ]]; then
       enf="unknown"; fc="unknown"; minver="unknown"
     else
@@ -255,6 +275,7 @@ for repo in "${REPOS[@]}"; do
       done
       for m in "${MODULES[@]}"; do bcl_module_enabled "$m" && mods="${mods:+$mods,}$m"; done
     fi
+    _BCL_CFG_PER_REPO=1; _BCL_CFG_ROOT="$SRC_CFG_ROOT"
     [[ -n "$minver" && "$minver" == "$SRC_MIN" ]] && minok=1 || minok=0
     if [[ -f "$ver_file" ]]; then
       instver="$(tr -d '\r\n' < "$ver_file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -273,7 +294,9 @@ for repo in "${REPOS[@]}"; do
     sc="${sc//$'\r'/}"   # Windows Python print() emits CRLF
     [[ "$sc" == *$'\x1f'*$'\x1f'* ]] || sc=$'check-failed\x1fcheck-failed\x1fcheck-failed'
     IFS=$'\x1f' read -r envrisk launch denymiss <<< "$sc"
-    [[ -n "$cfg_bad" ]] && launch="${launch:+$launch,}baseline.config.json unreadable"
+    [[ -n "$cfg_bad" ]] && launch="${launch:+$launch,}$cfg_bad_file unreadable"
+    # No commas in a finding: the JSON report splits this list on them.
+    [[ $unmarked -eq 1 ]] && launch="${launch:+$launch,}no INSTALL_SCOPE marker (hooks run as a managed tree)"
     [[ -n "$envrisk$launch" ]] && any_settings=1
     [[ "$denymiss" == "[]" ]] || any_settings=1
   fi
@@ -282,8 +305,15 @@ for repo in "${REPOS[@]}"; do
   echo "$repo"
   if [[ $installed -eq 1 ]]; then
     echo "  installed=yes  posture=$enf  failClosed=$fc  version=${instver:-<none>}  drift=$drift"
+    if [[ $unmarked -eq 1 ]]; then
+      if [[ -f "$scope_root/managed.config.json" ]]; then
+        echo "  .claude/hooks/baseline has no INSTALL_SCOPE marker: its hooks run as a managed tree and take enforcement, failClosed and the guardrail and runTests switches from the managed.config.json beside them, not from this repo's baseline.config.json (this report shows the posture they read). Re-run install.sh."
+      else
+        echo "  .claude/hooks/baseline has no INSTALL_SCOPE marker: its hooks run as a managed tree and use the safe defaults for enforcement, failClosed and the guardrail and runTests switches, not this repo's baseline.config.json (this report shows the posture they read). Re-run install.sh."
+      fi
+    fi
     if [[ -n "$cfg_bad" ]]; then
-      echo "  baseline.config.json cannot be read ($cfg_bad): the hooks fail closed until a human fixes or deletes it"
+      echo "  $cfg_bad_file cannot be read ($cfg_bad): the hooks fail closed until a human fixes or deletes it"
     fi
     echo "  minClaudeCodeVersion=${minver:-<none>}  (canonical $SRC_MIN, ok=$([[ $minok -eq 1 ]] && echo yes || echo no))"
     if [[ -n "$cfg_bad" ]]; then
@@ -357,7 +387,7 @@ if [[ $STRICT -eq 1 && $any_drift -eq 1 ]]; then
   exit 1
 fi
 if [[ $STRICT -eq 1 && $any_settings -eq 1 ]]; then
-  echo "settings findings (--strict): one or more installed repos lack baseline deny-list entries in settings.json, or set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks), or keep a subagent or skill definition naming the baseline hook directory, or have a baseline.config.json that cannot be read" >&2
+  echo "settings findings (--strict): one or more installed repos lack baseline deny-list entries in settings.json, or set a risky env value, or do not run the baseline hooks as the template wires them (bash -p, its keys, onFailure block on the guards, its event and matcher, no disableAllHooks), or keep a subagent or skill definition naming the baseline hook directory, or have a baseline.config.json (or, beside a hook tree without its INSTALL_SCOPE marker, a managed.config.json) that cannot be read, or have a hook tree without that marker" >&2
   exit 1
 fi
 exit 0

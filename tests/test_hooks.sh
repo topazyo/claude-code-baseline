@@ -1045,9 +1045,9 @@ echo "== a managed deployment takes posture and code-running switches from manag
   && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [the source hook tree must not carry INSTALL_SCOPE]"; }
 [ "$(cat "$H/INSTALL_SCOPE" 2>/dev/null)" = "per-repo" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [install.sh marks its hook tree per-repo]"; }
 MH="$TMP/mprefix/hooks"; mkdir -p "$TMP/mprefix"; cp -R "$SRC/hooks" "$MH"
-run_m() {  # run_m <desc> <hook> <want-rc> < payload — like run_out, from the managed tree
-  local desc="$1" hook="$2" want="$3" got
-  OUT="$(bash -p "$MH/$hook" 2>"$TMP/_err")"; got=$?
+run_m() {  # run_m <desc> <hook> <want-rc> [VAR=value]... < payload — like run_out, from the managed tree
+  local desc="$1" hook="$2" want="$3" got; shift 3
+  OUT="$(env "$@" bash -p "$MH/$hook" 2>"$TMP/_err")"; got=$?
   ERR="$(cat "$TMP/_err")"
   if [ "$got" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [$desc] want=$want got=$got"; fi
 }
@@ -1124,6 +1124,72 @@ setcfg "c['guardrails']['commandGuard']['enabled']=False"
 OUT="$(printf '%s' "$(bash_payload 'git push --force origin main')" | _BCL_CFG_PER_REPO=1 bash -p "$MH/guardrails/command-guard.sh" 2>/dev/null)"; rc=$?
 [ "$rc" = 2 ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [inherited _BCL_CFG_PER_REPO=1 does not make a managed hook per-repo: rc=$rc]"; }
 resetcfg
+
+# The whole post-write chain from the managed tree. Each child is its own `bash -p`
+# process and finds its own tree again, so the managed reading has to hold in every one
+# of them. Stub tools leave a mark when they run; the per-repo tree in the same repo,
+# with the same config, is the control that shows they would have.
+MBIN="$TMP/m-bin"; mkdir -p "$MBIN" "$WT/node_modules/.bin"
+printf '#!/usr/bin/env bash\n: > "%s"\necho "MSTUB shellcheck issue" >&2\nexit 1\n' "$TMP/m-sc" > "$MBIN/shellcheck"
+printf '#!/usr/bin/env bash\n: > "%s"\nexit 0\n' "$TMP/m-pf" > "$WT/node_modules/.bin/prettier"
+chmod +x "$MBIN/shellcheck" "$WT/node_modules/.bin/prettier"
+printf 'echo hi\n' > "$WT/stub.sh"; printf '# m\n' > "$WT/m.md"
+# The repo-binary opt-in is an environment value, which a repo's settings can set: it
+# must not get past the managed autoFormat default either.
+MENV=("PATH=$MBIN:$PATH" "BCL_AUTOFORMAT_ALLOW_REPO_BINARIES=1")
+# mark_is <desc> <marker> <yes|no>
+mark_is() {
+  local got=no; [ -e "$2" ] && got=yes
+  [ "$got" = "$3" ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [$1: ran=$got, want $3]"; }
+}
+resetcfg; setcfg "$REPOSET"; rm -f "$MH/managed.config.json"
+rm -f "$TMP/m-sc" "$TMP/m-pf"
+run_out "per-repo dispatcher, repo runTests on (control) -> 0" dispatcher/post-write.sh 0 "${MENV[@]}" <<< "$(write_payload "$WT/stub.sh")"
+mark_is "per-repo dispatcher runs the repo's shellcheck (control)" "$TMP/m-sc" yes
+run_out "per-repo dispatcher, repo autoFormat on (control) -> 0" dispatcher/post-write.sh 0 "${MENV[@]}" <<< "$(write_payload "$WT/m.md")"
+mark_is "per-repo dispatcher runs the repo's prettier (control)" "$TMP/m-pf" yes
+rm -f "$TMP/m-sc" "$TMP/m-pf"
+run_m "managed dispatcher, repo runTests on, no managed config -> 0" dispatcher/post-write.sh 0 "${MENV[@]}" <<< "$(write_payload "$WT/stub.sh")"
+mark_is "managed dispatcher does not run the repo's shellcheck" "$TMP/m-sc" no
+run_m "managed dispatcher, repo autoFormat on, no managed config -> 0" dispatcher/post-write.sh 0 "${MENV[@]}" <<< "$(write_payload "$WT/m.md")"
+mark_is "managed dispatcher does not run the repo's prettier" "$TMP/m-pf" no
+# The same with a repo config past the prime's bounds: every child reads per call.
+setcfg "$REPOSET; c['pad']={str(i): i for i in range(5000)}"
+rm -f "$TMP/m-sc"
+run_m "managed dispatcher, oversized repo config -> 0" dispatcher/post-write.sh 0 "${MENV[@]}" <<< "$(write_payload "$WT/stub.sh")"
+mark_is "managed dispatcher, oversized repo config, does not run shellcheck" "$TMP/m-sc" no
+# A managed config that turns run-tests on: its failure blocks, whatever the repo's warn.
+resetcfg; setcfg "$REPOSET"
+printf '{"modules":{"runTests":{"enabled":true}}}\n' > "$MH/managed.config.json"
+rm -f "$TMP/m-sc"
+run_m "managed runTests on, repo warn: a failing check -> 2" dispatcher/post-write.sh 2 "${MENV[@]}" <<< "$(write_payload "$WT/stub.sh")"
+err_has "managed runTests on: the check's report is passed on" "MSTUB shellcheck issue"
+mark_is "managed runTests on: the check ran" "$TMP/m-sc" yes
+# A managed warn is honoured although the repo says block: the edit passes with a notice.
+resetcfg
+printf '{"enforcement":"warn","modules":{"runTests":{"enabled":true}}}\n' > "$MH/managed.config.json"
+run_m "managed warn, repo block: a failing check -> 0" dispatcher/post-write.sh 0 "${MENV[@]}" <<< "$(write_payload "$WT/stub.sh")"
+notice_ok "managed warn: the failing check is shown" PostToolUse '"MSTUB shellcheck issue" in m and "checks failed" in m'
+# An unreadable managed config fails closed, whatever the repo's warn and failClosed.
+setcfg "$REPOSET"
+printf '[]\n' > "$MH/managed.config.json"
+run_m "managed dispatcher, unreadable managed config, repo warn -> 2" dispatcher/post-write.sh 2 "${MENV[@]}" <<< "$(write_payload "$WT/stub.sh")"
+err_has "managed dispatcher names the managed config" "the managed config managed.config.json"
+rm -f "$MH/managed.config.json"
+# Keys outside the managed set still come from the repo: its securityDefaults applies,
+# and its warn does not reach the managed tree.
+rm -f "$TMP/rules.saved" "$TMP/compose.saved"
+[ -f "$RULES" ] && cp "$RULES" "$TMP/rules.saved"
+[ -f "$WT/docker-compose.yml" ] && cp "$WT/docker-compose.yml" "$TMP/compose.saved"
+resetcfg; setcfg "c['enforcement']='warn'; c['modules']['securityDefaults']['enabled']=True"
+valid_rules
+printf 'services:\n  app:\n    user: "0:0"\n' > "$WT/docker-compose.yml"
+run_m "managed dispatcher, repo securityDefaults + warn: a violation -> 2" dispatcher/post-write.sh 2 <<< "$(write_payload "$WT/docker-compose.yml")"
+err_has "managed dispatcher reports the repo rule's violation" "REGRESSION BLOCKER"
+if [ -f "$TMP/rules.saved" ]; then cp "$TMP/rules.saved" "$RULES"; else rm -f "$RULES"; fi
+if [ -f "$TMP/compose.saved" ]; then cp "$TMP/compose.saved" "$WT/docker-compose.yml"; else rm -f "$WT/docker-compose.yml"; fi
+resetcfg
+rm -rf "$MBIN" "$WT/node_modules"; rm -f "$WT/stub.sh" "$WT/m.md" "$TMP/m-sc" "$TMP/m-pf" "$TMP/rules.saved" "$TMP/compose.saved"
 
 echo "== fix-tags: requireWhenEnv must be a variable name (M6) =="
 # A committed file with an untagged added line: the tag check WOULD fail it, so a gate
