@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=09e841fa76245952 -->
+<!-- he-sync: what-this-does-not-protect-against sha256=ab248df252bf8acc -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -124,8 +124,8 @@
   ה-scope-guard נכשל סגור על כל Write או Edit שמציינים קובץ. הוא גם חייב להיות Python
   מקורי של Windows: ה-hooks אף פעם לא מריצים את הקוד שלהם על מפרש של Cygwin או של MSYS,
   שקורא נתיבי Windows כנתיבי POSIX. כשמפרש כזה ראשון ב-`PATH`, ה-command-guard והבדיקות
-  שאחרי הכתיבה נכשלים סגור כמו בלי Python, וה-scope-guard נכשל סגור על כל Write או Edit,
-  ותחת `failClosed: false` זה רק מוצג כהודעה. `autoFormat`
+  שאחרי הכתיבה נכשלים סגור כמו בלי Python, וה-scope-guard נכשל סגור על כל Write או Edit.
+  בלי מפרש אי אפשר לקרוא את ההגדרות, ולכן גם `failClosed: false` לא הופך את זה להודעה בלבד. `autoFormat`
   ו-`runTests`, שמופעלים רק לפי בחירה, מריצים בכוונה את כלי העיצוב ואת הבדיקות של הריפו בלי הבידוד הזה.
 - **סביבת ה-hook מהימנה רק עד המעטפת שמריצה את ה-hook.** כל hook של ה-baseline, וכל
   תהליך צאצא שה-dispatcher מפעיל, רץ כ-`bash -p`, וה-hooks מנקים בזמן הטעינה את ערכי

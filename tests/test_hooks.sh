@@ -357,7 +357,8 @@ hbad_row "Cygwin or MSYS Python, failClosed:false: an ordinary write is announce
 # behind a wrapper that hides its DLL is stopped by the prime's first statement (forced
 # here): no interpreter, and scope-guard fails closed on every edit, naming it.
 PGUARD='s/^if sys.platform.startswith(("cygwin", "msys")):$/if True:/'
-hbad_row "Cygwin or MSYS Python behind a wrapper, failClosed:false: an edit is announced" "$PGUARD" 0 "" "not a Cygwin, MSYS or other POSIX one"
+# With no interpreter the config cannot be read, so failClosed:false cannot take effect.
+hbad_row "Cygwin or MSYS Python behind a wrapper, failClosed:false (unreadable): still fails closed" "$PGUARD" 2 "" "not a Cygwin, MSYS or other POSIX one"
 resetcfg
 hbad_row "Cygwin or MSYS Python behind a wrapper: an ordinary write fails closed" "$PGUARD" 2 "" "not a Cygwin, MSYS or other POSIX one"
 hbad_row "Cygwin or MSYS Python behind a wrapper: a protected path fails closed" "$PGUARD" 2 \

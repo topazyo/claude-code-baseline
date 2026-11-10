@@ -256,7 +256,8 @@ limit — not a bug. Read it before you rely on any of the above.
   Python: the hooks never run their code on a Cygwin or MSYS one, which reads Windows
   paths as POSIX paths. With one first on `PATH`, command-guard and the post-write
   checks fail closed as they do without Python, and scope-guard fails closed on every
-  Write and Edit, which under `failClosed: false` is only announced. The opt-in `autoFormat`
+  Write and Edit. With no interpreter the config cannot be read, so even
+  `failClosed: false` does not turn these into announcements. The opt-in `autoFormat`
   and `runTests` deliberately run the repo's own formatter and tests without this
   isolation.
 - **The hook environment is trusted up to the shell that runs the hook.** Every
