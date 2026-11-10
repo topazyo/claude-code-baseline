@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 339
+FP_FLOOR = 341
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 667
+BLOCK_FLOOR = 673
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -1304,6 +1304,19 @@ PS_STATEMENT_BLOCK += [
     '$x = $a -band git push -f ($y) --force',
     '$v = $a -ceq git status -eq ($y)',
     '$v = $a -band git push origin -eq ($y)',
+    # Where a pipeline starts (after `=`, a chain, foreach's `in`), `-f` is a command name.
+    '$y = -f ($x = 1)',
+    "$y = -f ($x = '--force')",
+    '$y = $z = -ceq ($x = 1)',
+    'foreach ($i in -f ($x = 1)) { }',
+    # A word that starts with a digit but is no number, or a `-name` that is no unary
+    # operator, names a command: what follows it is in argument position.
+    '7z x -f ($x = 1)',
+    "-foo git push - ($f = '--force')",
+]
+PS_STATEMENT_ALLOW += [
+    '$y = - ($x = 1)',
+    '$n = 10kb -shr ($x)',
 ]
 # Known limits, as for `git push $f` above: after a `)` the reader no longer knows a
 # command started the statement, so a variable and an operator there read as a value
