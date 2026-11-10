@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 356
+FP_FLOOR = 369
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 737
+BLOCK_FLOOR = 752
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -797,6 +797,37 @@ CASES = [
     # quote-blind reading counts every $ word then).
     ("pwsh -c script glued to a backtick substitution",
      "pwsh -c \"`cat f`\"'$x = 1'", B, ()),
+    # A bash script in a pwsh script is read with PowerShell's quoting too: there `\"` is a
+    # backslash and then a string, and a ' inside "..." quotes nothing.
+    ("bash script in a pwsh script, PowerShell quoting",
+     "pwsh -c 'bash -c " + chr(92) + '"' + "'" + chr(92) + "''; git push --force; #/x'"
+     + chr(92) + "''" + chr(92) + '"' + "'", B, ()),
+    ("bash script in a pwsh script, grouped command word",
+     "pwsh -c '& (" + '"bash"' + ") -c " + chr(92) + '"' + "'" + chr(92)
+     + "''; git push --force; #/x'" + chr(92) + "''" + chr(92) + '"' + "'", B, ()),
+    ("bash script in a pwsh script block",
+     "pwsh -c '{ bash -c " + chr(92) + '"' + "'" + chr(92) + "''; git push --force; #/x'"
+     + chr(92) + "''" + chr(92) + '"' + " }'", B, ()),
+    # Known limit (fails closed): `#` comments are not modelled, so a lone ' in one is
+    # an unbalanced quote once PowerShell's doubled '' is read as one.
+    ("fp cost: bash script in a pwsh script, apostrophe in a comment",
+     'pwsh -c "bash -c ' + "'ls # it''s'" + '"', B, ()),
+    ("fp pwsh script with a Windows path", "pwsh -c 'Get-ChildItem C:" + chr(92) + "x'",
+     A, ()),
+    ("fp pwsh script with a doubled apostrophe",
+     'pwsh -c "Write-Output ' + "'it''s'" + '"', A, ()),
+    # An escaped backtick is one literal backtick: no reading decodes it a second time.
+    ("fp pwsh script with an escaped backtick before n",
+     "pwsh -c 'Write-Output \"x``ngit push --force\"'", A, ()),
+    # A closed <# #> comment is blank space to PowerShell, not a redirect.
+    ("pwsh script with a block comment before the command",
+     "pwsh -c '<#x#>git push --force'", B, ()),
+    ("bash script in a pwsh script after a block comment",
+     "pwsh -c '<# c #> bash -c " + chr(92) + '"' + "'" + chr(92)
+     + "''; git push --force; #/x'" + chr(92) + "''" + chr(92) + '"' + "'", B, ()),
+    ("fp pwsh string holding a block-comment marker",
+     "pwsh -c 'Write-Output \"<# not a comment #>\"'", A, ()),
+    ("fp pwsh script after a block comment", "pwsh -c '<# list #> Get-ChildItem'", A, ()),
     ("fp a long cmd /c echo", "cmd /c echo " + "word " * 780, A, ()),
     ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
      ("status ; echo",)),
@@ -995,6 +1026,40 @@ PS_CASES = [
      "git commit -F - @'\nfix: handle (parens) and {braces}\n\nbody line\n'@", A, ()),
     ("ps fp a long pwsh -Command script",
      'pwsh -NoProfile -Command "' + "Write-Output (Get-Date) `t {x}; " * 110 + '"', A, ()),
+    # An inline bash script is read with PowerShell's quoting too: there `\"` is a
+    # backslash and then a string, and a ' inside "..." quotes nothing.
+    ("ps bash script, PowerShell quoting",
+     "bash -c " + chr(92) + '"' + "'; git push --force; #/x'" + chr(92) + '"', B, ()),
+    ("ps bash script, PowerShell quoting with a variable",
+     "bash -c " + chr(92) + '"' + "'; $env:CMD; #/x'" + chr(92) + '"', B, ()),
+    ("ps bash script, PowerShell quoting after &",
+     "& bash -c " + chr(92) + '"' + "'; git push --force; #/x'" + chr(92) + '"', B, ()),
+    ("ps sh script, PowerShell quoting",
+     "sh -c " + chr(92) + '"' + "'; rm -rf ~; #/x'" + chr(92) + '"', B, ()),
+    ("ps bash script, PowerShell quoting, grouped command word",
+     '& ("bash") -c ' + chr(92) + '"' + "'; git push --force; #/x'" + chr(92) + '"', B, ()),
+    ("ps bash script, PowerShell quoting after a no-break space",
+     "bash -c" + chr(0xA0) + chr(92) + '"' + "'; git push --force; #/x'" + chr(92) + '"',
+     B, ()),
+    # Known limit (fails closed): `#` comments are not modelled, so a lone ' in one is
+    # an unbalanced quote once PowerShell's doubled '' is read as one.
+    ("ps fp cost: bash script with an apostrophe in a comment", "bash -c 'ls # it''s'",
+     B, ()),
+    ("ps fp bash script in a string that bash reads as single-quoted",
+     'bash -c "' + "'; git push --force; #/x'" + '"', A, ()),
+    ("ps fp bash script, single-quoted", "bash -c 'echo hi'", A, ()),
+    ("ps fp bash script with a variable", 'bash -c "echo $HOME"', A, ()),
+    ("ps fp string with a backslash", 'Write-Output "a' + chr(92) + 'b"', A, ()),
+    ("ps fp Windows path piped to a cmdlet",
+     "Get-ChildItem C:" + chr(92) + "Users" + chr(92) + "x | Select-Object Name", A, ()),
+    ("ps fp bash script with a quoted format",
+     'bash -c "git log --format=' + "'%h %s'" + ' -3"', A, ()),
+    ("ps fp wsl bash script", 'wsl bash -c "cd ~/x && ls -la"', A, ()),
+    ("ps bash script, PowerShell quoting after a block comment",
+     "<# c #> bash -c " + chr(92) + '"' + "'; git push --force; #/x'" + chr(92) + '"', B, ()),
+    ("ps bash script, PowerShell quoting, block comment before -c",
+     "bash <# c #> -c " + chr(92) + '"' + "'; git push --force; #/x'" + chr(92) + '"', B, ()),
+    ("ps fp block comment before a command", "<# list #> git status", A, ()),
 ]
 
 # Ordinary statements of the PowerShell tool's own payload (see _ps_statement_tail).
@@ -1667,6 +1732,35 @@ def _distinct_runner_payload():
         out, i = out + unit, i + 1
 
 
+def _nested_pwsh_payload():
+    """4 KB of benign pwsh scripts three levels deep, each holding a quoted path with a
+    space: each level can more than double the readings (see _runner_segments)."""
+    bs, out, i = chr(92), "", 0
+    while True:
+        unit = ("pwsh -c 'pwsh -c ''pwsh -c " + '"' + "Get-ChildItem " + bs + '"' + "C:" + bs
+                + "Program Files" + bs + f"x{i}" + bs + '""' + "'''; ")
+        if len(out) + len(unit) > m._MAX_INSPECT_LEN:
+            return out
+        out, i = out + unit, i + 1
+
+
+def _dense_grouped_pwsh_payload():
+    """4 KB of benign pwsh scripts three levels deep, each a script block holding a
+    grouped quoted path and an escape: dense enough to reach the runner budget."""
+    bs, out, i = chr(92), "", 0
+    while True:
+        unit = ("pwsh -c 'pwsh -c ''pwsh -c " + '"' + "& { gci (" + bs + '"' + "C:" + bs
+                + "a b" + bs + f"x{i}" + bs + '"' + ") `t }" + '"' + "'''; ")
+        if len(out) + len(unit) > m._MAX_INSPECT_LEN:
+            return out
+        out, i = out + unit, i + 1
+
+
+def _runner_budget_used(shell, text):
+    m.evaluate(text, shell=shell)
+    return m._RunnerBudget.used
+
+
 def _long_continuation_chain():
     """Many lines ending in a path's backslash: one continuation chain, too long to inspect."""
     return ("gh pr create --title t --body \"$(cat <<'EOF'\n"
@@ -1993,6 +2087,26 @@ STRUCT_CASES = [
          "uninspectable command (Windows runner scripts too long"), True),
     ("timing: 4 KB nested-runner chain in one segment (PowerShell)",
      lambda: _timing("powershell", _long_runner_chain()) < 3.0, True),
+    # Accepted cost: a dense three-level payload with groups and escapes reaches the cap
+    # and is refused (it fails closed). If this row starts failing because the payload
+    # is inspected, the cost was removed: make it an allow check, do not restore the
+    # refusal.
+    ("fp cost: runner budget: a dense 4 KB three-level grouped pwsh script is refused",
+     lambda: (m.evaluate(_dense_grouped_pwsh_payload(), shell="powershell") or [""])[0]
+     .startswith("uninspectable command (Windows runner scripts too long"), True),
+    # The PowerShell quoting reading of a runner's script is judged by the rules, not only
+    # refused when it does not tokenize.
+    ("quoting reading: a runner's command after a block comment meets the push rule",
+     lambda: "forced git push is forbidden" in m.evaluate("pwsh -c '<#x#>git push --force'"),
+     True),
+    # The readings multiply per pwsh level. A benign three-level payload stays well under
+    # the cap, so a change that multiplies them again shows here before it refuses real
+    # commands.
+    ("runner budget: a 4 KB three-level nested pwsh script is not refused",
+     lambda: m.evaluate(_nested_pwsh_payload(), shell="powershell"), []),
+    ("runner budget: a 4 KB three-level nested pwsh script uses under half the cap",
+     lambda: _runner_budget_used("powershell", _nested_pwsh_payload())
+     < m._MAX_RUNNER_CHARS // 2, True),
     ("switch -c", lambda: m._ps_switch("-c"), "command"),
     ("switch /c", lambda: m._ps_switch("/c"), "command"),
     ("switch --command", lambda: m._ps_switch("--command"), "command"),

@@ -92,10 +92,12 @@ bash runs it, a false positive inside a <<'EOF' heredoc body); an odd number of
 double quotes inside a "$(cat <<'EOF' ...)" body, or an unbalanced quote in a
 top-level heredoc body, still fails to tokenize and is blocked.
 
-PowerShell payloads are also judged as the text PowerShell produces from its backtick
-escapes and typographic quotes, with PowerShell 7's and Windows PowerShell 5.1's
-escapes, with the Unicode space characters PowerShell separates words on read as
-spaces, and with a ( ) / $( ) / @( ) group around one word and every { } read away, so
+PowerShell payloads are also judged as the text PowerShell produces with its own
+quoting, backtick escapes and typographic quotes (so an inline `bash -c` script is
+read as PowerShell quotes it, not only as bash would), with PowerShell 7's and
+Windows PowerShell 5.1's escapes, with the Unicode space characters PowerShell
+separates words on read as spaces, and with a ( ) / $( ) / @( ) group around one word
+and every { } read away, so
 `git reset ("--hard")` and `& {...}` are judged as the words they become (see
 _ps_unescape, _PS_SPACES, _ps_ungroup and _powershell_segments). Limits: a $( )
 subexpression holding a nested "..." string is scanned as if the inner quote closed
@@ -1433,8 +1435,10 @@ def _runner_scripts(toks):
     --hard"` is `git reset --hard`. (A quoted script for a shell later in the words,
     `wsl -e bash -c '...'`, is still found whole by _split_inline_script.) cmd's text is
     also read with its ^ escapes removed, and a pwsh/powershell script in its grouping
-    reading (_ps_ungroup) and with its backtick escapes decoded. ps marks a PowerShell
-    script (see ps_script in _rules_at); outer, see _runner_rests.
+    reading (_ps_ungroup), with PowerShell's own quoting (_ps_unescape; see
+    _powershell_segments) and with its backtick escapes decoded. Both decoders read the
+    same base texts, never each other's output, so no escape is decoded twice. ps marks
+    a PowerShell script (see ps_script in _rules_at); outer, see _runner_rests.
     """
     out = []
     for kind, words, outer in _runner_rests(toks):
@@ -1444,7 +1448,9 @@ def _runner_scripts(toks):
         if kind == "ps":
             texts += [_ps_ungroup(t) for t in texts]
             texts += [_ps_block_statements(t) for t in texts[:1] if "{" in t or "}" in t]
-            texts += [_ps_unescape_everywhere(t) for t in texts if "`" in t]
+            base = list(texts)
+            texts += [_ps_unescape(t) for t in base]
+            texts += [_ps_unescape_everywhere(t) for t in base if "`" in t]
         out += [(t, kind == "ps", outer) for t in texts]
     return list(dict.fromkeys(out))
 
@@ -2229,9 +2235,11 @@ def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool
     runners can hand down thousands of distinct long scripts (~3 MB). Past
     _MAX_RUNNER_CHARS tokenized in one evaluation the command is refused as
     uninspectable (a block), like an over-long continuation chain, rather than run
-    toward the hook timeout. A dense 4 KB runner command uses about 64 KB, about
-    128 KB when cmd's caret reading doubles it; stacking a VT/FF break on top of that
-    can reach the cap."""
+    toward the hook timeout. A pwsh level can more than double the texts (its grouping,
+    block and quoting readings), so the use compounds with depth: a 4 KB PowerShell
+    payload of three nested `pwsh -c` levels with quoted paths uses about 92 KB (a test
+    keeps that one under half of the cap). A dense multi-level payload that also holds
+    groups, escapes, Unicode spaces or VT/FF breaks can reach the cap and is refused."""
     _RunnerBudget.used += len(script)
     if _RunnerBudget.used > _MAX_RUNNER_CHARS:
         raise _Uninspectable(
@@ -2441,8 +2449,9 @@ def _ps_unescape(text: str, legacy: bool = False) -> str:
     bareword keeps its characters, with each backtick escape decoded (quoted when it
     would split or quote a POSIX word), backtick-newline a line continuation and a
     literal backslash quoted. An @"..."@ here-string keeps its delimiters with the
-    body decoded; @'...'@ and comments are copied as they are. Unterminated text is
-    copied. legacy: decode as Windows PowerShell 5.1 does (see _ps_escape).
+    body decoded; @'...'@ and # comments are copied as they are, and a closed <# #>
+    comment becomes a space. Unterminated text is copied. legacy: decode as Windows
+    PowerShell 5.1 does (see _ps_escape).
     """
     out, i, n = [], 0, len(text)
     at_word_start = True
@@ -2475,10 +2484,14 @@ def _ps_unescape(text: str, legacy: bool = False) -> str:
             i = eol
             continue
         if c == "<" and at_word_start and text.startswith("<#", i):   # block comment
+            # PowerShell reads a closed one as blank space (bash would read `<#` as a
+            # redirect taking the next word); an unclosed one is copied
             end = text.find("#>", i + 2)
-            end = n if end == -1 else end + 2
-            out.append(text[i:end])
-            i = end
+            if end == -1:
+                out.append(text[i:])
+                break
+            out.append(" ")
+            i = end + 2
             continue
         if c in _PS_DQ or c in _PS_SQ:
             quoted = _ps_quoted(text, i, legacy)
@@ -2587,24 +2600,28 @@ def _powershell_segments(raw: str):
         # being dropped.
         segments += _segments(text, shell="powershell", ps_slashes=False,
                               lenient_on_error=True, ps_tool=True)
-        # ...and the text PowerShell itself produces from its escapes and typographic
-        # quotes, which is what a native program such as bash receives: _ps_unescape()
-        # follows PowerShell's quoting, and _ps_unescape_everywhere() decodes every
-        # escape whatever the context, so a scanner mistake about quoting cannot leave
-        # an escape undecoded. With a `e or `u in the text, both are also read with
-        # Windows PowerShell 5.1's escapes. A reading identical to the text, already
-        # judged above with the same arguments, or to another reading adds nothing and
-        # is skipped. An escape's value is a literal character, so a _PS_SPACES
-        # character it produces stays part of its word.
+        # ...and the words as PowerShell's own quoting gives them, which is the text an
+        # inline script for a native program such as bash is built from: _ps_unescape()
+        # follows PowerShell's quoting, escapes and typographic quotes. It is always
+        # taken, since the two quotings disagree even with no escape in the text (`\"`
+        # is a backslash and then a string in PowerShell, an escaped quote in bash; a '
+        # inside "..." quotes nothing in PowerShell). With a backtick or a typographic
+        # quote, _ps_unescape_everywhere() also decodes every escape whatever the
+        # context, so a scanner mistake about quoting cannot leave an escape undecoded;
+        # with a `e or `u, both are also read with Windows PowerShell 5.1's escapes. A
+        # reading identical to the text, already judged above with the same arguments,
+        # or to another reading adds nothing and is skipped. An escape's value is a
+        # literal character, so a _PS_SPACES character it produces stays part of its word.
+        readings = [_ps_unescape(text)]
         if "`" in text or any(q in text for q in _PS_TYPOGRAPHIC_QUOTES):
-            readings = [_ps_unescape(text), _ps_unescape_everywhere(text)]
+            readings += [_ps_unescape_everywhere(text)]
             if "`e" in text or "`u" in text:
                 readings += [_ps_unescape(text, legacy=True),
                              _ps_unescape_everywhere(text, legacy=True)]
-            for reading in dict.fromkeys(readings):
-                if reading != text:
-                    segments += _segments(reading, shell="powershell", ps_slashes=False,
-                                          lenient_on_error=True, ps_tool=True)
+        for reading in dict.fromkeys(readings):
+            if reading != text:
+                segments += _segments(reading, shell="powershell", ps_slashes=False,
+                                      lenient_on_error=True, ps_tool=True)
     return segments
 
 
