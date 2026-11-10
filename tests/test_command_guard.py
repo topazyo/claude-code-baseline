@@ -2000,6 +2000,9 @@ STRUCT_CASES = [
         "bash", ("env -iS x " * 410)[:4096]) < 3.0, True),
     ("timing: 4 KB of repeated env -S words (PowerShell)", lambda: _timing(
         "powershell", ("env -0S x " * 410)[:4096]) < 3.0, True),
+    # _ps_command_mode reads the word before each `(` as a number or a command name.
+    ("timing: 4 KB digit-led word before a group (PowerShell)", lambda: _timing(
+        "powershell", "{$y = " + "1" * 3940 + "x" + chr(13) + "(`$z)} <# #>") < 3.0, True),
     ("timing: 4 KB of glob brackets", lambda: _timing(
         "bash", "rm -rf /" + "[" * 4080) < 3.0, True),
 ]

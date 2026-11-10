@@ -242,7 +242,7 @@ _PS_TOOL_EXPR_NEXT = _PS_EXPR_NEXT | _PS_BINARY_MORE
 # A PowerShell number literal (`2`, `-1`, `0x1F`, `1.5e3`, `10kb`, `5L`): a value. Any other
 # word that starts with a digit (`7z`) names a command.
 _PS_NUMBER_RE = re.compile(
-    r"[+-]?(?:0x[0-9a-f]+|0b[01]+|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(?:u?[lsy]|[dnu])?(?:[kmgtp]b)?",
+    r"[+-]?(?:0x[0-9a-f]+|0b[01]+|(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(?:u?[lsy]|[dnu])?(?:[kmgtp]b)?",
     re.I)
 # A word such as `-f` or `-foo` at the start of a pipeline is read as a command name. A unary
 # operator (`-not`, `-split`) reads so too: the stricter reading of the `(` after it.
