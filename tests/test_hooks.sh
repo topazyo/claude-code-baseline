@@ -336,6 +336,44 @@ hbad_row "old Windows Python, failClosed:false: CLAUDE_CONFIG_DIR settings is st
   "$(def_payload Write "$UH/cfg/settings.json" content "x")" "REFUSED"
 unset CLAUDE_CONFIG_DIR
 resetcfg
+# A Cygwin or MSYS Python on a Windows host: the check refuses what it cannot judge, as
+# above, with scopeGuard off as here (the pristine config). Ordering only: this
+# interpreter still reads paths its own way; tests/test_msys_python.sh runs a real one.
+POSIXWIN='s/^_D_POSIX_WIN = .*/_D_POSIX_WIN = True/'
+hbad_row "Cygwin or MSYS Python: an ordinary write is refused" "$POSIXWIN" 2 "" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python: the standalone check refuses too" "$POSIXWIN" 2 \
+  "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":"x \\%s"}}' "$WT/src/x.py" ud800)" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python: a payload naming no file passes" "$POSIXWIN" 0 '{"tool_name":"Write","tool_input":{"content":"x"}}'
+hbad_row "Cygwin or MSYS Python: a protected path is still REFUSED" "$POSIXWIN" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+setcfg "c['failClosed']=False"
+hbad_row "Cygwin or MSYS Python, failClosed:false: a protected path is still REFUSED" "$POSIXWIN" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "REFUSED"
+# Unlike an old Windows Python, this one cannot read a Windows path at all, so what it
+# cannot judge is only announced under failClosed:false.
+hbad_row "Cygwin or MSYS Python, failClosed:false: an ordinary write is announced" "$POSIXWIN" 0 "" "not a Cygwin, MSYS or other POSIX one"
+# The hooks run none of their code on a Cygwin or MSYS Python: launched from Git Bash it
+# has its arguments parsed again, which mangles the scripts they pass with -c. One
+# behind a wrapper that hides its DLL is stopped by the prime's first statement (forced
+# here): no interpreter, and scope-guard fails closed on every edit, naming it.
+PGUARD='s/^if sys.platform.startswith(("cygwin", "msys")):$/if True:/'
+# With no interpreter the config cannot be read, so failClosed:false cannot take effect.
+hbad_row "Cygwin or MSYS Python behind a wrapper, failClosed:false (unreadable): still fails closed" "$PGUARD" 2 "" "not a Cygwin, MSYS or other POSIX one"
+resetcfg
+hbad_row "Cygwin or MSYS Python behind a wrapper: an ordinary write fails closed" "$PGUARD" 2 "" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python behind a wrapper: a protected path fails closed" "$PGUARD" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python behind a wrapper: a payload naming no file fails closed" "$PGUARD" 2 \
+  '{"tool_name":"Write","tool_input":{"content":"x"}}' "not a Cygwin, MSYS or other POSIX one"
+# ...and command-guard, from the same copy, blocks a clean command, naming it.
+hout="$(printf '%s' "$(bash_payload 'ls')" | bash "$HOMETMP/hbad/guardrails/command-guard.sh" 2>&1)"; rc=$?
+case "$rc:$hout" in 2:*"is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [command-guard, Cygwin or MSYS Python behind a wrapper: rc=$rc]" ;; esac
+# ...security-defaults (unprimed before: its own prime catches it) and the dispatcher too.
+hout="$(printf '%s' "$(write_payload "$WT/docker-compose.yml")" | bash "$HOMETMP/hbad/modules/security-defaults.sh" 2>&1)"; rc=$?
+case "$rc:$hout" in 2:*"is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [security-defaults, Cygwin or MSYS Python behind a wrapper: rc=$rc]" ;; esac
+hout="$(printf '%s' "$(write_payload "$WT/notes.txt")" | bash "$HOMETMP/hbad/dispatcher/post-write.sh" 2>&1)"; rc=$?
+case "$rc:$hout" in 2:*"is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [post-write, Cygwin or MSYS Python behind a wrapper: rc=$rc]" ;; esac
+resetcfg
 rm -rf "$HOMETMP/hbad"
 # Only scope-guard asks for the verdict: a plain prime (every other hook) computes none.
 ( source "$H/lib/common.sh"; bcl_prime "$(write_payload "$WT/.claude/agents/x.md")"
@@ -2539,6 +2577,28 @@ if [ "$pyrc" = 0 ] && [ -f "$PYT/.claude/settings.json" ]; then pass=$((pass + 1
 pyprobe 'PYVER=3.9
 '
 if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "printed unexpected output" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a probe answer without the os name must refuse: rc=$pyrc]"; fi
+# bcl_python_floor judges only a well-formed probe answer: anything else is refused, and
+# never evaluated (bash arithmetic would run a command substitution in a subscript).
+( . "$H/lib/common.sh"; ! bcl_python_floor 'x[$(touch '"$TMP"'/floor-ran)].1 posix' ) && [ ! -e "$TMP/floor-ran" ] \
+  && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [a malformed probe answer is refused unevaluated]"; }
+# (m) A Cygwin or MSYS Python keeps its runtime DLL beside it: bcl_python never takes
+# one, but takes the next name; with nothing else there is no interpreter, the reason
+# names it, and the installer says so before writing anything.
+mkpy "$TMP/py-m/bin" python3 real; : > "$TMP/py-m/bin/msys-2.0.dll"; mkpy "$TMP/py-m/next" python real
+got="$(PATH="$TMP/py-m/bin:$TMP/py-m/next:$PATH" bash -c '. "$1/lib/common.sh"; bcl_python' _ "$H")"
+if [ "$got" = python ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a python3 beside msys-2.0.dll must be skipped for the next name: got '$got']"; fi
+mkpy "$TMP/py-y/bin" python3 real; mkpy "$TMP/py-y/bin" python real; : > "$TMP/py-y/bin/cygwin1.dll"
+got="$(PATH="$TMP/py-y/bin:$PATH" bash -c '. "$1/lib/common.sh"; printf "[%s] %s" "$(bcl_python)" "$(bcl_nopy_reason)"' _ "$H")"
+case "$got" in "[] the Python on PATH is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [only Cygwin Pythons on PATH: no interpreter, and the reason names it: got '$got']" ;; esac
+pyinstall "$TMP/py-y/bin"
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is a Cygwin or MSYS Python" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install with only a Cygwin Python on PATH must say so before writing: rc=$pyrc]"; fi
+rm -rf "$TMP/py-m" "$TMP/py-y"
+# (l) A Cygwin or MSYS Python (POSIX paths on a Windows host), however new: refused,
+# with its own reason rather than "no working Python".
+pyprobe 'PYVER=3.12 posixwin
+'
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is a Cygwin or MSYS Python" \
+   && ! printf '%s' "$pyout" | grep -qF "no working Python" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a Cygwin or MSYS Python must refuse before writing: rc=$pyrc]"; fi
 
 echo "== install.sh version check (R4) =="
 # Stub a fake 'claude' on PATH (prepended, so it wins over any real CLI) and assert

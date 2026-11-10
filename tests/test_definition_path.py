@@ -328,6 +328,40 @@ try:
 finally:
     D["_D_OLD_NT"] = saved_flag
 
+# --- a Cygwin or MSYS Python: POSIX paths on a Windows host, so the check refuses ---
+posix_win = D["_d_posix_on_windows"]
+for plat, want in [("cygwin", True), ("msys", True), ("linux", False), ("win32", False),
+                   ("darwin", False), ("freebsd14", False)]:
+    check(f"_d_posix_on_windows({plat!r})", posix_win(plat), want)
+check("the posix-on-Windows flag reflects this interpreter", D["_D_POSIX_WIN"],
+      sys.platform.startswith(("cygwin", "msys")))
+# Ordering only: this interpreter still reads paths its own way, so these rows prove
+# that a protected path is judged before the refusal, not how a real Cygwin reads one.
+saved_posix = D["_D_POSIX_WIN"]
+D["_D_POSIX_WIN"] = True
+try:
+    check("posix-on-Windows Python: protected path text -> yes",
+          verdict_fn(payload(".claude/agents/h.md"), ".", {})[0], "yes")
+    check("posix-on-Windows Python: ordinary path -> posixpython",
+          verdict_fn(payload("src/app.py"), ".", {})[0], "posixpython")
+    check("posix-on-Windows Python: no file_path -> nopath",
+          verdict_fn({"tool_name": "Write", "tool_input": {"content": "x"}}, ".", {})[0], "nopath")
+    check("posix-on-Windows Python: not an object -> unparsed", verdict_fn(None, ".", {})[0], "unparsed")
+    with tempfile.TemporaryDirectory() as cfg_tmp:
+        cfg_env = {"CLAUDE_CONFIG_DIR": cfg_tmp}
+        check("posix-on-Windows Python: CLAUDE_CONFIG_DIR settings.json -> yes",
+              verdict_fn(payload(os.path.join(cfg_tmp, "settings.json")), ".", cfg_env)[0], "yes")
+        check("posix-on-Windows Python: CLAUDE_CONFIG_DIR, other file -> posixpython",
+              verdict_fn(payload(os.path.join(cfg_tmp, "notes.md")), ".", cfg_env)[0], "posixpython")
+finally:
+    D["_D_POSIX_WIN"] = saved_posix
+# Whatever the interpreter reports, a drive-letter project read the POSIX way is refused
+# (a wrapper reaching another POSIX Python from Windows); a Windows interpreter judges it.
+check("a drive-letter project, non-Windows interpreter -> posixpython",
+      verdict_fn(payload("src/app.py"), "C:/repo", {})[0] == "posixpython", os.name != "nt")
+check("a POSIX project, this interpreter -> not posixpython",
+      verdict_fn(payload("src/app.py"), ".", {})[0] != "posixpython", True)
+
 for f in failures:
     print("  FAIL " + f)
 print(f"test_definition_path: {count - len(failures)} passed, {len(failures)} failed")

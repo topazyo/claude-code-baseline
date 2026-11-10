@@ -71,7 +71,13 @@ if [[ $read_rc -ne 0 ]]; then
   bcl_say "[scope-guard] CONTROL COULD NOT RUN — could not read the tool payload from stdin: $BCL_READ_ERROR; the edit's target is unknown and was NOT checked."
   bcl_failclosed_exit; exit $?
 fi
-if [[ "${_BCL_PRIME_STATE:-}" == ok ]]; then
+# A Cygwin or MSYS Python is no interpreter to the hooks (see bcl_python), but unlike
+# none at all it means a Windows host whose paths nothing here can judge: fail closed on
+# every edit, as for an old Windows Python, rather than go inert.
+if [[ "${_BCL_PRIME_STATE:-}" == posixwin ]] || { [[ "${_BCL_PRIME_STATE:-}" == nopy ]] && bcl_python_posixwin; }; then
+  def_verdict=posixpython
+  def_real=""
+elif [[ "${_BCL_PRIME_STATE:-}" == ok ]]; then
   def_verdict="${_BCL_PL_DEFINITION:-}"
   def_real="${_BCL_PL_DEFREAL:-}"
 elif [[ -n "${_BCL_PY:-}" ]]; then
@@ -110,6 +116,9 @@ case "$def_verdict" in
     fi ;;
   oldpython)
     bcl_say "[scope-guard] CONTROL COULD NOT RUN — this check needs Python 3.8 or later on Windows, so whether the edit targets a path only a human may write was NOT checked. Install Python 3.8 or later and put it first on PATH."
+    bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc ;;
+  posixpython)
+    bcl_say "[scope-guard] CONTROL COULD NOT RUN — this check needs a native Windows Python, not a Cygwin, MSYS or other POSIX one, so whether the edit targets a path only a human may write was NOT checked. Install Python 3.8 or later for Windows and put it first on PATH."
     bcl_failclosed_exit; rc=$?; [[ $rc -ne 0 ]] && exit $rc ;;
   *)
     bcl_say "[scope-guard] CONTROL COULD NOT RUN — whether the edit targets a path only a human may write could not be decided (a link, UNC or device path it may not resolve, or the check failed); it was NOT checked."

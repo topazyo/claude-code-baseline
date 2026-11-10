@@ -125,6 +125,44 @@ jobs:
           NEWER_PY: ${{ steps.newer.outputs.python-path }}
         run: bash tests/test_old_windows_python.sh
 
+  # A Cygwin or MSYS Python on Windows reads Windows paths as POSIX paths: the installer
+  # must refuse it, and hooks that find it first on PATH must fail closed. Only a real
+  # one shows what such an interpreter reports, so this job installs MSYS2's own Python
+  # (the runner image ships MSYS2 without it). A separate job, so that a package-mirror
+  # failure here cannot fail the others.
+  msys-python-refused:
+    name: MSYS Python refused (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: native
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      # A full upgrade first: installing one package against the image's older database
+      # is a partial upgrade, which MSYS2 does not support. The first run may update the
+      # core and end its shell, so it runs twice, each in a fresh one.
+      - name: Install MSYS2's Python
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          C:\msys64\usr\bin\bash.exe -lc 'pacman -Syu --noconfirm'
+          C:\msys64\usr\bin\bash.exe -lc 'pacman -Syu --noconfirm'
+          C:\msys64\usr\bin\bash.exe -lc 'pacman -S --noconfirm --needed python'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $py = Get-ChildItem C:\msys64\usr\bin -Filter 'python3.*.exe' |
+            Where-Object Name -match '^python3\.\d+\.exe$' | Select-Object -First 1
+          if (-not $py) { Write-Error "no python3.X.exe in C:\msys64\usr\bin"; exit 1 }
+          # What the interpreter reports, from a process with no Cygwin-family parent.
+          & $py.FullName -c "import os, sys; print(sys.platform, os.name, os.uname().sysname)"
+          "MSYS_PY=$($py.FullName -replace '\\','/')" >> $env:GITHUB_ENV
+      - name: Installer and hooks refuse a Cygwin or MSYS Python
+        shell: bash
+        env:
+          NATIVE_PY: ${{ steps.native.outputs.python-path }}
+        run: bash tests/test_msys_python.sh
+
 # The policy-change release gate lives in policy-gate.yml, which runs on
 # pull_request only. It used to be a job here with `if: github.event_name ==
 # 'pull_request'`: on a push run that job was SKIPPED, a skipped job reports
