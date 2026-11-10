@@ -271,9 +271,11 @@ def in_code(span: str, codes: list[str]) -> bool:
     """The span sits inside one English code text, starting and ending on a token
     boundary: a Hebrew `git push --force` must not pass as part of an English
     `git push --force-with-lease`, nor `rm -rf ~` as part of `rm -rf ~/.cache`. A
-    word character, `-`, `.`, `/`, `~` or `=` continues a token (a name, a path, an
-    option value); a space, quote, colon, `;`, `|` or bracket ends one."""
-    pat = re.compile(r"(?<![\w./~=-])" + re.escape(span) + r"(?![\w./~=-])")
+    word character, `-`, `.`, `/`, a backslash, `~`, `*` or `=` continues a token (a name, a
+    path, a glob, an option value); a space, quote, colon, `;`, `|` or bracket ends
+    one. Trailing words may still be left off at a space (`push --force` from
+    `git push --force`), by design."""
+    pat = re.compile(r"(?<![\w./~=*\\-])" + re.escape(span) + r"(?![\w./~=*\\-])")
     return any(pat.search(c) for c in codes)
 
 

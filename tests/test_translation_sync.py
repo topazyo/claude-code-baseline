@@ -517,6 +517,14 @@ def cut_short_at_a_path_fails(root):
 
 
 @case
+def cut_short_before_a_glob_fails(root):
+    en = EN.replace("Use `git push --force` never.", "Use `git push --force` never. Then `rm -rf /tmp/*`.")
+    build(root, en=en, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `rm -rf /tmp/`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `rm -rf /tmp/`" in out, out)
+
+
+@case
 def shortened_option_in_a_section_fails(root):
     # English `git push --force-with-lease`, Hebrew `git push --force`: a different command.
     build(root, en=EN.replace("`git push --force`", "`git push --force-with-lease`"))
