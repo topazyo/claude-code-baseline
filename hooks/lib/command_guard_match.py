@@ -2238,9 +2238,8 @@ def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool
     toward the hook timeout. A pwsh level can more than double the texts (its grouping,
     block and quoting readings), so the use compounds with depth: a 4 KB PowerShell
     payload of three nested `pwsh -c` levels with quoted paths uses about 92 KB (a test
-    keeps that one under half of the cap), and a dense Bash one with VT breaks about
-    340 KB. A dense multi-level payload that also holds groups, escapes or Unicode
-    spaces can reach the cap and is refused."""
+    keeps that one under half of the cap). A dense multi-level payload that also holds
+    groups, escapes, Unicode spaces or VT/FF breaks can reach the cap and is refused."""
     _RunnerBudget.used += len(script)
     if _RunnerBudget.used > _MAX_RUNNER_CHARS:
         raise _Uninspectable(

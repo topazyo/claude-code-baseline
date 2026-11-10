@@ -2088,7 +2088,9 @@ STRUCT_CASES = [
     ("timing: 4 KB nested-runner chain in one segment (PowerShell)",
      lambda: _timing("powershell", _long_runner_chain()) < 3.0, True),
     # Accepted cost: a dense three-level payload with groups and escapes reaches the cap
-    # and is refused (it fails closed).
+    # and is refused (it fails closed). If this row starts failing because the payload
+    # is inspected, the cost was removed: make it an allow check, do not restore the
+    # refusal.
     ("fp cost: runner budget: a dense 4 KB three-level grouped pwsh script is refused",
      lambda: (m.evaluate(_dense_grouped_pwsh_payload(), shell="powershell") or [""])[0]
      .startswith("uninspectable command (Windows runner scripts too long"), True),
