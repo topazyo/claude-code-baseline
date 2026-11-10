@@ -179,6 +179,8 @@ begin; touchf vendor/Hooks/x.sh vendor/INSTALL.sh; commit
 expect 1 "$NOFIX" "case variants of policy paths"
 begin; touchf tests/translation_sync.py; commit
 expect 1 "$NOFIX" "a non-fixture file under tests/"
+begin; touchf tests/translation_sync.py tests/test_translation_sync.py; commit
+expect 1 "$NOFIX" "the translation checker plus its own fixtures is still not an enforcement fixture"
 begin; touchf tests/re.py; commit
 expect 1 "$NOFIX" "a new module under tests/ (it would shadow the stdlib for the suites)"
 case "$(uname -s)" in

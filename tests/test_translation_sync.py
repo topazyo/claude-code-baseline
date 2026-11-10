@@ -156,6 +156,10 @@ def check(cond: bool, msg: str = "") -> None:
 CASES = []
 
 
+class Skip(Exception):
+    """A case that cannot run on this host: reported as a skip, never counted as passed."""
+
+
 def case(fn):
     CASES.append(fn)
     return fn
@@ -213,7 +217,7 @@ def dropped_inline_command_fails(root):
 def invented_inline_command_fails(root):
     build(root, he=HE.replace("`git push --force`", "`git push --force` או `rm -rf /`"))
     rc, out = run_check(root)
-    check(rc == 1 and "Hebrew inline code not found in the English: `rm -rf /`" in out, out)
+    check(rc == 1 and "Hebrew inline code not found in the English code: `rm -rf /`" in out, out)
 
 
 @case
@@ -223,7 +227,7 @@ def he_note_prose_is_not_compared(root):
     check(rc == 0, out)
 
 
-HE_ONLY_FAIL = "Hebrew-only content: inline code not found in the English or the repository"
+HE_ONLY_FAIL = "Hebrew-only content: inline code not found in the English code or the repository"
 
 
 @case
@@ -421,6 +425,82 @@ def readme_partial_translation_is_allowed(root):
     check(rc == 0, out)
 
 
+@case
+def link_outside_the_repo_fails(root):
+    # The file exists, beside the repository: still refused, and never read.
+    repo = root / "repo"
+    repo.mkdir()
+    (root / "outside.md").write_text("# Out\n", encoding="utf-8")
+    build(repo, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו [x](../outside.md).\n"))
+    rc, out = run_check(repo)
+    check(rc == 1 and "link target outside the repository: ../outside.md" in out, out)
+
+
+@case
+def absolute_and_drive_links_fail(root):
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו [a](/abs.md) ו-[b](C:/x.md).\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and "link target outside the repository: /abs.md" in out
+          and "link target outside the repository: C:/x.md" in out, out)
+
+
+@case
+def link_that_leaves_and_comes_back_fails(root):
+    # ../repo/ONBOARDING.md resolves back inside a checkout named repo; GitHub renders
+    # it broken, so it is judged on its text first.
+    repo = root / "repo"
+    repo.mkdir()
+    build(repo, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו [x](../repo/ONBOARDING.md).\n"))
+    rc, out = run_check(repo)
+    check(rc == 1 and "link target outside the repository: ../repo/ONBOARDING.md" in out, out)
+
+
+@case
+def link_through_a_subdirectory_passes(root):
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו [x](hooks/../ONBOARDING.md#appendix).\n"))
+    rc, out = run_check(root)
+    check(rc == 0, out)
+
+
+@case
+def link_through_a_symlink_out_of_the_repo_fails(root):
+    # Its text stays inside; where it resolves does not.
+    repo = root / "repo"
+    repo.mkdir()
+    (root / "outdir").mkdir()
+    (root / "outdir" / "x.md").write_text("# X\n", encoding="utf-8")
+    try:
+        os.symlink(root / "outdir", repo / "out", target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        raise Skip(f"no symbolic link could be made here ({exc.__class__.__name__})")
+    build(repo, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו [x](out/x.md).\n"))
+    rc, out = run_check(repo)
+    check(rc == 1 and "link target outside the repository: out/x.md" in out, out)
+
+
+@case
+def he_only_span_from_english_prose_fails(root):
+    # "Intro with" is English prose, not code: quoting it is not quoting a command.
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `Intro with`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `Intro with`" in out, out)
+
+
+@case
+def section_span_from_english_prose_fails(root):
+    build(root, he=HE.replace("הריצו:", "הריצו `Run this`:"))
+    rc, out = run_check(root)
+    check(rc == 1 and "Hebrew inline code not found in the English code: `Run this`" in out, out)
+
+
+@case
+def span_inside_one_english_code_span_passes(root):
+    # Part of one code span still counts, as before.
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `push --force`.\n"))
+    rc, out = run_check(root)
+    check(rc == 0, out)
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
@@ -428,16 +508,20 @@ def main() -> int:
         print("  FAIL assertions are disabled (python -O / PYTHONOPTIMIZE): a case that"
               " used a bare assert would pass without checking anything")
         return 1
-    failed = 0
+    failed = skipped = 0
     for fn in CASES:
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 fn(Path(tmp))
                 print(f"   ok {fn.__name__}")
-            except Exception as exc:  # an exception is a failure too, never a skip
+            except Skip as why:
+                skipped += 1
+                print(f"   skip {fn.__name__}: {why}")
+            except Exception as exc:  # any other exception is a failure, never a skip
                 failed += 1
                 print(f"  FAIL {fn.__name__}: {type(exc).__name__}: {exc}")
-    print(f"   {len(CASES) - failed}/{len(CASES)} translation-sync fixtures passed")
+    print(f"   {len(CASES) - failed - skipped}/{len(CASES)} translation-sync fixtures passed"
+          + (f", {skipped} skipped" if skipped else ""))
     return 1 if failed else 0
 
 

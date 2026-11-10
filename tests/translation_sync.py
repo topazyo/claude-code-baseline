@@ -37,11 +37,13 @@ What `check` verifies, per Hebrew file
      as a multiset, in both directions; an untagged block (a diagram) kept in Hebrew
      must exist verbatim in the English section;
   5. every inline code span of the English section appears in the Hebrew section,
-     and every Hebrew inline code span is a substring of the English section, so a
-     translation can neither drop a command nor invent one;
+     and every Hebrew inline code span is a substring of one of the English section's
+     code spans or blocks (not of its prose), so a translation can neither drop a
+     command nor invent one;
   5a. content that exists only in Hebrew (before the first marker, he-only regions,
      he-note boxes) is not compared with a section, but it cannot invent a command
-     either: each inline code span is in the English file or names an existing file in
+     either: each inline code span is in one of the English file's code spans or blocks
+     (not its prose) or names an existing file in
      the repository (judged on the text first: no absolute, drive, backslash or `..`
      path), and inside the he-decoder table it may also quote one line of the hook
      source (an elided message's parts in order on that line); each fenced block is a
@@ -50,7 +52,9 @@ What `check` verifies, per Hebrew file
      U+061C): inside a command they are a copy-paste hazard ("Trojan Source");
   7. the file is wrapped in <div dir="rtl"> and every fenced block in
      <div dir="ltr">, so direction does not depend on renderer heuristics;
-  8. every `#anchor` link resolves to a heading in the file it points at;
+  8. every relative link stays inside the repository (judged on its text first: no
+     absolute, drive, backslash or escaping `..` target; then where it resolves), and
+     every `#anchor` link resolves to a heading in the file it points at;
   9. every message fragment in the he-decoder table still occurs in the hook
      source (hooks/, install.sh), so the message decoder cannot drift silently.
 
@@ -65,6 +69,7 @@ import re
 import sys
 import unicodedata
 from collections import Counter
+import posixpath
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # (Hebrew file, English source, every English section must be translated?)
@@ -232,6 +237,35 @@ def check_direction(he_text: str) -> list[str]:
     return problems
 
 
+def link_in_repo(he_path: Path, file_part: str, root: Path) -> bool:
+    """A relative link target that stays inside the repository. Judged on the text
+    first, as is_repo_path judges a path, so no absolute, drive or backslash target, and
+    none whose `..` parts leave the repository even to come back in; then by where it
+    resolves, which catches a link (symlink) inside the repository pointing out. The
+    root is resolved too: resolve() expands 8.3 short names (a Windows runner's temp)."""
+    if "\\" in file_part or PurePosixPath(file_part).is_absolute() or PureWindowsPath(file_part).drive:
+        return False
+    try:
+        base = he_path.parent.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return False
+    rel = posixpath.normpath(posixpath.join(base, file_part))
+    if rel == ".." or rel.startswith("../"):
+        return False
+    try:
+        (he_path.parent / file_part).resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def code_texts(text: str) -> list[str]:
+    """Every inline code span and fenced block body of an English text, each on its own
+    and whitespace-normalised. A Hebrew span must sit inside ONE of them: matched against
+    a join, it could straddle two neighbouring spans and invent a command."""
+    return [normalize_ws(c) for c in list(inline_spans(text)) + [b[1] for b in fenced_blocks(text)]]
+
+
 def check_links(he_path: Path, he_text: str, root: Path) -> list[str]:
     problems = []
     own = heading_slugs(he_text)
@@ -241,6 +275,9 @@ def check_links(he_path: Path, he_text: str, root: Path) -> list[str]:
             continue  # external URL
         file_part, _, frag = target.partition("#")
         if file_part:
+            if not link_in_repo(he_path, file_part, root):
+                problems.append(f"link target outside the repository: {target}")
+                continue
             dest = (he_path.parent / file_part).resolve()
             if not dest.exists():
                 problems.append(f"link target does not exist: {target}")
@@ -347,10 +384,11 @@ def in_hook_line(span: str, corpus_lines: list[str]) -> bool:
 
 def check_hebrew_only(he_text: str, en_text: str, root: Path) -> list[str]:
     """Hebrew-only content is not a translation, but it may not invent a command either:
-    every code span in it comes from the English file or names a file in the repository,
+    every code span in it comes from one of the English file's code spans or blocks (not
+    its prose) or names a file in the repository,
     and inside the he-decoder table it may also quote the hook source the table decodes.
     Every fenced block in it is a block of the English file."""
-    en_flat = normalize_ws(en_text)
+    en_codes = code_texts(en_text)
     en_blocks = fenced_blocks(en_text)
     en_tagged = {b for b in en_blocks if b[0]}
     en_untagged = {b[1] for b in en_blocks if not b[0]}
@@ -361,7 +399,7 @@ def check_hebrew_only(he_text: str, en_text: str, root: Path) -> list[str]:
         pieces += [(table, True) for table in DECODER_RE.findall(region)]
         for text, in_decoder in pieces:
             for span in inline_spans(text):
-                if span in en_flat or is_repo_path(root, span):
+                if any(span in c for c in en_codes) or is_repo_path(root, span):
                     continue
                 if in_decoder:
                     if corpus_lines is None:
@@ -370,7 +408,7 @@ def check_hebrew_only(he_text: str, en_text: str, root: Path) -> list[str]:
                     if in_hook_line(span, corpus_lines):
                         continue
                 problems.append(
-                    f"Hebrew-only content: inline code not found in the English or the repository: `{span}`"
+                    f"Hebrew-only content: inline code not found in the English code or the repository: `{span}`"
                 )
             for tag, body in fenced_blocks(text):
                 if (tag and (tag, body) not in en_tagged) or (not tag and body not in en_untagged):
@@ -439,12 +477,12 @@ def check_pair(root: Path, he_name: str, en_name: str, complete: bool) -> tuple[
                 problems.append(f"section '{sid}': untagged Hebrew block not verbatim from the English: {body[:60]!r}")
 
         he_spans = set(inline_spans(he_sec))
-        en_flat = normalize_ws(en_sec)
+        en_codes = code_texts(en_sec)
         for span in sorted(set(inline_spans(en_sec)) - he_spans):
             problems.append(f"section '{sid}': inline code missing in Hebrew: `{span}`")
         for span in sorted(he_spans):
-            if span not in en_flat:
-                problems.append(f"section '{sid}': Hebrew inline code not found in the English: `{span}`")
+            if not any(span in c for c in en_codes):
+                problems.append(f"section '{sid}': Hebrew inline code not found in the English code: `{span}`")
     return [f"{he_name}: {p}" for p in problems], stale
 
 
