@@ -182,9 +182,11 @@ a fixture in `tests/` before bumping the pin.
       `tools/`, `managed/`, `examples/`, `tests/`, `install.sh`, `settings.template.json`,
       `baseline.config.json` beyond its version line, the schema, `.gitattributes`,
       `.gitmodules`, `.github/` (except `CODEOWNERS`); root-level `*.md` and any
-      `README*.md` are exempt — an enforcement fixture file was added or modified too: `tests/test_command_guard.py`, `test_hooks.sh`,
-      `test_managed.sh`, `test_merge_settings.py`, `test_status.sh` or
-      `test_policy_gate.sh`. `tests/policy-change-gate.sh` fails the PR otherwise; CI
+      `README*.md` are exempt — an enforcement fixture file was added or modified too:
+      `tests/test_command_guard.py`, `test_hooks.sh`, `test_managed.sh`,
+      `test_merge_settings.py`, `test_status.sh`, `test_policy_gate.sh`,
+      `test_definition_path.py`, `test_old_windows_python.sh` or `test_msys_python.sh`.
+      `tests/policy-change-gate.sh` fails the PR otherwise; CI
       (`.github/workflows/policy-gate.yml`) runs the base branch's copy, and branch
       protection requires the "Policy-change release gate" check.
 - [ ] The block corpus did not shrink: `BLOCK_FLOOR` in `test_command_guard.py` was not
