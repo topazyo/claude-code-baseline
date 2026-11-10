@@ -37,9 +37,9 @@ What `check` verifies, per Hebrew file
      as a multiset, in both directions; an untagged block (a diagram) kept in Hebrew
      must exist verbatim in the English section;
   5. every inline code span of the English section appears in the Hebrew section,
-     and every Hebrew inline code span is a substring of one of the English section's
-     code spans or blocks (not of its prose), so a translation can neither drop a
-     command nor invent one;
+     and every Hebrew inline code span sits inside one of the English section's code
+     spans or blocks, on token boundaries (not in its prose, not a cut-off token), so a
+     translation can neither drop a command nor invent one;
   5a. content that exists only in Hebrew (before the first marker, he-only regions,
      he-note boxes) is not compared with a section, but it cannot invent a command
      either: each inline code span is in one of the English file's code spans or blocks
@@ -52,7 +52,7 @@ What `check` verifies, per Hebrew file
      U+061C): inside a command they are a copy-paste hazard ("Trojan Source");
   7. the file is wrapped in <div dir="rtl"> and every fenced block in
      <div dir="ltr">, so direction does not depend on renderer heuristics;
-  8. every relative link stays inside the repository (judged on its text first: no
+  8. every relative inline link (`[text](target)`) stays inside the repository (judged on its text first: no
      absolute, drive, backslash or escaping `..` target; then where it resolves), and
      every `#anchor` link resolves to a heading in the file it points at;
   9. every message fragment in the he-decoder table still occurs in the hook
@@ -263,7 +263,15 @@ def code_texts(text: str) -> list[str]:
     """Every inline code span and fenced block body of an English text, each on its own
     and whitespace-normalised. A Hebrew span must sit inside ONE of them: matched against
     a join, it could straddle two neighbouring spans and invent a command."""
-    return [normalize_ws(c) for c in list(inline_spans(text)) + [b[1] for b in fenced_blocks(text)]]
+    return [re.sub(r"\s+", " ", c) for c in list(inline_spans(text)) + [b[1] for b in fenced_blocks(text)]]
+
+
+def in_code(span: str, codes: list[str]) -> bool:
+    """The span sits inside one English code text, starting and ending on a token
+    boundary: a Hebrew `git push --force` must not pass as part of an English
+    `git push --force-with-lease`, nor a cut-off `--for` as part of `--force`."""
+    pat = re.compile(r"(?<![\w-])" + re.escape(span) + r"(?![\w-])")
+    return any(pat.search(c) for c in codes)
 
 
 def check_links(he_path: Path, he_text: str, root: Path) -> list[str]:
@@ -271,7 +279,7 @@ def check_links(he_path: Path, he_text: str, root: Path) -> list[str]:
     own = heading_slugs(he_text)
     for m in LINK_RE.finditer(without_fences(he_text)):
         target = m.group(1)
-        if re.match(r"^[a-z]+:", target):
+        if re.match(r"^[a-z][a-z0-9+.-]+:", target):
             continue  # external URL
         file_part, _, frag = target.partition("#")
         if file_part:
@@ -399,7 +407,7 @@ def check_hebrew_only(he_text: str, en_text: str, root: Path) -> list[str]:
         pieces += [(table, True) for table in DECODER_RE.findall(region)]
         for text, in_decoder in pieces:
             for span in inline_spans(text):
-                if any(span in c for c in en_codes) or is_repo_path(root, span):
+                if in_code(span, en_codes) or is_repo_path(root, span):
                     continue
                 if in_decoder:
                     if corpus_lines is None:
@@ -481,7 +489,7 @@ def check_pair(root: Path, he_name: str, en_name: str, complete: bool) -> tuple[
         for span in sorted(set(inline_spans(en_sec)) - he_spans):
             problems.append(f"section '{sid}': inline code missing in Hebrew: `{span}`")
         for span in sorted(he_spans):
-            if not any(span in c for c in en_codes):
+            if not in_code(span, en_codes):
                 problems.append(f"section '{sid}': Hebrew inline code not found in the English code: `{span}`")
     return [f"{he_name}: {p}" for p in problems], stale
 

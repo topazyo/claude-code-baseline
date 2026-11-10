@@ -472,10 +472,47 @@ def link_through_a_symlink_out_of_the_repo_fails(root):
     try:
         os.symlink(root / "outdir", repo / "out", target_is_directory=True)
     except (OSError, NotImplementedError) as exc:
+        if os.name != "nt":
+            raise   # Linux and macOS can always make one: a failure there is a failure
         raise Skip(f"no symbolic link could be made here ({exc.__class__.__name__})")
     build(repo, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו [x](out/x.md).\n"))
     rc, out = run_check(repo)
     check(rc == 1 and "link target outside the repository: out/x.md" in out, out)
+
+
+@case
+def backslash_unc_and_lowercase_drive_links_fail(root):
+    bs = chr(92)
+    links = "[a](.." + bs + "outside.md) [b](//host/share/x.md) [c](c:/x.md)"
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\n" + links + "\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and "link target outside the repository: .." + bs + "outside.md" in out
+          and "link target outside the repository: //host/share/x.md" in out
+          and "link target outside the repository: c:/x.md" in out, out)
+
+
+@case
+def span_across_two_english_spans_fails(root):
+    # Each English code span stands alone: joined, `install.sh git` would match.
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `install.sh git`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `install.sh git`" in out, out)
+
+
+@case
+def cut_off_token_fails(root):
+    # Inside an English code span, but cutting a token: not a command the English gives.
+    build(root, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `git push --for`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `git push --for`" in out, out)
+
+
+@case
+def shortened_option_in_a_section_fails(root):
+    # English `git push --force-with-lease`, Hebrew `git push --force`: a different command.
+    build(root, en=EN.replace("`git push --force`", "`git push --force-with-lease`"))
+    rc, out = run_check(root)
+    check(rc == 1 and "Hebrew inline code not found in the English code: `git push --force`" in out, out)
 
 
 @case
