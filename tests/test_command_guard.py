@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 341
+FP_FLOOR = 355
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 673
+BLOCK_FLOOR = 729
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -727,6 +727,56 @@ CASES = [
     ("fp powershell positional cmdlet with -ea", "powershell Get-ChildItem -ea 0", A, ()),
     ("fp pwsh script argument -e", "pwsh build.ps1 -e prod", A, ()),
     ("fp pwsh -c destructuring assignment", "pwsh -c '$a, $b = 1, 2'", A, ()),
+    # A pwsh script whose $ word the outer shell expands first is not the text pwsh gets.
+    ("pwsh -c an unquoted variable script", "pwsh -c $CMD", B, ()),
+    ("pwsh -c a double-quoted variable script", 'pwsh -c "$CMD"', B, ()),
+    ("pwsh -c double-quoted variable then -eq", 'pwsh -c "$CMD -eq /"', B, ()),
+    ("pwsh -Command double-quoted variable then -and", 'pwsh -Command "$CMD -and 1"', B, ()),
+    ("powershell -c double-quoted variable then -or", 'powershell -c "$CMD -or x"', B, ()),
+    ("pwsh script: a variable in double quotes inside", 'pwsh -c "\'$x\' = 1"', B, ()),
+    ("bash -c double quotes around a pwsh script", "bash -c \"pwsh -c '$CMD'\"", B, ()),
+    ("bash -c single quotes around a double-quoted pwsh script",
+     "bash -c 'pwsh -c \"$CMD\"'", B, ()),
+    ("cmd /c pwsh -c an unquoted variable script", "cmd /c pwsh -c $CMD", B, ()),
+    ("wsl pwsh -c a double-quoted variable script", 'wsl pwsh -c "$CMD"', B, ()),
+    ("env pwsh -c a double-quoted variable script", 'env pwsh -c "$CMD"', B, ()),
+    ("a comment's quote, then pwsh -c on the next line",
+     "echo #'" + chr(10) + "pwsh -c $CMD" + chr(10) + "'", B, ()),
+    # In a pwsh script only the statement's own first word is an expression.
+    ("pwsh -c call operator on a variable", "pwsh -c '& $y'", B, ()),
+    ("pwsh -c dot-invoked variable", "pwsh -c '. $y'", B, ()),
+    ("pwsh -c dot-invoked variable with arguments", "pwsh -c '. $y push --force'", B, ()),
+    ("pwsh -c variable behind a wrapper", "pwsh -c 'sudo $x'", B, ()),
+    # Accepted costs: a group in argument position is read as the PowerShell tool reads
+    # it; the quote-blind pass cannot see single quotes; cmd's line is re-read with bash
+    # quoting; an expanded word after the script counts.
+    ("fp cost: pwsh -c argument group of a variable", "pwsh -c 'Write-Output ($x)'", B, ()),
+    ("fp cost: quote-blind pass on a substitution line", "x=$(date); pwsh -c '$y = 1'", B, ()),
+    ("fp cost: cmd /c pwsh -c single-quoted", "cmd /c pwsh -c '$x = 1'", B, ()),
+    ("fp cost: an expanded word after the script", "pwsh -c '$x = 1' \"$HOME\"", B, ()),
+    ("fp pwsh -c escaped dollar in double quotes", 'pwsh -c "' + chr(92) + '$x = 1"', A, ()),
+    ("fp pwsh -c double-quoted variable argument", 'pwsh -c "Write-Output $x"', A, ()),
+    ("fp pwsh -c with an expanded redirect target",
+     "pwsh -c '$x = 1; Write-Output $x' > \"$OUT\"", A, ()),
+    ("fp pwsh -c after an expanded env prefix", "X=$HOME pwsh -c '$x = 1'", A, ()),
+    ("fp bash dot-source a variable path", ". $VENV/bin/activate", A, ()),
+    ("fp bash dot-source a quoted variable path", '. "$HOME/.bashrc"', A, ()),
+    # An expanded pwsh script is still read as PowerShell: its dot-invocation is a call.
+    ("pwsh -c double-quoted dot-invoked variable", 'y=git; pwsh -c ". $y push --force"', B, ()),
+    ("pwsh -c double-quoted dot-invoked script", 'pwsh -c ". $CMD"', B, ()),
+    ("powershell positional double-quoted dot-invoked", 'powershell ". $CMD"', B, ()),
+    ("pwsh -c dot-invoked variable, expanded word after", "pwsh -c '. $y' \"$HOME\"", B, ()),
+    ("pwsh fed an expanded here-string", 'pwsh <<< "$CMD"', B, ()),
+    ("fp pwsh fed a single-quoted here-string", "pwsh <<< '$x = 1'", A, ()),
+    ("xargs-fed script with a pwsh call operator",
+     "ls | xargs bash -c \"pwsh -c '& " + chr(92) + "$y'\"", B, ()),
+    ("the same pwsh script single- then double-quoted",
+     "pwsh -c '$x = 1'; pwsh -c \"$x = 1\"", B, ()),
+    ("fp bash -c pwsh script after an expanded env prefix",
+     "X=$HOME bash -c 'pwsh -c \"" + chr(92) + "$x = 1\"'", A, ()),
+    # Accepted cost: a called group's latch lasts to the end of the script.
+    ("fp cost: pwsh -c statement after a called group",
+     "pwsh -c '& (gcm git) --version; $x = 1'", B, ()),
     ("fp a long cmd /c echo", "cmd /c echo " + "word " * 780, A, ()),
     ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
      ("status ; echo",)),
@@ -914,7 +964,8 @@ PS_CASES = [
     ("ps fp Write-Output (Get-Date)", "Write-Output (Get-Date)", A, ()),
     ("ps fp if (Test-Path) block", "if (Test-Path x) { git status }", A, ()),
     ("ps fp dot-source a script", ". ./build.ps1", A, ()),
-    ("ps fp dot-source $PROFILE", ". $PROFILE", A, ()),
+    # Dot-sourcing a variable calls what it names, as `& $PROFILE` does.
+    ("ps dot-source $PROFILE is a call of a variable", ". $PROFILE", B, ()),
     ("ps rm through a parent step", "rm -r -Force .\\build\\..\\*", B, ()),
     ("ps fp parens in a commit message", 'git commit -m "Fix (#12)"', A, ()),
     ("ps fp targeted rm of a joined temp path", "rm -r -fo (Join-Path $env:TEMP build)", A, ()),
@@ -1325,6 +1376,23 @@ PS_STATEMENT_ALLOW += [
 PS_STATEMENT_ALLOW += [
     'git push (origin) $z + ($y)',
     "$a -f 'x' git push --force",
+]
+# A dot-invoked variable is a call, as with `&`, wherever the statement stands. A
+# dot-sourced path is judged by its literal last part, as `& path` is.
+PS_STATEMENT_BLOCK += [
+    '. $y', '. $y push --force', '. ${y}', '. $env:y', '. "$y"', '. $y.Name', '. $global:y',
+    '. $using:y', '2>&1 . $y', '$x -eq (. $y push --force)', '$x = (. $y push --force)',
+    'Write-Output (. $y push --force)', 'if ($a) { . $y }', '{ . $y }', 'x | . $y',
+    '-not . $y', '1; . $y', '$x | % { . $y }', 'try { . $y } catch {}', '& { . $y }',
+    '$h = @{ a = (. $y) }',
+    # A runner's script this payload expands first.
+    'pwsh -c "$x = 1"', 'pwsh -c $CMD', '$r = pwsh -c "$CMD"', 'pwsh -c ". $CMD"',
+    'pwsh -c "' + chr(92) + '$CMD"', 'pwsh -c @"' + chr(10) + '$CMD' + chr(10) + '"@',
+]
+PS_STATEMENT_ALLOW += [
+    '. $PSScriptRoot/x.ps1', '. "$PSScriptRoot/lib.ps1"',
+    '. "$PSScriptRoot' + chr(92) + 'lib.ps1"', '$x = 1; . ./a.ps1', "pwsh -c '$x = 1'",
+    "$r = pwsh -c '$x = 1'", "pwsh -c @'" + chr(10) + "$x = 1" + chr(10) + "'@",
 ]
 PS_CASES += [(f"ps statement: {c!r}", c, A, ()) for c in PS_STATEMENT_ALLOW]
 PS_CASES += [(f"ps not an ordinary statement: {c!r}", c, B, ()) for c in PS_STATEMENT_BLOCK]
@@ -1858,12 +1926,34 @@ STRUCT_CASES = [
         _seg(["$a", "=", "$b", "+=", "git", "reset", "--hard"], ps_script=True))), True),
     ("ps_script: a 4 KB assignment chain is judged without recursion",
      lambda: m.evaluate("pwsh -c '" + "$a = " * 800 + "x'"), []),
-    ("ps_script: an assignment chain behind skipped words is judged without recursion",
-     lambda: [m.evaluate("pwsh -c '$a = " + link * n + "x'") for link, n in
+    # A $ word behind a skipped word (`- $b`, `sh $b`, `a= $b`) is not the statement's
+    # first word, so it is refused at the first link: still without recursion.
+    ("ps_script: an assignment chain behind skipped words is refused without recursion",
+     lambda: [bool(m.evaluate("pwsh -c '$a = " + link * n + "x'")) for link, n in
               (("- $b = ", 580), ("- $ = ", 670), ("sh $b = ", 500), ("a= $b = ", 500))],
-     [[], [], [], []]),
-    ("ps_script: the same chain in a PowerShell payload", lambda: m.evaluate(
-        "pwsh -c '$a = " + "- $b = " * 580 + "x'", shell="powershell"), []),
+     [True, True, True, True]),
+    ("ps_script: the same chain in a PowerShell payload", lambda: bool(m.evaluate(
+        "pwsh -c '$a = " + "- $b = " * 580 + "x'", shell="powershell")), True),
+    ("dot: in a PowerShell segment `. $y` calls $y",
+     lambda: m._effective_cmd_index(_seg([".", "$y"], ps_script=True))[0], 1),
+    ("words: the words whose $ the shell expands", lambda: sorted(m._shell_words(
+        "a \"$b\" '$c' \"" + chr(92) + "$d\" $e $'$f' \"" + chr(92) * 2 + "$g\"").expanding),
+     [1, 4, 6]),
+    ("runner: an expanded word before the runner does not count",
+     lambda: [r[2] for r in m._runner_rests(m._segments("X=$HOME pwsh -c '$x = 1'")[0])],
+     [False]),
+    ("runner: an expanded word after it does",
+     lambda: [r[2] for r in m._runner_rests(m._segments("pwsh -c '$x' \"$y\"")[0])], [True]),
+    ("dot and & agree on a variable or path operand", lambda: [
+        w for w in ("$y", "${y}", "$env:y", '"$y"', "$y.Name", "$y[0]", "$PROFILE",
+                    "$PSScriptRoot/x.ps1", '"$PSScriptRoot/x.ps1"',
+                    "$PSScriptRoot" + chr(92) + "x.ps1", '"$PSScriptRoot' + chr(92) + 'x.ps1"',
+                    "./a.ps1", "$using:y", "'$y'", "$($y)", "($y)", "$y push --force")
+        if bool(m.evaluate(". " + w, shell="powershell"))
+        != bool(m.evaluate("& " + w, shell="powershell"))], []),
+    ("timing: a 4 KB run of expanded and quoted runner scripts",
+     lambda: _timing("bash", "x=$(date); cmd /c pwsh -c '$a = 1'; pwsh -c \"$x = 1\"; " * 75)
+     < 3.0, True),
     ("ps_script: a command behind a skipped word after =", lambda: bool(m.evaluate(
         "pwsh -c '$a = - $b = git reset --hard'")), True),
     ("ps_script: an assignment of a value is not", lambda: m._reasons_for(
