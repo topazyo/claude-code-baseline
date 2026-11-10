@@ -1578,6 +1578,11 @@ def move_cg(s):   # command-guard moved out of PreToolUse: still "wired", guards
 variant("_t_soft.json", set_of("command-guard", "continue"))
 variant("_t_soft_sg.json", set_of("scope-guard", "continue"))
 variant("_t_of_gone.json", set_of("command-guard", None))
+def drop_deny(entry):
+    def change(s): s["permissions"]["deny"].remove(entry)
+    return change
+# Every entry intact but one floating twin: config-guard must name exactly that twin.
+variant("_t_twin_gone.json", drop_deny("Edit(//**/.claude/settings.local.json)"))
 variant("_t_cg_moved.json", move_cg)
 # Baseline hook launches other than exactly `bash -p <script>`: the old plain form (an
 # install from before -p, reported as out of date), and forms that keep -p but discard
@@ -1724,6 +1729,8 @@ run "disableAllHooks=1 -> 2"     modules/config-guard.sh "$(ccp project_settings
 run "neutered hooks -> 2"        modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_unwired.json")" 2
 run "config-guard unwired -> 2"  modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_nocg.json")" 2
 run "deny removed -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_denygone.json")" 2
+run_out "floating twin removed -> 2" modules/config-guard.sh 2 <<< "$(ccp project_settings "$TDIR/_t_twin_gone.json")"
+err_has "config-guard names the removed twin" "removed from permissions.deny: Edit(//**/.claude/settings.local.json)"
 run "guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_soft.json")" 2
 run "scope-guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_soft_sg.json")" 2
 run "guard onFailure removed -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_of_gone.json")" 2
@@ -1916,6 +1923,33 @@ launch_ok = launch_ok and m and ast.literal_eval(m.group(1)) == tmpl_timeouts
 raise SystemExit(0 if deny_ok and hooks_ok and env_ok and launch_ok else 1)
 PY
 then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [coupling drift: settings.template.json vs config-guard EXPECTED_DENY / REQUIRED_HOOK_CMDS / BASELINE_LAUNCH / BASELINE_TIMEOUTS, or config-guard vs merge_settings RISKY_ENV_* / BASELINE_LAUNCH]"; fi
+# Deny twins: each cwd-anchored settings/config Edit entry has an Edit(//**/...) twin that
+# matches anywhere (a worktree's settings.local.json at the main checkout, sibling and
+# nested copies, link targets), the hook tree is covered at any depth, and each Bash or
+# PowerShell path-text rule has its backslash spelling. The check must see one missing.
+if "$PY" - "$SRC/settings.template.json" <<'PY'
+import json, sys
+B = chr(92)
+def problems(deny):
+    out = []
+    for f in ("baseline.config.json", "settings.json", "settings.local.json"):
+        if "Edit(.claude/" + f + ")" in deny and "Edit(//**/.claude/" + f + ")" not in deny:
+            out.append("no floating twin for Edit(.claude/" + f + ")")
+    if "Edit(//**/.claude/hooks/**)" not in deny:
+        out.append("hook tree not covered at any depth")
+    for e in deny:
+        if e.startswith(("Bash(*.claude/", "PowerShell(*.claude/")) and e.replace("/", B) not in deny:
+            out.append("no backslash spelling for " + e)
+    return out
+deny = [d for d in json.load(open(sys.argv[1], encoding="utf-8"))["permissions"]["deny"]
+        if isinstance(d, str)]
+found = problems(deny)
+assert not found, found
+for gone in ("Edit(//**/.claude/settings.local.json)", "Edit(//**/.claude/hooks/**)",
+             "Bash(*.claude" + B + "settings.json*)", "PowerShell(*.claude" + B + "settings.json*)"):
+    assert problems([d for d in deny if d != gone]), gone
+PY
+then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [deny twins: a cwd-anchored settings/config entry lacks its Edit(//**/...) twin, or a path-text rule its backslash spelling]"; fi
 # Wiring coupling: config-guard's BASELINE_WIRING is the template's wiring as
 # lib/merge_settings.py reads it (from the raw template too, whose hooks hold a _comment
 # string), every template matcher is names joined by | (so its names are defined), and

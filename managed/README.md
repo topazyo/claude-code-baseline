@@ -75,7 +75,11 @@ tampering with the baseline *non-overridably and in every repo* — not just the
 > cwd-independent `Edit(//**/.claude/<dir>/**)` entries, now covers the paths only a human
 > may write (subagent, skill and command definitions, hook scripts, `.mcp.json`, user
 > settings, the plugin cache) and `.claude/security-defaults.json`; scope-guard refuses those as the
-> complete check (see the README). Understand what a text rule can and
+> complete check (see the README). `.claude/settings.json`, `.claude/settings.local.json` and
+> `.claude/baseline.config.json` carry a cwd-independent `Edit(//**/...)` entry beside their
+> cwd-anchored one, so a session started elsewhere, a worktree's local settings and other
+> checkouts' copies are covered too; the Bash path-text rules carry the backslash spelling as
+> the PowerShell ones do. Understand what a text rule can and
 > cannot do: it matches the **command string**, so `cd .claude && sed -i … settings.json`
 > and `sed -i … "$CFG"` are *not* matched, and nothing in the baseline prevents those
 > forms; for `settings.json` and `settings.local.json`, config-guard (when enabled)

@@ -30,11 +30,10 @@ strict = load("managed/managed-settings.strict.json")
 tmpl   = load("settings.template.json")
 
 base_deny = set(tmpl["permissions"]["deny"]) if tmpl else set()
-# The managed floor is the per-repo deny-list PLUS the one entry only a
-# non-overridable tier can usefully own (the per-repo template/config-guard
-# deliberately omit it — see managed/README.md). Pin the exact expected set so
-# both the floor invariant (>= template) AND the intentional extra are locked.
-expected_deny = base_deny | {"Edit(.claude/settings.local.json)"}
+# The managed deny-list equals the per-repo template's (managed/README.md: "Keep the
+# two lists equal"), the floating Edit(//**/...) twins and backslash spellings included.
+# Pin the exact set, so the managed floor can be neither weaker nor quietly different.
+expected_deny = base_deny
 
 # Expected guardrail wiring: event -> (matcher, script the command must reference).
 EXPECTED_HOOKS = {
