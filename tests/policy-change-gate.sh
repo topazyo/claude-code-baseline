@@ -27,8 +27,10 @@
 #   tests/test_definition_path.py test_old_windows_python.sh test_msys_python.sh
 # Not tests/README.md, not the translation checker, not a deleted fixture file.
 # Each is also a policy file (all of tests/ is), so a change to one alone passes:
-# a fixture can be thinned without another touch. Accepted, as for the first six;
-# the command-guard corpus has its own floor, and CI pins each suite's pass count.
+# a fixture can be thinned without another touch. Accepted, as for the first six.
+# The backstops are partial: the command-guard corpus has its own floor, and CI pins
+# the pass counts of test_hooks.sh, test_status.sh and test_policy_gate.sh; the
+# others rely on review.
 # A one-line edit to one of these still satisfies it: this is a tripwire that
 # makes a reviewer look at fixtures, not proof the fixtures cover the change. The
 # block-corpus floor in test_command_guard.py (BLOCK_FLOOR, MUST_BLOCK, reason
