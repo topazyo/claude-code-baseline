@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=ab248df252bf8acc -->
+<!-- he-sync: what-this-does-not-protect-against sha256=0627c668db4d7b33 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -84,7 +84,11 @@
   האמיתיות, ודרך קישורים קשיחים (hard links) לקובץ מוגן. נתיב UNC למארח loopback או לכתובת
   מפורשת (`\\127.1\…`, `\\[::1]\…`, `\\10.0.0.5\…`) לא נשפט, והבדיקה נכשלת סגור.
   `permissions.deny` מוסיף רשומות בסגנון `Edit(//**/.claude/<dir>/**)` ורשומות Bash/PowerShell שמתאימות
-  לטקסט של הנתיב, כהגנה לעומק. ערכו את הקבצים האלה בעצמכם. מה שמפסיק לעבוד: ה-`/verify`
+  לטקסט של הנתיב, כהגנה לעומק. גם `settings.json`, `settings.local.json` ו-`baseline.config.json`
+  של הפרויקט מקבלים את אותה צורה צפה לצד הרשומות שמעוגנות ל-cwd. כך מכוסים גם ה-local
+  settings של worktree (שבדרך כלל נשמרים ב-checkout הראשי ב-macOS וב-Linux) וגם עותקים ב-checkouts
+  אחרים: בסשן שבו הכללים האלה נטענים, כלי ה-Edit של Claude נחסם בכל קובץ כזה, בכל מקום
+  שבו הוא נמצא. ערכו את הקבצים האלה בעצמכם. מה שמפסיק לעבוד: ה-`/verify`
   המובנה, ששומר את המתכון שלו ב-`.claude/skills/verify/`; `/run-skill-generator`; skills
   בסגנון skill-creator שכותבים ל-`~/.claude/skills`; הסוכן `statusline-setup` ו-skills
   שעורכים הגדרות (`update-config`, `fewer-permission-prompts`, ה-skills של הגדרת plugins
@@ -96,8 +100,7 @@
   לתיקיות האלה (פקודת `statusLine`, פקודת hook שמצביעה למקום אחר); בלי Python נבדק רק
   הטקסט של המטען; שם 8.3 מותאם אישית שהוגדר עם `fsutil` במקום שבו אי אפשר לפענח את
   הנתיב; חיפוש קישורים קשיחים ב-POSIX שנעצר אחרי 20 000 רשומות (ואז קובץ עם קישור קשיח
-  נכשל סגור); פענוח של נתיב `\\wsl$` מפעיל את ה-VM של WSL לפני בקשת האישור; והרשומות
-  הישנות בסגנון `Edit(.claude/settings.json)`, שמעוגנות לתיקייה הנוכחית (cwd). ריפו שלא צריך שורות
+  נכשל סגור); ופענוח של נתיב `\\wsl$` מפעיל את ה-VM של WSL לפני בקשת האישור. ריפו שלא צריך שורות
   `` !`cmd` `` ב-skills יכול גם להגדיר `disableSkillShellExecution: true`.
 - **PostToolUse לא יכול לבטל כתיבה.** המודולים `securityDefaults`, `fixTags`
   ו-`runTests` מדווחים על הפרה *אחרי* שהקובץ כבר השתנה בדיסק. הם נותנים ל-Claude הזדמנות

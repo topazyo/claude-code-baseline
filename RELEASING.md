@@ -31,7 +31,8 @@ ledger); the full checklist below was **not** re-walked. Raised from `2.1.80` to
 
 **Why a pin at all:** the entire deny-list — the secrets rules and the
 tamper-protection rules (`Edit(.claude/settings.json)`,
-`Edit(.claude/baseline.config.json)`, `Edit(.claude/hooks/baseline/**)`, and the
+`Edit(.claude/baseline.config.json)`, `Edit(.claude/hooks/baseline/**)`, their
+`Edit(//**/.claude/...)` twins, and the
 `Bash(...)`/`PowerShell(...)` path rules) — is only worth anything if `deny` holds.
 A release in which something can route around `deny` weakens every one of them at
 once, silently. One documented route already exists: a mod (on by default since

@@ -210,7 +210,12 @@ limit — not a bug. Read it before you rely on any of the above.
   to a protected file. A UNC path to a loopback host or an address literal
   (`\\127.1\…`, `\\[::1]\…`, `\\10.0.0.5\…`) is not judged and fails closed.
   `permissions.deny` adds `Edit(//**/.claude/<dir>/**)`-style
-  entries and path-text Bash/PowerShell entries as defense in depth. Edit these
+  entries and path-text Bash/PowerShell entries as defense in depth. The project's
+  `settings.json`, `settings.local.json` and `baseline.config.json` get the same
+  floating form beside their cwd-anchored entries, which also covers a worktree's local
+  settings (usually kept at the main checkout on macOS and Linux) and other checkouts' copies:
+  in a session where these rules load, Claude's Edit tool is refused on every such file,
+  wherever it sits. Edit these
   files yourself. What stops working: the bundled `/verify` recording its recipe
   in `.claude/skills/verify/`, `/run-skill-generator`, skill-creator-style skills
   writing `~/.claude/skills`, the `statusline-setup` agent and settings-editing
@@ -225,8 +230,7 @@ limit — not a bug. Read it before you rely on any of the above.
   command pointing elsewhere); without Python, only the payload text is checked; a
   custom 8.3 name set with `fsutil` where the path cannot be resolved; a POSIX
   hard-link search that stops at 20 000 entries (a hard-linked file then fails
-  closed); resolving a `\\wsl$` path starts the WSL VM before the prompt; and the
-  older cwd-anchored `Edit(.claude/settings.json)`-style entries. Repos that need no `` !`cmd` `` lines in skills can also set
+  closed); and resolving a `\\wsl$` path starts the WSL VM before the prompt. Repos that need no `` !`cmd` `` lines in skills can also set
   `disableSkillShellExecution: true`.
 - **PostToolUse cannot undo a write.** `securityDefaults`, `fixTags` and
   `runTests` report a violation *after* the file has changed on disk. They give

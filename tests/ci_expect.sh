@@ -45,20 +45,20 @@ ci_expect() {
     return 0
   fi
   case "$leg:$suite" in
-    ubuntu-latest:test_hooks)        allowed="";  floor=734 ;;
-    ubuntu-latest:test_status)       allowed="";  floor=88 ;;
+    ubuntu-latest:test_hooks)        allowed="";  floor=737 ;;
+    ubuntu-latest:test_status)       allowed="";  floor=90 ;;
     ubuntu-latest:test_policy_gate)  allowed="";  floor=57 ;;
     ubuntu-latest:test_latency)      allowed="";  floor=5 ;;
-    windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=747 ;;
-    windows-latest:test_status)      allowed="symlinked-skill"; floor=87 ;;
+    windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=750 ;;
+    windows-latest:test_status)      allowed="symlinked-skill"; floor=89 ;;
     windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=55 ;;
     windows-latest:test_latency)     allowed="";  floor=5 ;;
-    python-floor-ubuntu-22.04:test_hooks)       allowed="";  floor=734 ;;
-    python-floor-ubuntu-22.04:test_status)      allowed="";  floor=88 ;;
+    python-floor-ubuntu-22.04:test_hooks)       allowed="";  floor=737 ;;
+    python-floor-ubuntu-22.04:test_status)      allowed="";  floor=90 ;;
     python-floor-ubuntu-22.04:test_policy_gate) allowed="";  floor=57 ;;
     python-floor-ubuntu-22.04:test_latency)     allowed="";  floor=5 ;;
-    python-floor-windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=747 ;;
-    python-floor-windows-latest:test_status)      allowed="symlinked-skill"; floor=87 ;;
+    python-floor-windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=750 ;;
+    python-floor-windows-latest:test_status)      allowed="symlinked-skill"; floor=89 ;;
     python-floor-windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=55 ;;
     python-floor-windows-latest:test_latency)     allowed="";  floor=5 ;;
     # Not a runner: fixed values for test_status.sh's checks of this function.

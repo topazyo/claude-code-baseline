@@ -246,6 +246,11 @@ rewire 's["permissions"]["deny"].remove("Edit(.claude/settings.json)")'
 deny_check 'm == ["Edit(.claude/settings.json)"]' "one stripped entry is named exactly"
 strict_fails "one stripped deny entry"
 cp "$TMP/settings.saved" "$A/.claude/settings.json"
+# An install from before the floating twins: only the twin is missing, and it is named.
+rewire 's["permissions"]["deny"].remove("Edit(//**/.claude/settings.json)")'
+deny_check 'm == ["Edit(//**/.claude/settings.json)"]' "a stripped floating twin is named exactly"
+strict_fails "one stripped floating twin"
+cp "$TMP/settings.saved" "$A/.claude/settings.json"
 rewire 's["permissions"]["deny"] = [d for d in s["permissions"]["deny"] if "\\" not in d]'
 deny_check 'm == [d for d in t if chr(92) in d] and m' "Windows-path entries come back byte-exact, backslashes and all"
 cp "$TMP/settings.saved" "$A/.claude/settings.json"
