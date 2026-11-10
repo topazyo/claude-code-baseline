@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 306
+FP_FLOOR = 341
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 644
+BLOCK_FLOOR = 673
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -717,6 +717,11 @@ CASES = [
     ("fp dot-source a venv", ". ./venv/bin/activate", A, ()),
     ("pwsh output captured from a forced push", "pwsh -c '$out = git push --force'", B, ()),
     ("powershell output discarded from a reset", "powershell -c '$null = git reset --hard'", B, ()),
+    # A runner's script keeps the narrower operator set: the outer shell may have expanded
+    # the $ word, and these operators are words such a command could take as flags.
+    ("pwsh -c: expanded word before -f", 'pwsh -c "$CMD -f /"', B, ()),
+    ("pwsh -c: expanded word before -ceq", 'pwsh -c "$CMD -ceq /"', B, ()),
+    ("pwsh -c: expanded word before -band", 'pwsh -c "$CMD -band /"', B, ()),
     ("push --repo= --delete main", "git push --repo=origin --delete main", B, ()),
     ("push --repo --delete main", "git push --repo origin --delete main", B, ()),
     ("fp powershell positional cmdlet with -ea", "powershell Get-ChildItem -ea 0", A, ()),
@@ -1238,6 +1243,88 @@ PS_STATEMENT_BLOCK += [
     '$y= git status -eq ($x)',
     '$y=git status -eq ($x)',
     'foreach ($f in git status -eq ($x)) { }',
+]
+# The other binary operators after a variable (_PS_BINARY_MORE): the -c/-i comparisons,
+# -xor, bitwise, -f and arithmetic. The statement is an expression, as with -eq; a `(` right
+# after one, with a value before it, is a value position (_ps_argument_group).
+PS_STATEMENT_ALLOW += [
+    '$ok = $a -ceq $b',
+    '$a -ceq $b',
+    '$ok = $a -ieq $b',
+    '$OK = $A -CEQ $B',
+    'if ($a -cne $b) { exit 1 }',
+    "$m = $s -cmatch '^x'",
+    "$p = $s -csplit ','",
+    "$t = $a -creplace 'a','b'",
+    "if ($x -clike 'a*') { 1 }",
+    "if ($xs -ccontains 'a') { 1 }",
+    "if ('a' -cin $xs) { 1 }",
+    '$f = $a -band 4',
+    '$f = $a -bor 4',
+    '$f = $a -bxor 4',
+    '$f = $a -shl 2',
+    '$f = $a -shr 2',
+    '$b = $a -xor $c',
+    '$s = $fmt -f $x',
+    '$t = $a + $b',
+    '$t = $a - 1',
+    '$t = $a * 2',
+    '$t = $a / 2',
+    '$t = $a % 2',
+    '$r = $a .. $b',
+    "$v = $a ?? 'd'",
+    '$a -band 4',
+    '$x = $a -ceq (Get-Date)',
+    'if ($a -band ($b)) { 1 }',
+    "$s = '{0}' -f ($x)",
+    '$s = $fmt -f ($x)',
+    '1 -f ($x)',
+]
+# A blocked command after or inside such an expression is still judged. An operator word
+# that starts the statement calls a command of that name (`-f ($x)`), so what follows it
+# is not a value; the parenthesized forms with a statement inside pin that.
+PS_STATEMENT_BLOCK += [
+    '$ok = $a -ceq git push --force',
+    '$a -band git push --force',
+    '$s = $f -f rm -rf /',
+    '$t = $a + git push --force',
+    '$a -ceq 1; git push --force',
+    '$a -ceq (git push --force)',
+    '$x = $a -f $(git push --force)',
+    "if ($a -cmatch $w.Run('git push --force')) { 1 }",
+    '$a -ceq $b push --force',
+    '-ceq ($x)',
+    '-f ($x)',
+    '-band ($x)',
+    '-f ($x = 1)',
+    '-f ($x -eq 1)',
+    '-not -f ($x = 1)',
+    'if ($a) { 1 } else -f ($x)',
+    'git push -f ($x) --force',
+    '$x = $a -band git push -f ($y) --force',
+    '$v = $a -ceq git status -eq ($y)',
+    '$v = $a -band git push origin -eq ($y)',
+    # Where a pipeline starts (after `=`, a chain, foreach's `in`), `-f` is a command name.
+    '$y = -f ($x = 1)',
+    "$y = -f ($x = '--force')",
+    '$y = $z = -ceq ($x = 1)',
+    'foreach ($i in -f ($x = 1)) { }',
+    # A word that starts with a digit but is no number, or a `-name` that is no unary
+    # operator, names a command: what follows it is in argument position.
+    '7z x -f ($x = 1)',
+    "-foo git push - ($f = '--force')",
+]
+PS_STATEMENT_ALLOW += [
+    '$y = - ($x = 1)',
+    '$n = 10kb -shr ($x)',
+]
+# Known limits, as for `git push $f` above: after a `)` the reader no longer knows a
+# command started the statement, so a variable and an operator there read as a value
+# (main reads `-eq` so too); and words after a quoted value are a PowerShell parse error,
+# which runs nothing.
+PS_STATEMENT_ALLOW += [
+    'git push (origin) $z + ($y)',
+    "$a -f 'x' git push --force",
 ]
 PS_CASES += [(f"ps statement: {c!r}", c, A, ()) for c in PS_STATEMENT_ALLOW]
 PS_CASES += [(f"ps not an ordinary statement: {c!r}", c, B, ()) for c in PS_STATEMENT_BLOCK]
@@ -1913,6 +2000,9 @@ STRUCT_CASES = [
         "bash", ("env -iS x " * 410)[:4096]) < 3.0, True),
     ("timing: 4 KB of repeated env -S words (PowerShell)", lambda: _timing(
         "powershell", ("env -0S x " * 410)[:4096]) < 3.0, True),
+    # _ps_command_mode reads the word before each `(` as a number or a command name.
+    ("timing: 4 KB digit-led word before a group (PowerShell)", lambda: _timing(
+        "powershell", "{$y = " + "1" * 3940 + "x" + chr(13) + "(`$z)} <# #>") < 3.0, True),
     ("timing: 4 KB of glob brackets", lambda: _timing(
         "bash", "rm -rf /" + "[" * 4080) < 3.0, True),
 ]
