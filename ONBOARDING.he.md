@@ -1061,7 +1061,7 @@ Claude Code חוסם את הפעולה ומדפיס הודעה שמזכירה א
 | hook | hook | סקריפט שרץ אוטומטית ברגע מוגדר. נשאר באנגלית, כמו שם ההגדרה `hooks`. |
 | block / blocked | חסימה / נחסם | הפעולה לא בוצעה. |
 | warn / warning | אזהרה | הפעולה בוצעה, אבל יש הערה. |
-| deny / allow | כלל deny / כלל allow | כללי הרשאות ב-`permissions`: deny דוחה, allow מתיר. |
+| deny / allow | כלל deny / כלל allow | כללי הרשאות ב-`permissions.deny` וב-`permissions.allow`: deny דוחה, allow מתיר. |
 | deny-list | רשימת החסימה | רשימת כללי deny; למשל רשימת החסימה לסודות. |
 | guardrail | מעקה בטיחות | הגנה כללית; רוב המעקות פועלים תמיד (`autoFormat` מגיע כבוי). |
 | module | מודול | הגנה לבחירה. |
