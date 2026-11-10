@@ -75,7 +75,7 @@ bcl_module_enabled configGuard || exit 0
 # for the integrity check; if it somehow went missing, fail closed rather than skip.
 PY="$(bcl_python)"
 if [[ -z "$PY" ]]; then
-  echo "[config-guard] CONTROL COULD NOT RUN — Python unavailable; the settings change was NOT integrity-checked." >&2
+  echo "[config-guard] CONTROL COULD NOT RUN — $(bcl_nopy_reason); the settings change was NOT integrity-checked." >&2
   bcl_failclosed_exit; exit $?
 fi
 

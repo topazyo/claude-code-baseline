@@ -88,7 +88,7 @@ fi
 # Written as an `if` so `set -e` doesn't swallow the non-zero return.
 PY="$(bcl_python)"
 if [[ -z "$PY" ]]; then
-  bcl_say "[command-guard] CONTROL COULD NOT RUN — Python unavailable; the command was NOT inspected (blocklist + extraPatterns skipped)."
+  bcl_say "[command-guard] CONTROL COULD NOT RUN — $(bcl_nopy_reason); the command was NOT inspected (blocklist + extraPatterns skipped)."
   if bcl_failclosed_exit; then exit 0; else exit 2; fi
 fi
 

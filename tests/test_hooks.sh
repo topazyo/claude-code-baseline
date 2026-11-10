@@ -352,6 +352,26 @@ hbad_row "Cygwin or MSYS Python, failClosed:false: a protected path is still REF
 # Unlike an old Windows Python, this one cannot read a Windows path at all, so what it
 # cannot judge is only announced under failClosed:false.
 hbad_row "Cygwin or MSYS Python, failClosed:false: an ordinary write is announced" "$POSIXWIN" 0 "" "not a Cygwin, MSYS or other POSIX one"
+# The hooks run none of their code on a Cygwin or MSYS Python: launched from Git Bash it
+# has its arguments parsed again, which mangles the scripts they pass with -c. One
+# behind a wrapper that hides its DLL is stopped by the prime's first statement (forced
+# here): no interpreter, and scope-guard fails closed on every edit, naming it.
+PGUARD='s/^if sys.platform.startswith(("cygwin", "msys")):$/if True:/'
+hbad_row "Cygwin or MSYS Python behind a wrapper, failClosed:false: an edit is announced" "$PGUARD" 0 "" "not a Cygwin, MSYS or other POSIX one"
+resetcfg
+hbad_row "Cygwin or MSYS Python behind a wrapper: an ordinary write fails closed" "$PGUARD" 2 "" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python behind a wrapper: a protected path fails closed" "$PGUARD" 2 \
+  "$(def_payload Write "$WT/.claude/agents/x.md" content "x")" "not a Cygwin, MSYS or other POSIX one"
+hbad_row "Cygwin or MSYS Python behind a wrapper: a payload naming no file fails closed" "$PGUARD" 2 \
+  '{"tool_name":"Write","tool_input":{"content":"x"}}' "not a Cygwin, MSYS or other POSIX one"
+# ...and command-guard, from the same copy, blocks a clean command, naming it.
+hout="$(printf '%s' "$(bash_payload 'ls')" | bash "$HOMETMP/hbad/guardrails/command-guard.sh" 2>&1)"; rc=$?
+case "$rc:$hout" in 2:*"is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [command-guard, Cygwin or MSYS Python behind a wrapper: rc=$rc]" ;; esac
+# ...security-defaults (unprimed before: its own prime catches it) and the dispatcher too.
+hout="$(printf '%s' "$(write_payload "$WT/docker-compose.yml")" | bash "$HOMETMP/hbad/modules/security-defaults.sh" 2>&1)"; rc=$?
+case "$rc:$hout" in 2:*"is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [security-defaults, Cygwin or MSYS Python behind a wrapper: rc=$rc]" ;; esac
+hout="$(printf '%s' "$(write_payload "$WT/notes.txt")" | bash "$HOMETMP/hbad/dispatcher/post-write.sh" 2>&1)"; rc=$?
+case "$rc:$hout" in 2:*"is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [post-write, Cygwin or MSYS Python behind a wrapper: rc=$rc]" ;; esac
 resetcfg
 rm -rf "$HOMETMP/hbad"
 # Only scope-guard asks for the verdict: a plain prime (every other hook) computes none.
@@ -2560,6 +2580,18 @@ if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "printed unexpected output
 # never evaluated (bash arithmetic would run a command substitution in a subscript).
 ( . "$H/lib/common.sh"; ! bcl_python_floor 'x[$(touch '"$TMP"'/floor-ran)].1 posix' ) && [ ! -e "$TMP/floor-ran" ] \
   && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "  FAIL [a malformed probe answer is refused unevaluated]"; }
+# (m) A Cygwin or MSYS Python keeps its runtime DLL beside it: bcl_python never takes
+# one, but takes the next name; with nothing else there is no interpreter, the reason
+# names it, and the installer says so before writing anything.
+mkpy "$TMP/py-m/bin" python3 real; : > "$TMP/py-m/bin/msys-2.0.dll"; mkpy "$TMP/py-m/next" python real
+got="$(PATH="$TMP/py-m/bin:$TMP/py-m/next:$PATH" bash -c '. "$1/lib/common.sh"; bcl_python' _ "$H")"
+if [ "$got" = python ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [a python3 beside msys-2.0.dll must be skipped for the next name: got '$got']"; fi
+mkpy "$TMP/py-y/bin" python3 real; mkpy "$TMP/py-y/bin" python real; : > "$TMP/py-y/bin/cygwin1.dll"
+got="$(PATH="$TMP/py-y/bin:$PATH" bash -c '. "$1/lib/common.sh"; printf "[%s] %s" "$(bcl_python)" "$(bcl_nopy_reason)"' _ "$H")"
+case "$got" in "[] the Python on PATH is a Cygwin or MSYS one"*) pass=$((pass + 1)) ;; *) fail=$((fail + 1)); echo "  FAIL [only Cygwin Pythons on PATH: no interpreter, and the reason names it: got '$got']" ;; esac
+pyinstall "$TMP/py-y/bin"
+if [ "$pyrc" = 1 ] && printf '%s' "$pyout" | grep -qF "is a Cygwin or MSYS Python" && [ ! -e "$PYT/.claude" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [install with only a Cygwin Python on PATH must say so before writing: rc=$pyrc]"; fi
+rm -rf "$TMP/py-m" "$TMP/py-y"
 # (l) A Cygwin or MSYS Python (POSIX paths on a Windows host), however new: refused,
 # with its own reason rather than "no working Python".
 pyprobe 'PYVER=3.12 posixwin

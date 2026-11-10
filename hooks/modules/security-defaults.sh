@@ -31,11 +31,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
 
+# One interpreter for the config reads below, and the check that it is one the hooks may
+# use: a Cygwin or MSYS Python behind a wrapper is caught here (see bcl_prime). Then the
+# config cannot be read, so whether this module is on is unknown: fail closed.
+bcl_prime
+if [[ "$_BCL_PRIME_STATE" == posixwin ]] || { [[ "$_BCL_PRIME_STATE" == nopy ]] && bcl_python_posixwin; }; then
+  echo "[security-defaults] CONTROL COULD NOT RUN — $(bcl_nopy_reason); infra files were NOT verified." >&2
+  bcl_failclosed_exit; exit $?
+fi
+
 bcl_module_enabled securityDefaults || exit 0
 
 PY="$(bcl_python)"
 if [[ -z "$PY" ]]; then
-  echo "[security-defaults] CONTROL COULD NOT RUN — Python unavailable; infra files were NOT verified." >&2
+  echo "[security-defaults] CONTROL COULD NOT RUN — $(bcl_nopy_reason); infra files were NOT verified." >&2
   bcl_failclosed_exit; exit $?
 fi
 

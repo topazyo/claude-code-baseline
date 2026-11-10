@@ -64,7 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 PY="$(bcl_python)"
-[[ -z "$PY" ]] && { echo "python3 (or python) is required" >&2; exit 1; }
+[[ -z "$PY" ]] && { echo "python3 (or python) is required: $(bcl_nopy_reason)" >&2; exit 1; }
 # A Python that is found but cannot run (or cannot import the stdlib modules used
 # here) would make every config read fall back to its default, and the report would
 # present those defaults as the repo's settings.

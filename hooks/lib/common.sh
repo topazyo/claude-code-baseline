@@ -52,13 +52,13 @@ _BCL_SOURCED=([1]=1)
 # costs ~20ms under Git Bash on Windows — per prefix, on every one of the six
 # processes in a PostToolUse chain. This expansion forks nothing.
 for _bcl_v in ${!_BCL_CFG_@} ${!_BCL_PL_@} ${!_BCL_PRIME_@} ${!_BCL_NOTICE@}; do unset -v "$_bcl_v"; done
-# BCL_READ_ERROR, _BCL_LOOKUP, _BCL_STDIN_TIMEOUT, _BCL_STDIN_MAX, _BCL_KILL_GRACE and
-# _BCL_BUDGET are reassigned below; unsetting them first also drops the export an inherited copy carries, so it
+# _BCL_PY_GUARD_SRC, BCL_READ_ERROR, _BCL_LOOKUP, _BCL_STDIN_TIMEOUT, _BCL_STDIN_MAX,
+# _BCL_KILL_GRACE and _BCL_BUDGET are reassigned below; unsetting them first also drops the export an inherited copy carries, so it
 # is not handed on to every child process. A new global needs adding here too — but
 # never widen this to ${!_BCL_@}, which would also unset the source guard above.
 # _BCL_PY must stay UNSET, not empty: bcl_python tests ${_BCL_PY+x}, and an empty
 # value would be cached as "no interpreter".
-unset -v _BCL_PY BCL_READ_ERROR _BCL_LOOKUP _BCL_STDIN_TIMEOUT _BCL_STDIN_MAX _BCL_KILL_GRACE _BCL_BUDGET _bcl_v
+unset -v _BCL_PY _BCL_PY_GUARD_SRC BCL_READ_ERROR _BCL_LOOKUP _BCL_STDIN_TIMEOUT _BCL_STDIN_MAX _BCL_KILL_GRACE _BCL_BUDGET _bcl_v
 
 # The hook tree this library belongs to: the parent of lib/, as this file was sourced.
 # Every hook sources "$HERE/../lib/common.sh" with HERE made absolute, so this is an
@@ -84,7 +84,7 @@ unset -v FUNCNEST POSIXLY_CORRECT BASH_COMPAT EXECIGNORE CDPATH GLOBIGNORE BASH_
 
 # Primed state. Declared unconditionally so `set -u` is safe and so an inherited
 # scalar of the same name cannot masquerade as one of these arrays.
-_BCL_PRIME_STATE=""     # "" | ok | failed | timeout | nopy   (only "ok" is authoritative)
+_BCL_PRIME_STATE=""     # "" | ok | failed | timeout | nopy | posixwin   (only "ok" is authoritative)
 _BCL_PRIME_DIR=""       # CLAUDE_PROJECT_DIR as it stood when we primed
 _BCL_PRIME_KEY=""       # resolved baseline.config.json path we primed from
 _BCL_CFG_STATE=""       # ok | absent | malformed
@@ -136,14 +136,16 @@ _BCL_NOTICE_TMP=""      # dispatcher's child-stderr file; removed by the EXIT tr
 # PATH. One that lives inside the project (an in-project virtualenv), or that a
 # version-manager shim picks from a project file such as .python-version, is only
 # as trustworthy as that directory. One that is found but cannot run is caught by
-# bcl_prime, which then reports no interpreter.
+# bcl_prime, which then reports no interpreter. A Cygwin or MSYS Python is never used
+# (see _bcl_posixwin_path): bcl_python skips it as it skips the Store alias.
 bcl_python() {
   if [[ -n "${_BCL_PY+x}" ]]; then printf '%s' "$_BCL_PY"; return 0; fi
-  local cand path
+  local cand path alias=""
   _BCL_PY=""
   for cand in python3 python; do
     path="$(command -v "$cand" 2>/dev/null)" || continue
     [[ -z "$path" ]] && continue
+    _bcl_posixwin_path "$path" && continue
     # Skip the Windows Store "app execution alias". On a default Windows install
     # `python3` resolves to %LOCALAPPDATA%\Microsoft\WindowsApps\python3, a stub that
     # routes every launch through the Store app layer: measured ~2000ms per start
@@ -151,18 +153,46 @@ bcl_python() {
     # because the cost is the alias, not site-packages. Hooks run per tool call and
     # spawn an interpreter per helper, so that difference is the whole latency budget.
     case "$path" in
-      *[Ww]indows[Aa]pps*) continue ;;
+      *[Ww]indows[Aa]pps*) [[ -z "$alias" ]] && alias="$cand"; continue ;;
     esac
     _BCL_PY="$cand"; break
   done
   # If the alias is the ONLY interpreter, use it anyway — slow beats inert, since an
   # unresolvable interpreter silently disables every opt-in module.
-  if [[ -z "$_BCL_PY" ]]; then
-    if command -v python3 >/dev/null 2>&1; then _BCL_PY=python3
-    elif command -v python >/dev/null 2>&1; then _BCL_PY=python
-    fi
-  fi
+  [[ -z "$_BCL_PY" ]] && _BCL_PY="$alias"
   printf '%s' "$_BCL_PY"
+}
+
+# _bcl_posixwin_path <path> -> 0 when the interpreter at <path> is a Cygwin or MSYS
+# one: those runtimes keep their DLL beside their own programs. Such a Python reads
+# Windows paths as POSIX paths, and launched from Git Bash (a different MSYS runtime)
+# its arguments are parsed again, which mangles the backslashes in the scripts the
+# hooks pass it with -c. So the hooks never run their code on it. A file test, no fork.
+_bcl_posixwin_path() {
+  [[ "$1" == */* ]] || return 1
+  [[ -e "${1%/*}/msys-2.0.dll" || -e "${1%/*}/cygwin1.dll" ]]
+}
+
+# bcl_python_posixwin -> 0 when the reason this hook has no interpreter is a Cygwin or
+# MSYS Python: the prime found one (a wrapper that hides the DLL), or python3/python on
+# PATH is one. Call it on the no-interpreter path only.
+bcl_python_posixwin() {
+  [[ "${_BCL_PRIME_STATE:-}" == posixwin ]] && return 0
+  local cand path
+  for cand in python3 python; do
+    path="$(command -v "$cand" 2>/dev/null)" || continue
+    [[ -n "$path" ]] && _bcl_posixwin_path "$path" && return 0
+  done
+  return 1
+}
+
+# bcl_nopy_reason -> stdout: why there is no interpreter, for a hook's message.
+bcl_nopy_reason() {
+  if bcl_python_posixwin; then
+    printf '%s' "the Python on PATH is a Cygwin or MSYS one, which the hooks do not use (it reads Windows paths as POSIX paths)"
+  else
+    printf '%s' "Python unavailable"
+  fi
 }
 
 # bcl_python_probe <python> -> stdout: "<major>.<minor> <kind>"; "norun" when it does not
@@ -365,6 +395,14 @@ def bcl_read_cfg(path):
 #    never `ok` — which routes every helper back to its own per-call check. A prime
 #    failure can only read as "unknown", never as "config fine".
 _BCL_PRIME_TIMEOUT=10
+
+# The first statement of every prime: on a Cygwin or MSYS Python, exit 6 before any
+# baseline code runs (see _bcl_posixwin_path). No backslash and nothing a re-parsed
+# command line could change, so it holds where the rest of a -c script may not.
+_BCL_PY_GUARD_SRC='import sys
+if sys.platform.startswith(("cygwin", "msys")):
+    raise SystemExit(6)
+'
 
 IFS='' read -r -d '' _BCL_PRIME_SRC <<'PRIMEPY' || true
 import json, os, shlex, sys
@@ -1030,7 +1068,7 @@ DEFPATHPY
 # spent nine forks (bcl_python, bcl_config_path, bcl_repo_root, two quoting helpers,
 # the pipeline, the capture, timeout, python) and measured 235ms; it is now four.
 bcl_prime() {
-  local out rc=0 want=0 root src="$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC"
+  local out rc=0 prc want=0 root src="$_BCL_PY_GUARD_SRC$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC"
   [[ $# -gt 0 ]] && want=1
   _BCL_PRIME_STATE=""
   # bcl_prime "$PAYLOAD" definition: also judge the payload's file_path (see
@@ -1084,10 +1122,23 @@ bcl_prime() {
   # allowed the call. The import probe runs only on this failure path; when it
   # succeeds, the prime script itself failed (e.g. on an unencodable value) and the
   # per-call helpers below take over as before.
-  if [[ -z "$out" && $rc -ne 3 && $rc -ne 124 && $rc -ne 137 ]] \
-     && ! bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c 'import json, os, re, shlex, sys' >/dev/null 2>&1 </dev/null; then
+  if [[ -z "$out" && $rc -ne 3 && $rc -ne 6 && $rc -ne 124 && $rc -ne 137 ]]; then
+    prc=0
+    bcl_timeout "$_BCL_PRIME_TIMEOUT" "$_BCL_PY" -I -S -X utf8 -c "import json, os, re, shlex
+$_BCL_PY_GUARD_SRC" >/dev/null 2>&1 </dev/null || prc=$?
+    if [[ $prc -eq 6 ]]; then
+      rc=6
+    elif [[ $prc -ne 0 ]]; then
+      _BCL_PY=""
+      _BCL_PRIME_STATE=nopy
+      return 0
+    fi
+  fi
+  # A Cygwin or MSYS Python behind a wrapper that hides its DLL (bcl_python skips the
+  # rest): the guard below stopped before any baseline code ran. No interpreter.
+  if [[ $rc -eq 6 ]]; then
     _BCL_PY=""
-    _BCL_PRIME_STATE=nopy
+    _BCL_PRIME_STATE=posixwin
     return 0
   fi
   if [[ $rc -ne 0 || -z "$out" ]]; then

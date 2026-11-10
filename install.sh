@@ -100,7 +100,11 @@ if ! (. "$SRC/hooks/lib/common.sh"; bcl_python_floor "$PY_ANS"); then
     exit 1
   fi
   echo "ERROR: no working Python 3.7+ (3.8+ on Windows) found. The hooks and the settings merge need one." >&2
-  if [[ -z "$PY" ]]; then
+  if [[ -z "$PY" ]] && (. "$SRC/hooks/lib/common.sh"; bcl_python_posixwin); then
+    echo "       python3 or python on PATH is a Cygwin or MSYS Python, which the hooks do not" >&2
+    echo "       use: Claude Code on Windows hands them Windows paths, which it would read as" >&2
+    echo "       POSIX paths. Install Python 3.8 or later for Windows and put it first on PATH." >&2
+  elif [[ -z "$PY" ]]; then
     echo "       Neither python3 nor python is on PATH." >&2
   else
     if [[ -n "$PY_VER" ]]; then

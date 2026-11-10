@@ -253,10 +253,10 @@ limit — not a bug. Read it before you rely on any of the above.
   human-only path; without Python it cannot resolve links or short names. On Windows
   the interpreter must be Python 3.8 or later: with an older one, scope-guard fails
   closed on every Write and Edit that names a file. It must also be a native Windows
-  Python: a Cygwin or MSYS one reads Windows paths as POSIX paths, so scope-guard still
-  refuses a human-only path by its name but cannot place one by its location (user
-  settings, a `C:/` path, a junction); it fails closed on every Write and Edit that
-  names a file, which under `failClosed: false` is only announced. The opt-in `autoFormat`
+  Python: the hooks never run their code on a Cygwin or MSYS one, which reads Windows
+  paths as POSIX paths. With one first on `PATH`, command-guard and the post-write
+  checks fail closed as they do without Python, and scope-guard fails closed on every
+  Write and Edit, which under `failClosed: false` is only announced. The opt-in `autoFormat`
   and `runTests` deliberately run the repo's own formatter and tests without this
   isolation.
 - **The hook environment is trusted up to the shell that runs the hook.** Every
