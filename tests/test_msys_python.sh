@@ -89,6 +89,26 @@ else no "a protected name under the MSYS Python is REFUSED: rc=$rc"; printf '%s\
 out="$(sg "$MSYS_PATH" "$NOFILE")"; rc=$?
 [ "$rc" = 0 ] && ok || { no "a payload naming no file passes under the MSYS Python: rc=$rc"; printf '%s\n' "$out" | tail -n 3; }
 
+# On a failed hook row, show why: the prime and the definition check as the hooks run
+# them under this interpreter, and what it receives from Git Bash.
+if [ "$fail" -gt 0 ]; then
+  echo "--- diagnostics: the definition check under the MSYS Python"
+  PATH="$MSYS_PATH" CLAUDE_PROJECT_DIR="$RW" HOME="$TMP/home" bash -c '
+    . "$1/lib/common.sh"
+    bcl_prime "$2" definition
+    echo "prime: state=[$_BCL_PRIME_STATE] py=[${_BCL_PY-unset}] definition=[${_BCL_PL_DEFINITION-unset}]"
+    py="${_BCL_PY:-python3}"
+    src="$_BCL_CFG_RULE_SRC$_BCL_PRIME_SRC$_BCL_DEFPATH_SRC$_BCL_DEFPATH_PRIME_TAIL"
+    echo "prime script: ${#src} characters"
+    out="$("$py" -I -S -X utf8 -c "$src" "$_BCL_PRIME_KEY" 1 0 "" <<< "$2" 2>&1)"; rc=$?
+    echo "prime run: rc=$rc"; printf "%s\n" "$out" | head -c 1500; echo
+    out="$("$py" -I -S -X utf8 -c "$_BCL_DEFPATH_SRC$_BCL_DEFPATH_MAIN_TAIL" "$3" <<< "$2" 2>&1)"; rc=$?
+    echo "standalone run: rc=$rc"; printf "%s\n" "$out" | head -c 1500; echo
+    out="$("$py" -I -S -X utf8 -c "import sys; print(repr(sys.argv), repr(sys.stdin.read()))" "$3" <<< "$2" 2>&1)"; rc=$?
+    echo "argv and stdin: rc=$rc $out"
+  ' _ "$H" "$NOFILE" "$RW"
+fi
+
 echo ""
 echo "test_msys_python: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] && [ "$pass" -eq 8 ] || exit 1
