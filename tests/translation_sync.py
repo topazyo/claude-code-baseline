@@ -52,8 +52,9 @@ What `check` verifies, per Hebrew file
      U+061C): inside a command they are a copy-paste hazard ("Trojan Source");
   7. the file is wrapped in <div dir="rtl"> and every fenced block in
      <div dir="ltr">, so direction does not depend on renderer heuristics;
-  8. every relative inline link (`[text](target)`) stays inside the repository (judged on its text first: no
-     absolute, drive, backslash or escaping `..` target; then where it resolves), and
+  8. every relative inline link (`[text](target)`) stays inside the repository
+     (judged on its text first: no absolute, drive, backslash or escaping `..`
+     target; then where it resolves), and
      every `#anchor` link resolves to a heading in the file it points at;
   9. every message fragment in the he-decoder table still occurs in the hook
      source (hooks/, install.sh), so the message decoder cannot drift silently.
@@ -269,8 +270,10 @@ def code_texts(text: str) -> list[str]:
 def in_code(span: str, codes: list[str]) -> bool:
     """The span sits inside one English code text, starting and ending on a token
     boundary: a Hebrew `git push --force` must not pass as part of an English
-    `git push --force-with-lease`, nor a cut-off `--for` as part of `--force`."""
-    pat = re.compile(r"(?<![\w-])" + re.escape(span) + r"(?![\w-])")
+    `git push --force-with-lease`, nor `rm -rf ~` as part of `rm -rf ~/.cache`. A
+    word character, `-`, `.`, `/`, `~` or `=` continues a token (a name, a path, an
+    option value); a space, quote, colon, `;`, `|` or bracket ends one."""
+    pat = re.compile(r"(?<![\w./~=-])" + re.escape(span) + r"(?![\w./~=-])")
     return any(pat.search(c) for c in codes)
 
 
@@ -279,7 +282,7 @@ def check_links(he_path: Path, he_text: str, root: Path) -> list[str]:
     own = heading_slugs(he_text)
     for m in LINK_RE.finditer(without_fences(he_text)):
         target = m.group(1)
-        if re.match(r"^[a-z][a-z0-9+.-]+:", target):
+        if re.match(r"^[a-z][a-z0-9+.-]+:", target, re.IGNORECASE):
             continue  # external URL
         file_part, _, frag = target.partition("#")
         if file_part:

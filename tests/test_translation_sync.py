@@ -508,6 +508,15 @@ def cut_off_token_fails(root):
 
 
 @case
+def cut_short_at_a_path_fails(root):
+    # English `rm -rf ~/.cache`; Hebrew `rm -rf ~` stops at a `/` and deletes far more.
+    en = EN.replace("Use `git push --force` never.", "Use `git push --force` never. Clear `rm -rf ~/.cache` first.")
+    build(root, en=en, he=HE.replace("### ה. הודעות\n", "### ה. הודעות\n\nראו `rm -rf ~`.\n"))
+    rc, out = run_check(root)
+    check(rc == 1 and f"{HE_ONLY_FAIL}: `rm -rf ~`" in out, out)
+
+
+@case
 def shortened_option_in_a_section_fails(root):
     # English `git push --force-with-lease`, Hebrew `git push --force`: a different command.
     build(root, en=EN.replace("`git push --force`", "`git push --force-with-lease`"))
