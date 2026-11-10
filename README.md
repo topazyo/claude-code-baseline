@@ -213,8 +213,9 @@ limit — not a bug. Read it before you rely on any of the above.
   entries and path-text Bash/PowerShell entries as defense in depth. The project's
   `settings.json`, `settings.local.json` and `baseline.config.json` get the same
   floating form beside their cwd-anchored entries, which also covers a worktree's local
-  settings (kept at the main checkout) and other checkouts' copies, so Claude's Edit
-  tool is refused on every such file on the machine. Edit these
+  settings (kept at the main checkout on macOS and Linux) and other checkouts' copies:
+  in a session where these rules load, Claude's Edit tool is refused on every such file,
+  wherever it sits. Edit these
   files yourself. What stops working: the bundled `/verify` recording its recipe
   in `.claude/skills/verify/`, `/run-skill-generator`, skill-creator-style skills
   writing `~/.claude/skills`, the `statusline-setup` agent and settings-editing

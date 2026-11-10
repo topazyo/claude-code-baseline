@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=3a72c4ca8ecf7a4f -->
+<!-- he-sync: what-this-does-not-protect-against sha256=68a6d51625226c06 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -86,8 +86,9 @@
   `permissions.deny` מוסיף רשומות בסגנון `Edit(//**/.claude/<dir>/**)` ורשומות Bash/PowerShell שמתאימות
   לטקסט של הנתיב, כהגנה לעומק. גם `settings.json`, `settings.local.json` ו-`baseline.config.json`
   של הפרויקט מקבלים את אותה צורה צפה לצד הרשומות שמעוגנות ל-cwd. כך מכוסים גם ה-local
-  settings של worktree (שנשמרים ב-checkout הראשי) וגם עותקים ב-checkouts אחרים, וכלי ה-Edit
-  של Claude נחסם בכל קובץ כזה במחשב. ערכו את הקבצים האלה בעצמכם. מה שמפסיק לעבוד: ה-`/verify`
+  settings של worktree (שנשמרים ב-checkout הראשי ב-macOS וב-Linux) וגם עותקים ב-checkouts
+  אחרים: בסשן שבו הכללים האלה נטענים, כלי ה-Edit של Claude נחסם בכל קובץ כזה, בכל מקום
+  שבו הוא נמצא. ערכו את הקבצים האלה בעצמכם. מה שמפסיק לעבוד: ה-`/verify`
   המובנה, ששומר את המתכון שלו ב-`.claude/skills/verify/`; `/run-skill-generator`; skills
   בסגנון skill-creator שכותבים ל-`~/.claude/skills`; הסוכן `statusline-setup` ו-skills
   שעורכים הגדרות (`update-config`, `fewer-permission-prompts`, ה-skills של הגדרת plugins

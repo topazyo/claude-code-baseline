@@ -1730,7 +1730,10 @@ run "neutered hooks -> 2"        modules/config-guard.sh "$(ccp project_settings
 run "config-guard unwired -> 2"  modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_nocg.json")" 2
 run "deny removed -> 2"          modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_denygone.json")" 2
 run_out "floating twin removed -> 2" modules/config-guard.sh 2 <<< "$(ccp project_settings "$TDIR/_t_twin_gone.json")"
-err_has "config-guard names the removed twin" "removed from permissions.deny: Edit(//**/.claude/settings.local.json)"
+case "$ERR"$'\n' in   # exactly that twin: the list of missing entries ends with it
+  *"removed from permissions.deny: Edit(//**/.claude/settings.local.json)"$'\n'*) pass=$((pass + 1)) ;;
+  *) fail=$((fail + 1)); echo "  FAIL [config-guard names exactly the removed twin]" ;;
+esac
 run "guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_soft.json")" 2
 run "scope-guard onFailure softened -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_soft_sg.json")" 2
 run "guard onFailure removed -> 2" modules/config-guard.sh "$(ccp project_settings "$TDIR/_t_of_gone.json")" 2
@@ -1926,7 +1929,8 @@ then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [coupling drift: 
 # Deny twins: each cwd-anchored settings/config Edit entry has an Edit(//**/...) twin that
 # matches anywhere (a worktree's settings.local.json at the main checkout, sibling and
 # nested copies, link targets), the hook tree is covered at any depth, and each Bash or
-# PowerShell path-text rule has its backslash spelling. The check must see one missing.
+# PowerShell path-text rule has its backslash spelling, with no backslash before a `*`.
+# The check must see one missing, and a `\*` spelling.
 if "$PY" - "$SRC/settings.template.json" <<'PY'
 import json, sys
 B = chr(92)
@@ -1938,18 +1942,28 @@ def problems(deny):
     if "Edit(//**/.claude/hooks/**)" not in deny:
         out.append("hook tree not covered at any depth")
     for e in deny:
-        if e.startswith(("Bash(*.claude/", "PowerShell(*.claude/")) and e.replace("/", B) not in deny:
-            out.append("no backslash spelling for " + e)
+        # Claude Code reads a backslash before `*` as a literal asterisk, so such a rule
+        # never matches a real path: `\hooks\baseline*`, not `\hooks\baseline\*`.
+        if e.startswith(("Bash(", "PowerShell(")) and B + "*" in e.replace(B + B, ""):
+            out.append("a backslash makes this * literal: " + e)
+        if e.startswith(("Bash(*.claude/", "PowerShell(*.claude/")):
+            want = e.replace("/", B)
+            if want.endswith(B + "*)"):
+                want = want[:-3] + "*)"
+            if want not in deny:
+                out.append("no backslash spelling for " + e)
     return out
 deny = [d for d in json.load(open(sys.argv[1], encoding="utf-8"))["permissions"]["deny"]
         if isinstance(d, str)]
 found = problems(deny)
 assert not found, found
 for gone in ("Edit(//**/.claude/settings.local.json)", "Edit(//**/.claude/hooks/**)",
-             "Bash(*.claude" + B + "settings.json*)", "PowerShell(*.claude" + B + "settings.json*)"):
+             "Bash(*.claude" + B + "settings.json*)", "PowerShell(*.claude" + B + "settings.json*)",
+             "PowerShell(*.claude" + B + "hooks" + B + "baseline*)"):
     assert problems([d for d in deny if d != gone]), gone
+assert problems(deny + ["Bash(*.claude" + B + "hooks" + B + "baseline" + B + "*)"])
 PY
-then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [deny twins: a cwd-anchored settings/config entry lacks its Edit(//**/...) twin, or a path-text rule its backslash spelling]"; fi
+then pass=$((pass + 1)); else fail=$((fail + 1)); echo "  FAIL [deny twins: a cwd-anchored settings/config entry lacks its Edit(//**/...) twin, or a path-text rule its backslash spelling, or a rule puts a backslash before a *]"; fi
 # Wiring coupling: config-guard's BASELINE_WIRING is the template's wiring as
 # lib/merge_settings.py reads it (from the raw template too, whose hooks hold a _comment
 # string), every template matcher is names joined by | (so its names are defined), and
