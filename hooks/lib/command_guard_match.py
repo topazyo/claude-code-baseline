@@ -224,6 +224,29 @@ _PS_EXPR_NEXT = _PS_ASSIGN | {
     "-eq", "-ne", "-gt", "-lt", "-ge", "-le", "-like", "-notlike", "-match", "-notmatch",
     "-replace", "-contains", "-notcontains", "-in", "-notin", "-and", "-or", "-is",
     "-isnot", "-as", "-split", "-join"}
+# More binary operators PowerShell accepts after a value: the case-sensitive (-c) and
+# explicitly case-insensitive (-i) comparisons, the logical -xor, the bitwise, format and
+# arithmetic ones. Not in _PS_EXPR_NEXT, which a runner's script also reads (_rules_at): an
+# outer shell may have expanded the $ word there, and an expanded command could take these
+# words as its own flags. _ps_statement_tail and _ps_command_mode read them after a
+# variable, and _ps_argument_group before a `(` once _ps_command_mode has found no command:
+# at the start of a pipeline `-f` is a command name (`$y = -f (` calls -f), which
+# _ps_command_mode reads as one.
+_PS_CMP = ("eq", "ne", "gt", "lt", "ge", "le", "like", "notlike", "match", "notmatch",
+           "replace", "contains", "notcontains", "in", "notin", "split")
+_PS_BINARY_MORE = frozenset(
+    {"-" + p + op for op in _PS_CMP for p in "ci"}
+    | {"-xor", "-band", "-bor", "-bxor", "-shl", "-shr", "-f",
+       "+", "-", "*", "/", "%", "..", "??"})
+_PS_TOOL_EXPR_NEXT = _PS_EXPR_NEXT | _PS_BINARY_MORE
+# A PowerShell number literal (`2`, `-1`, `0x1F`, `1.5e3`, `10kb`, `5L`): a value. Any other
+# word that starts with a digit (`7z`) names a command.
+_PS_NUMBER_RE = re.compile(
+    r"[+-]?(?:0x[0-9a-f]+|0b[01]+|(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(?:u?[lsy]|[dnu])?(?:[kmgtp]b)?",
+    re.I)
+# A word such as `-f` or `-foo` at the start of a pipeline is read as a command name. A unary
+# operator (`-not`, `-split`) reads so too: the stricter reading of the `(` after it.
+_PS_DASH_NAME_RE = re.compile(r"-[a-z_][\w-]*", re.I)
 # A PowerShell tool statement may start with a variable, with member or index steps (see
 # _ps_statement_tail). No other scope prefix: `$alias:g`, `$function:g` and `${c:\f}` name
 # a provider's item, and assigning one defines a command or writes a file.
@@ -876,7 +899,7 @@ def _ps_statement_tail(toks):
             nxt = toks[i + 1].lower() if i + 1 < len(toks) else None
             if nxt is None:
                 return []
-            if nxt in _PS_EXPR_NEXT or (nxt == "in" and toks.ps_foreach):
+            if nxt in _PS_TOOL_EXPR_NEXT or (nxt == "in" and toks.ps_foreach):
                 walked, value_of_glue = True, False
                 i += 2
                 if i >= len(toks):
@@ -1771,10 +1794,14 @@ def _ps_command_mode(cur, quoted):
                 i += 1
                 continue
         elif (_PS_VAR_WORD_RE.fullmatch(word) and i + 1 < len(cur)
-              and (cur[i + 1].lower() in _PS_EXPR_NEXT or cur[i + 1].lower() == "in")):
+              and (cur[i + 1].lower() in _PS_TOOL_EXPR_NEXT or cur[i + 1].lower() == "in")):
             i += 2
             continue
-        return not (i in quoted or word[:1] in "$@-'\"" or word[:1].isdigit())
+        if i in quoted or word[:1] in "$@'\"" or _PS_NUMBER_RE.fullmatch(word):
+            return False
+        if word[:1] == "-":     # `-foo (` calls -foo; `-1 (` and `- (` are values
+            return bool(_PS_DASH_NAME_RE.fullmatch(word))
+        return True
     return False
 
 
@@ -1790,7 +1817,7 @@ def _ps_argument_group(values, cur, quoted):
         return False
     if _ps_command_mode(cur, quoted):
         return True
-    return bool(words[-1]) and words[-1] not in _PS_EXPR_NEXT and words[-1] != "in"
+    return bool(words[-1]) and words[-1] not in _PS_TOOL_EXPR_NEXT and words[-1] != "in"
 
 
 class _Latch(list):
