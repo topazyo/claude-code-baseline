@@ -408,6 +408,20 @@ timeout -k 5 120 bash "$SRC/install.sh" --target "$A" >/dev/null 2>&1 </dev/null
 if timeout -k 5 60 bash "$STATUS" --strict "$A" >/dev/null 2>&1; then ok; else no "--strict should PASS once the marker is back"; fi
 rm -f "$TMP/cfgA.saved" "$TMP/common.saved"
 
+echo "== baseline-status: only an interpreter the hooks accept =="
+# A Cygwin or MSYS Python, or a Windows Python older than 3.8, is refused by install.sh
+# and by the hooks; the report refuses it too rather than read what they would not.
+SHIMDIR="$TMP/pyshim"; mkdir -p "$SHIMDIR"
+REALPY="$(winpath "$("$PY" -c 'import sys; sys.stdout.write(sys.executable)')")"
+for ans in 'PYVER=3.12 posixwin' 'PYVER=3.7 nt'; do
+  printf '%s\n' "$ans" > "$SHIMDIR/answer"
+  printf '#!/usr/bin/env bash\ncase "$*" in *PYVER=*) cat "%s"; exit 0 ;; esac\nexec "%s" "$@"\n' "$SHIMDIR/answer" "$REALPY" > "$SHIMDIR/python3"
+  chmod +x "$SHIMDIR/python3"
+  out="$(PATH="$SHIMDIR:$PATH" timeout -k 5 60 bash "$STATUS" "$A" 2>&1)"; rc=$?
+  if [ "$rc" = 1 ] && printf '%s' "$out" | grep -qF "is not one the baseline hooks accept"; then ok; else no "status with a '$ans' interpreter must refuse: rc=$rc"; fi
+done
+rm -rf "$SHIMDIR"
+
 echo "== baseline-status: disableAllHooks reported per file (config-guard (1) reading) =="
 ASET="$A/.claude/settings.json"
 cp "$ASET" "$TMP/aset.keep"

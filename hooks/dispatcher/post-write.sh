@@ -84,7 +84,7 @@ fi
 # let that be silent. command-guard (PreToolUse) fails closed without Python; the
 # secrets deny-list (a permission rule, enforced by Claude Code) is unaffected.
 if [[ -z "$(bcl_python)" ]]; then
-  bcl_say "[baseline] DEGRADED: Python unavailable — config-driven checks" \
+  bcl_say "[baseline] DEGRADED: $(bcl_nopy_reason) — config-driven checks" \
     "   (auto-format, securityDefaults, fix-tags, run-tests) did NOT run for this edit." \
     "   The secrets deny-list (a permission rule) is unaffected; command-guard fails closed on Bash."
   bcl_failclosed_exit; exit $?
