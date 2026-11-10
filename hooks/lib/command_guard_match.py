@@ -224,6 +224,19 @@ _PS_EXPR_NEXT = _PS_ASSIGN | {
     "-eq", "-ne", "-gt", "-lt", "-ge", "-le", "-like", "-notlike", "-match", "-notmatch",
     "-replace", "-contains", "-notcontains", "-in", "-notin", "-and", "-or", "-is",
     "-isnot", "-as", "-split", "-join"}
+# More binary operators PowerShell accepts after a value: the case-sensitive (-c) and
+# explicitly case-insensitive (-i) comparisons, the logical -xor, the bitwise, format and
+# arithmetic ones. Not in _PS_EXPR_NEXT, which a runner's script also reads (_rules_at): an
+# outer shell may have expanded the $ word there, and an expanded command could take these
+# words as its own flags. _ps_statement_tail and _ps_command_mode read them after a
+# variable; _ps_argument_group only after another word (`-f (` alone calls a command -f).
+_PS_CMP = ("eq", "ne", "gt", "lt", "ge", "le", "like", "notlike", "match", "notmatch",
+           "replace", "contains", "notcontains", "in", "notin", "split")
+_PS_BINARY_MORE = frozenset(
+    {"-" + p + op for op in _PS_CMP for p in "ci"}
+    | {"-xor", "-band", "-bor", "-bxor", "-shl", "-shr", "-f",
+       "+", "-", "*", "/", "%", "..", "??"})
+_PS_TOOL_EXPR_NEXT = _PS_EXPR_NEXT | _PS_BINARY_MORE
 # A PowerShell tool statement may start with a variable, with member or index steps (see
 # _ps_statement_tail). No other scope prefix: `$alias:g`, `$function:g` and `${c:\f}` name
 # a provider's item, and assigning one defines a command or writes a file.
@@ -876,7 +889,7 @@ def _ps_statement_tail(toks):
             nxt = toks[i + 1].lower() if i + 1 < len(toks) else None
             if nxt is None:
                 return []
-            if nxt in _PS_EXPR_NEXT or (nxt == "in" and toks.ps_foreach):
+            if nxt in _PS_TOOL_EXPR_NEXT or (nxt == "in" and toks.ps_foreach):
                 walked, value_of_glue = True, False
                 i += 2
                 if i >= len(toks):
@@ -1771,7 +1784,7 @@ def _ps_command_mode(cur, quoted):
                 i += 1
                 continue
         elif (_PS_VAR_WORD_RE.fullmatch(word) and i + 1 < len(cur)
-              and (cur[i + 1].lower() in _PS_EXPR_NEXT or cur[i + 1].lower() == "in")):
+              and (cur[i + 1].lower() in _PS_TOOL_EXPR_NEXT or cur[i + 1].lower() == "in")):
             i += 2
             continue
         return not (i in quoted or word[:1] in "$@-'\"" or word[:1].isdigit())
@@ -1790,7 +1803,11 @@ def _ps_argument_group(values, cur, quoted):
         return False
     if _ps_command_mode(cur, quoted):
         return True
-    return bool(words[-1]) and words[-1] not in _PS_EXPR_NEXT and words[-1] != "in"
+    last = words[-1]
+    return bool(last) and last != "in" and not (
+        last in _PS_EXPR_NEXT
+        or (last in _PS_BINARY_MORE and len(words) > 1
+            and words[-2] not in _PS_STATEMENT_PREFIX))
 
 
 class _Latch(list):
