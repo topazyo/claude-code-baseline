@@ -47,19 +47,19 @@ ci_expect() {
   case "$leg:$suite" in
     ubuntu-latest:test_hooks)        allowed="";  floor=734 ;;
     ubuntu-latest:test_status)       allowed="";  floor=88 ;;
-    ubuntu-latest:test_policy_gate)  allowed="";  floor=53 ;;
+    ubuntu-latest:test_policy_gate)  allowed="";  floor=56 ;;
     ubuntu-latest:test_latency)      allowed="";  floor=5 ;;
     windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=747 ;;
     windows-latest:test_status)      allowed="symlinked-skill"; floor=87 ;;
-    windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=51 ;;
+    windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=54 ;;
     windows-latest:test_latency)     allowed="";  floor=5 ;;
     python-floor-ubuntu-22.04:test_hooks)       allowed="";  floor=734 ;;
     python-floor-ubuntu-22.04:test_status)      allowed="";  floor=88 ;;
-    python-floor-ubuntu-22.04:test_policy_gate) allowed="";  floor=53 ;;
+    python-floor-ubuntu-22.04:test_policy_gate) allowed="";  floor=56 ;;
     python-floor-ubuntu-22.04:test_latency)     allowed="";  floor=5 ;;
     python-floor-windows-latest:test_hooks)       allowed="newline-name venv-pth-elsewhere no-link dotdot-lexical unix-modes"; floor=747 ;;
     python-floor-windows-latest:test_status)      allowed="symlinked-skill"; floor=87 ;;
-    python-floor-windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=51 ;;
+    python-floor-windows-latest:test_policy_gate) allowed="newline-name invalid-utf8-name"; floor=54 ;;
     python-floor-windows-latest:test_latency)     allowed="";  floor=5 ;;
     # Not a runner: fixed values for test_status.sh's checks of this function.
     selftest:test_status)            allowed="fifo symlinked-skill"; floor=10 ;;

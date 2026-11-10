@@ -75,7 +75,8 @@ for f in hooks/lib/common.sh hooks/modules/scope-guard.sh hooks/guardrails/comma
          .github/workflows/baseline-ci.yml README.md RELEASING.md tests/README.md \
          tests/run.sh tests/policy-change-gate.sh tests/test_hooks.sh \
          tests/test_command_guard.py tests/test_translation_sync.py tests/translation_sync.py \
-         tests/test_latency.sh; do
+         tests/test_latency.sh tests/test_definition_path.py tests/test_old_windows_python.sh \
+         tests/test_msys_python.sh; do
   seed "$f"
 done
 seed hooks/VERSION "2026-01-01"
@@ -217,6 +218,12 @@ begin; touchf hooks/lib/common.sh junk/tests/test_hooks.sh; commit
 expect 1 "$NOFIX" "a fixture-named file outside the root tests/ is not a fixture"
 begin; touchf tests/test_hooks.sh; commit
 expect 0 "$OKMSG" "a fixture-only change"
+begin; touchf hooks/lib/common.sh tests/test_definition_path.py; commit
+expect 0 "$OKMSG" "policy + the modified definition-path unit fixtures"
+begin; touchf hooks/modules/scope-guard.sh tests/test_old_windows_python.sh; commit
+expect 0 "$OKMSG" "policy + the modified old-Windows-Python fixture"
+begin; touchf install.sh tests/test_msys_python.sh; commit
+expect 0 "$OKMSG" "policy + the modified MSYS-Python fixture"
 begin; touchf tests/policy-change-gate.sh tests/test_policy_gate.sh; commit
 expect 0 "$OKMSG" "the gate + an added fixture file"
 begin; touchf hooks/lib/common.sh; commit; touchf README.md; commit
