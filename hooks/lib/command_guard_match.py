@@ -2235,11 +2235,12 @@ def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool
     runners can hand down thousands of distinct long scripts (~3 MB). Past
     _MAX_RUNNER_CHARS tokenized in one evaluation the command is refused as
     uninspectable (a block), like an over-long continuation chain, rather than run
-    toward the hook timeout. Each pwsh level at least doubles the texts (its grouping
-    and quoting readings), so the use compounds with depth: a 4 KB PowerShell payload of
-    three nested `pwsh -c` levels with quoted paths uses about 92 KB, and a dense Bash
-    one with VT breaks about 340 KB; stacking further readings on top of that can reach
-    the cap (a test keeps the former under half of it)."""
+    toward the hook timeout. A pwsh level can more than double the texts (its grouping,
+    block and quoting readings), so the use compounds with depth: a 4 KB PowerShell
+    payload of three nested `pwsh -c` levels with quoted paths uses about 92 KB (a test
+    keeps that one under half of the cap), and a dense Bash one with VT breaks about
+    340 KB. A dense multi-level payload that also holds groups, escapes or Unicode
+    spaces can reach the cap and is refused."""
     _RunnerBudget.used += len(script)
     if _RunnerBudget.used > _MAX_RUNNER_CHARS:
         raise _Uninspectable(
@@ -2449,8 +2450,9 @@ def _ps_unescape(text: str, legacy: bool = False) -> str:
     bareword keeps its characters, with each backtick escape decoded (quoted when it
     would split or quote a POSIX word), backtick-newline a line continuation and a
     literal backslash quoted. An @"..."@ here-string keeps its delimiters with the
-    body decoded; @'...'@ and comments are copied as they are. Unterminated text is
-    copied. legacy: decode as Windows PowerShell 5.1 does (see _ps_escape).
+    body decoded; @'...'@ and # comments are copied as they are, and a closed <# #>
+    comment becomes a space. Unterminated text is copied. legacy: decode as Windows
+    PowerShell 5.1 does (see _ps_escape).
     """
     out, i, n = [], 0, len(text)
     at_word_start = True
@@ -2483,10 +2485,14 @@ def _ps_unescape(text: str, legacy: bool = False) -> str:
             i = eol
             continue
         if c == "<" and at_word_start and text.startswith("<#", i):   # block comment
+            # PowerShell reads a closed one as blank space (bash would read `<#` as a
+            # redirect taking the next word); an unclosed one is copied
             end = text.find("#>", i + 2)
-            end = n if end == -1 else end + 2
-            out.append(text[i:end])
-            i = end
+            if end == -1:
+                out.append(text[i:])
+                break
+            out.append(" ")
+            i = end + 2
             continue
         if c in _PS_DQ or c in _PS_SQ:
             quoted = _ps_quoted(text, i, legacy)
