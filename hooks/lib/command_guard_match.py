@@ -228,8 +228,10 @@ _PS_EXPR_NEXT = _PS_ASSIGN | {
 # explicitly case-insensitive (-i) comparisons, the logical -xor, the bitwise, format and
 # arithmetic ones. Not in _PS_EXPR_NEXT, which a runner's script also reads (_rules_at): an
 # outer shell may have expanded the $ word there, and an expanded command could take these
-# words as its own flags. _ps_statement_tail and _ps_command_mode read them after a
-# variable, and _ps_argument_group before a `(` once _ps_command_mode has found no command:
+# words as its own flags. A script an outer shell is known to expand gets no relaxation at
+# all (ps_outer); the narrow set stays as the backstop where that reading cannot tell.
+# _ps_statement_tail and _ps_command_mode read them after a variable, and
+# _ps_argument_group before a `(` once _ps_command_mode has found no command:
 # at the start of a pipeline `-f` is a command name (`$y = -f (` calls -f), which
 # _ps_command_mode reads as one.
 _PS_CMP = ("eq", "ne", "gt", "lt", "ge", "le", "like", "notlike", "match", "notmatch",
@@ -1392,7 +1394,12 @@ def _runner_rests(toks):
         if i is None:
             continue
         base, args = _cmd_word(toks[i]), list(toks[i + 1:])
-        outer = any(e > i for e in getattr(toks, "expanding", ()))
+        if getattr(toks, "ps_script", False):
+            # A runner in a pwsh script: PowerShell's quoting is not the one `expanding`
+            # follows (`\"` opens a string there), so any $ word after it counts.
+            outer = any("$" in w for w in toks[i + 1:])
+        else:
+            outer = any(e > i for e in getattr(toks, "expanding", ()))
         found = len(out)
         if base == "cmd":
             sw = _cmd_run_switch(args)
@@ -2148,10 +2155,11 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         expanded = []
         for toks in segments:
             # A script an outer shell expands first (`bash -c "pwsh -c '$CMD'"`, `pwsh -c
-            # "$CMD"`) is not the text it runs: a pwsh script in it is no ps_script.
+            # "$CMD"`) is not the text it runs: a pwsh script in it is marked ps_outer.
+            # Its words from the shell's on count, the shell's own included (`watch "..."`).
             starts = [j for j in (_shell_index(toks, c) for c in _READINGS) if j is not None]
             first = min(starts) if starts else -1
-            outer = outer_expanded or any(e > first for e in getattr(toks, "expanding", ()))
+            outer = outer_expanded or any(e >= first for e in getattr(toks, "expanding", ()))
             head, inline = _split_inline_script(toks)
             if head:
                 expanded.append(head)

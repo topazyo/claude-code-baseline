@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 355
+FP_FLOOR = 356
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 729
+BLOCK_FLOOR = 737
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -755,7 +755,10 @@ CASES = [
     ("fp cost: cmd /c pwsh -c single-quoted", "cmd /c pwsh -c '$x = 1'", B, ()),
     ("fp cost: an expanded word after the script", "pwsh -c '$x = 1' \"$HOME\"", B, ()),
     ("fp pwsh -c escaped dollar in double quotes", 'pwsh -c "' + chr(92) + '$x = 1"', A, ()),
-    ("fp pwsh -c double-quoted variable argument", 'pwsh -c "Write-Output $x"', A, ()),
+    # Known limit, as `bash -c "echo $x"` is: an expansion outside the command position of
+    # an expanded script stays allowed, though its value becomes script text.
+    ("limit pwsh -c double-quoted variable outside the command position",
+     'pwsh -c "Write-Output $x"', A, ()),
     ("fp pwsh -c with an expanded redirect target",
      "pwsh -c '$x = 1; Write-Output $x' > \"$OUT\"", A, ()),
     ("fp pwsh -c after an expanded env prefix", "X=$HOME pwsh -c '$x = 1'", A, ()),
@@ -777,6 +780,23 @@ CASES = [
     # Accepted cost: a called group's latch lasts to the end of the script.
     ("fp cost: pwsh -c statement after a called group",
      "pwsh -c '& (gcm git) --version; $x = 1'", B, ()),
+    # A wrapper whose script word is the shell's command line: `watch "..."`, `env -S "..."`.
+    ("watch with a double-quoted pwsh script", "watch \"pwsh -c '$CMD'\"", B, ()),
+    ("watch -n with a double-quoted pwsh script", "watch -n 1 \"pwsh -c '$CMD'\"", B, ()),
+    ("env -S with a double-quoted pwsh script", "env -S \"pwsh -c '$CMD'\"", B, ()),
+    ("runuser -c with a double-quoted pwsh script", "runuser -u u -c \"pwsh -c '$CMD'\"", B, ()),
+    ("fp watch with a pwsh script and no expansion", "watch \"pwsh -c 'Get-Date'\"", A, ()),
+    # A pwsh script nested in one: PowerShell's quoting, not bash's, decides what expands.
+    ("pwsh script in a pwsh script with an escaped quote",
+     "pwsh -c 'pwsh -c " + chr(92) + "\"'" + chr(92) + "''$env:CMD'" + chr(92) + "''"
+     + chr(92) + "\"'", B, ()),
+    ("pwsh script in a pwsh script, double-quoted", "pwsh -c 'pwsh -c \"$x = 1\"'", B, ()),
+    ("fp cost: pwsh script in a pwsh script, single-quoted",
+     "pwsh -c 'pwsh -c ''$x = 1'''", B, ()),
+    # A backtick substitution in "..." makes the word other than its text (the line's
+    # quote-blind reading counts every $ word then).
+    ("pwsh -c script glued to a backtick substitution",
+     "pwsh -c \"`cat f`\"'$x = 1'", B, ()),
     ("fp a long cmd /c echo", "cmd /c echo " + "word " * 780, A, ()),
     ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
      ("status ; echo",)),
