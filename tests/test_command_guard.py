@@ -2440,7 +2440,7 @@ CASES += [(f"fp cost: {label}", cmd, B, ()) for label, cmd in _LIMIT_ONLY]
 STRUCT_CASES += [(f"depth limit: {label}", lambda c=cmd: m.evaluate(c), [_NEST_REFUSAL])
                  for label, cmd in _LIMIT_ONLY]
 CASES += [
-    ("a decoded line break in a pwsh script before a blocked command at the depth limit",
+    ("a decoded line break in a pwsh script, a blocked command's words after it, is refused",
      "pwsh -c 'true`veval eval eval git push --force'", B, ()),
     # A blank script at the limit runs nothing, so it is not refused.
     ("fp blank bash -c script at the depth limit",
