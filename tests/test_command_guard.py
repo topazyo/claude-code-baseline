@@ -36,7 +36,7 @@ FP_FLOOR = 376
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 771
+BLOCK_FLOOR = 772
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -869,11 +869,16 @@ CASES = [
     ("fp substitution with U+180E in an echo", "echo \"$(echo a" + chr(0x180E) + "b)\"", A, ()),
     # Accepted costs: the spaces are read before escapes are decoded, so a backtick before
     # a literal no-break space escapes a space instead; and a bash script string in a pwsh
-    # script is split on it, though bash keeps it inside the word.
+    # script is split on it, though bash keeps it inside the word. The first row is also
+    # the only one that needs the context-free decode of the spaced text: if its cost is
+    # removed, pin that reading with another row. The quote-blind pass splits a bash
+    # substitution on U+180E as it has always split on the other _PS_SPACES characters.
     ("fp cost: pwsh backtick before a literal no-break space",
      "pwsh -c 'git`" + chr(0xA0) + "push --force'", B, ()),
     ("fp cost: bash script string in a pwsh script with a no-break space",
      "pwsh -c 'bash -c \"git push" + chr(0xA0) + "--force\"'", B, ()),
+    ("fp cost: bash substitution split on U+180E",
+     "echo \"$(git" + chr(0x180E) + "push" + chr(0x180E) + "--force)\"", B, ()),
     # The quote-blind pass keeps U+180E inside its word too (pwsh 7 does): a command
     # word glued by it to a $ word is still an expansion in command position.
     ("substitution: a command word glued to a $ word by U+180E",
