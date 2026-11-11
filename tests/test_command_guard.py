@@ -10,6 +10,7 @@ section documents what is deliberately NOT blocked (targeted deletes), and the
 depth boundary) — asserting they are NOT blocked keeps the docs honest.
 """
 import os
+import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hooks", "lib"))
@@ -29,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 376
+FP_FLOOR = 408
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 772
+BLOCK_FLOOR = 831
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -1784,19 +1785,22 @@ def _timing(shell, text):
     return time.perf_counter() - t0
 
 
-def _long_runner_chain():
-    """One long segment of nested runners whose readings multiply (see _runner_segments)."""
+def _long_runner_chain(head="cmd /c powershell -ep a wsl -d x ~ "):
+    """One long segment of nested runners whose readings multiply (see _runner_segments),
+    three deep: a fourth runner would be refused at the depth limit before the budget.
+    Its tokenized text only just passes the cap (529,724 chars against 524,288 when
+    written); the must-block row pins the budget's reason, so a drift below it fails."""
     tail = "`e`u{41}" + chr(0xA0) + chr(0x0B) + " C:\\\\x"
-    out = "cmd /c powershell -ep a wsl -d x ~ powershell -ep a cmd /c "
+    out = head
     while len(out) + 8 + len(tail) <= m._MAX_INSPECT_LEN:
         out += "a^{b} c "
     return out + tail
 
 
-def _distinct_runner_payload():
+def _distinct_runner_payload(head="cmd /c pwsh -c wsl -e "):
     out, i = "", 0
     while True:
-        unit = f'cmd /c pwsh -c wsl -e cmd /c echo a^b{i} ("x") `e{chr(0xA0)}{{y}}; '
+        unit = head + f'echo a^b{i} ("x") `e{chr(0xA0)}{{y}}; '
         if len(out) + len(unit) > m._MAX_INSPECT_LEN:
             return out
         out, i = out + unit, i + 1
@@ -1915,6 +1919,8 @@ MUST_BLOCK = [
      "continued lines too long"),
     ("over-long runner chain", _long_runner_chain(), "powershell", (),
      "Windows runner scripts too long"),
+    ("inline scripts past the depth limit", "eval eval eval eval git status", "bash", (),
+     "inline scripts nested too deep"),
     # Windows runners
     ("cmd /c from bash", "cmd /c rm -rf /", "bash", (), "(rm -rf)"),
     ("cmd /c from PowerShell", "cmd /c rm -rf /", "powershell", (), "(rm -rf)"),
@@ -1947,7 +1953,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 31
+REASON_FLOOR = 32
 
 
 def _str_value(node):
@@ -2226,7 +2232,7 @@ STRUCT_CASES = [
     ("timing: 4 KB of nested runners (PowerShell)",
      lambda: _timing("powershell", _distinct_runner_payload()) < 3.0, True),
     ("timing: 4 KB of nested runners (Bash)", lambda: _timing(
-        "bash", ("cmd /c wsl -- pwsh -Command cmd //c echo a^b 'q w' ; " * 80)[:4096]) < 3.0,
+        "bash", ("cmd /c wsl -- pwsh -Command echo a^b 'q w' ; " * 90)[:4096]) < 3.0,
      True),
     # env -S: env's own options come first, and the words after the script are part of
     # the command it runs (benign words; the block fixtures are in CASES).
@@ -2326,6 +2332,172 @@ STRUCT_CASES = [
         "powershell", "{$y = " + "1" * 3940 + "x" + chr(13) + "(`$z)} <# #>") < 3.0, True),
     ("timing: 4 KB of glob brackets", lambda: _timing(
         "bash", "rm -rf /" + "[" * 4080) < 3.0, True),
+]
+
+
+# Inline scripts nested to the inspection depth (_MAX_INLINE_DEPTH, see _segments).
+# Three levels are judged by the rules. Past them, a segment that still holds an inline
+# script or a Windows runner's command is refused as uninspectable, whatever it runs:
+# the harmless deep rows are accepted costs. The rows are built here so that each
+# level's quoting is exact.
+_NEST_REFUSAL = ("uninspectable command (inline scripts nested too deep to inspect "
+                 "(> 3 levels))")
+_NEST_BLOCKED, _NEST_HARMLESS = "git push --force", "git status"
+
+
+def _ps_quote(s):
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _nested(steps, cmd, n):
+    """cmd wrapped in n levels, steps[i % len(steps)] for level i (innermost first)."""
+    for i in range(n):
+        cmd = steps[i % len(steps)](cmd)
+    return cmd
+
+
+def _pwsh_from_bash(cmd, n):
+    """n nested `pwsh -c` levels sent by the Bash tool: bash quotes the outermost one."""
+    return "pwsh -c " + shlex.quote(_nested([lambda s: "pwsh -c " + _ps_quote(s)], cmd, n - 1))
+
+
+def _bash_c(s):
+    return "bash -c " + shlex.quote(s)
+
+
+# (name, tool, builder(cmd, n), the first depth refused). The alternating shape needs a
+# fifth level: its inline split finds the bash -c word inside the wsl and cmd levels.
+NEST_SHAPES = [
+    ("eval", "bash", lambda c, n: _nested([lambda s: "eval " + s], c, n), 4),
+    ("bash -c", "bash", lambda c, n: _nested([_bash_c], c, n), 4),
+    ("bash -c / sh -c", "bash",
+     lambda c, n: _nested([_bash_c, lambda s: "sh -c " + shlex.quote(s)], c, n), 4),
+    ("cmd /c", "bash", lambda c, n: _nested([lambda s: "cmd /c " + s], c, n), 4),
+    ("wsl", "bash", lambda c, n: _nested([lambda s: "wsl " + s], c, n), 4),
+    ("pwsh -c", "bash", _pwsh_from_bash, 4),
+    ("su -c", "bash", lambda c, n: _nested([lambda s: "su -c " + shlex.quote(s)], c, n), 4),
+    ("env -S", "bash", lambda c, n: _nested([lambda s: "env -S " + shlex.quote(s)], c, n), 4),
+    ("watch", "bash", lambda c, n: _nested([lambda s: "watch " + s], c, n), 4),
+    ("xargs sh -c", "bash", lambda c, n: "echo x | " + _nested(
+        [lambda s: "xargs sh -c " + shlex.quote(s)], c, n), 4),
+    ("eval / bash -c / cmd /c / wsl", "bash", lambda c, n: _nested(
+        [lambda s: "eval " + s, _bash_c, lambda s: "cmd /c " + s, lambda s: "wsl " + s],
+        c, n), 5),
+    ("pwsh -c", "powershell",
+     lambda c, n: _nested([lambda s: "pwsh -c " + _ps_quote(s)], c, n), 4),
+    ("powershell -Command", "powershell",
+     lambda c, n: _nested([lambda s: "powershell -Command " + _ps_quote(s)], c, n), 4),
+    ("cmd /c", "powershell", lambda c, n: _nested([lambda s: "cmd /c " + s], c, n), 4),
+    ("wsl", "powershell", lambda c, n: _nested([lambda s: "wsl " + s], c, n), 4),
+]
+for _name, _tool, _build, _deep in NEST_SHAPES:
+    _rows = CASES if _tool == "bash" else PS_CASES
+    _rows += [
+        (f"nested {_name} x3 is judged", _build(_NEST_BLOCKED, 3), B, ()),
+        (f"fp nested {_name} x3", _build(_NEST_HARMLESS, 3), A, ()),
+        (f"nested {_name} x{_deep} is refused", _build(_NEST_BLOCKED, _deep), B, ()),
+        (f"fp cost: nested {_name} x{_deep} is refused", _build(_NEST_HARMLESS, _deep), B, ()),
+    ]
+    STRUCT_CASES += [
+        # The refusal is the reason, not some other rule meeting the words.
+        (f"depth limit: nested {_name} x{_deep} ({_tool}) is refused as uninspectable",
+         lambda b=_build, d=_deep, t=_tool: m.evaluate(b(_NEST_HARMLESS, d), shell=t),
+         [_NEST_REFUSAL]),
+        # Three levels are inspected: the innermost command meets its rule.
+        (f"depth limit: nested {_name} x3 ({_tool}) is judged by the rules",
+         lambda b=_build, t=_tool: (lambda r: _NEST_REFUSAL not in r
+                                    and "forced git push is forbidden" in r)(
+             m.evaluate(b(_NEST_BLOCKED, 3), shell=t)), True),
+    ]
+
+
+def _dq(s):
+    """s inside bash double quotes, with no expansion of its own."""
+    for c in (chr(92), '"', "$", "`"):
+        s = s.replace(c, chr(92) + c)
+    return '"' + s + '"'
+
+
+# Each of these holds a script at the limit that only one reading or one path finds:
+# the refusal is pinned exactly, so a check that skipped that reading would show.
+_LIMIT_ONLY = [
+    # Only the shell's own reading of the drive-letter path (windows_paths off), where
+    # the backslash before each quote escapes it, balances the quotes around the script.
+    ("the drive path's shell reading at the depth limit is checked",
+     _nested([_bash_c], "echo C:" + chr(92) + "x" + chr(92) + "' ; bash -c \"git status\" C:"
+             + chr(92) + "y" + chr(92) + "'" + chr(92) + "'", 3)),
+    # wsl's later reading (the value option not consumed) is the one with a command.
+    ("a later wsl reading at the depth limit is checked",
+     _nested([_bash_c], "wsl -d x ' '", 3)),
+    # The outer shell expands a word of the first level's script.
+    ("an outer-expanded script at the depth limit is checked",
+     'bash -c "true $HOME; ' + _dq(_nested([_bash_c], "git status", 3))[1:]),
+    # A line break decoded from a pwsh escape one level down keeps that level's depth.
+    ("a decoded line break in a pwsh script keeps its depth",
+     "pwsh -c 'true`veval eval eval git status'"),
+]
+CASES += [(f"fp cost: {label}", cmd, B, ()) for label, cmd in _LIMIT_ONLY]
+STRUCT_CASES += [(f"depth limit: {label}", lambda c=cmd: m.evaluate(c), [_NEST_REFUSAL])
+                 for label, cmd in _LIMIT_ONLY]
+CASES += [
+    ("a decoded line break in a pwsh script, a blocked command's words after it, is refused",
+     "pwsh -c 'true`veval eval eval git push --force'", B, ()),
+    # A blank script at the limit runs nothing, so it is not refused.
+    ("fp blank bash -c script at the depth limit",
+     _nested([_bash_c], "bash -c ' '", 3), A, ()),
+    ("fp blank cmd /c command at the depth limit",
+     _nested([_bash_c], "cmd /c ' '", 3), A, ()),
+    # The Bash timing payload as it was before the limit (four runners deep).
+    ("nested runners four deep, repeated",
+     ("cmd /c wsl -- pwsh -Command cmd //c echo a^b 'q w' ; " * 80)[:4096], B, ()),
+    # Every segment at the limit is checked, not only the first or the last.
+    ("fp cost: a script in a middle segment at the depth limit is refused",
+     _nested([_bash_c], "true; bash -c 'git status'; true", 3), B, ()),
+    ("a blocked script in a middle segment at the depth limit is refused",
+     _nested([_bash_c], "true; bash -c 'git push --force'; true", 3), B, ()),
+    # The runner path counts `wsl -e bash -c` as two levels (wsl's command, then the
+    # script), so two runners in front of it reach the limit on that path: refused,
+    # though the inline split reads the same command in three.
+    ("fp cost: cmd, pwsh and wsl bash -lc",
+     "cmd //c \"pwsh -NoProfile -Command wsl -e bash -lc 'make'\"", B, ()),
+    ("fp cost: pwsh, cmd and wsl bash -c",
+     "pwsh -NoProfile -Command \"cmd /c 'wsl -e bash -c make'\"", B, ()),
+    # Every reading's script counts: here only the second (the wide reading's eval) is
+    # not blank.
+    ("fp cost: a later reading's script at the depth limit is refused",
+     _nested([_bash_c], "env -a x eval bash -c ' '", 3), B, ()),
+    # A substitution at the limit is judged by the quote-blind pass, as before.
+    ("fp substitution with bash -c at the depth limit",
+     _nested([_bash_c], "echo \"$(bash -c 'git status')\"", 3), A, ()),
+    ("fp substitution with cmd /c at the depth limit",
+     _nested([_bash_c], "echo \"$(cmd /c dir)\"", 3), A, ()),
+    # Real two- and three-level commands: a level a runner and an inline split both read
+    # is reached on more than one path, never past the limit here.
+    ("fp nested wsl bash -c twice", "wsl -e bash -c \"cd /tmp && bash -c 'ls -la'\"", A, ()),
+    ("fp wsl bash -lc pwsh -c", "wsl bash -lc \"pwsh -c 'Get-ChildItem'\"", A, ()),
+    ("fp cmd /c wsl bash -lc", "cmd /c \"wsl bash -lc 'echo hi'\"", A, ()),
+    ("fp powershell -Command wsl -e bash -c",
+     "powershell -Command \"wsl -e bash -c 'git status'\"", A, ()),
+    ("fp pwsh -c cmd /c wsl", "pwsh -c \"cmd /c 'wsl ls'\"", A, ()),
+    ("fp bash -c wsl -e bash -c", "bash -c \"wsl -e bash -c 'echo hi'\"", A, ()),
+    ("fp wsl -e bash -c wsl -e bash -c", "wsl -e bash -c \"wsl -e bash -c 'echo hi'\"", A, ()),
+    ("fp cmd /c wsl -e bash -c", "cmd /c wsl -e bash -c \"echo hi\"", A, ()),
+    ("fp xargs sh -c bash -c", "xargs -I{} sh -c \"bash -c 'echo {}'\"", A, ()),
+    ("fp env -S bash -c eval", "env -S \"bash -c 'eval echo hi'\"", A, ()),
+]
+PS_CASES += [
+    # The budget payloads as they were before the limit (five and four runners deep):
+    # still blocked, now at the limit before the budget.
+    ("ps nested runner chain five deep",
+     _long_runner_chain("cmd /c powershell -ep a wsl -d x ~ powershell -ep a cmd /c "), B, ()),
+    ("ps distinct nested runners four deep",
+     _distinct_runner_payload("cmd /c pwsh -c wsl -e cmd /c "), B, ()),
+    ("ps fp wsl -e bash -c pwsh -c", "wsl -e bash -c \"pwsh -c 'Get-ChildItem'\"", A, ()),
+    ("ps fp cmd /c wsl bash -lc", "cmd /c \"wsl bash -lc 'echo hi'\"", A, ()),
+    ("ps fp pwsh script block wsl bash -c",
+     "pwsh -NoProfile -Command \"& { wsl -e bash -c 'ls' }\"", A, ()),
+    ("ps fp cost: pwsh, cmd and wsl bash -c",
+     "pwsh -NoProfile -Command \"cmd /c wsl -e bash -c 'make'\"", B, ()),
 ]
 
 
