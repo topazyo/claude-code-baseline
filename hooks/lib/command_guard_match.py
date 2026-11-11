@@ -817,6 +817,8 @@ def _runner_reads_heredoc(toks) -> bool:
 _DEFINED_NAME_RE = re.compile(
     r"""(?:^|[\s;&|(){}'"])(?:function\s+([^\s;&|(){}<>'"`$=]+)"""
     r"""|([^\s;&|(){}<>'"`$=]+)\s*\(\s*\))""")
+
+
 def _exec_only(words) -> bool:
     """An exec (perhaps behind wrappers) with no command: only redirects. With a heredoc
     or here-string (`exec <<EOF`, `exec 2>&1 3<<EOF`, `command exec <<<x`) it redirects
