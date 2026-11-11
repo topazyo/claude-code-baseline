@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 408
+FP_FLOOR = 432
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 831
+BLOCK_FLOOR = 899
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -1921,6 +1921,8 @@ MUST_BLOCK = [
      "Windows runner scripts too long"),
     ("inline scripts past the depth limit", "eval eval eval eval git status", "bash", (),
      "inline scripts nested too deep"),
+    ("a runner reading a heredoc", "pwsh <<'EOF'\nWrite-Output hi\nEOF", "bash", (),
+     "Windows runner reading its commands from a heredoc"),
     # Windows runners
     ("cmd /c from bash", "cmd /c rm -rf /", "bash", (), "(rm -rf)"),
     ("cmd /c from PowerShell", "cmd /c rm -rf /", "powershell", (), "(rm -rf)"),
@@ -1953,7 +1955,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 32
+REASON_FLOOR = 33
 
 
 def _str_value(node):
@@ -2498,6 +2500,185 @@ PS_CASES += [
      "pwsh -NoProfile -Command \"& { wsl -e bash -c 'ls' }\"", A, ()),
     ("ps fp cost: pwsh, cmd and wsl bash -c",
      "pwsh -NoProfile -Command \"cmd /c wsl -e bash -c 'make'\"", B, ()),
+]
+
+
+# A cmd or PowerShell runner that a heredoc feeds runs the heredoc's lines as its own
+# commands, which are not read as cmd or PowerShell here: it is refused as uninspectable,
+# as one fed by a pipe is. The bodies are ones the bash reading of the lines does not
+# block (a PowerShell script block, a cmd ^ escape), so the refusal is what blocks; each
+# row is pinned to it exactly. The comments name the path that finds the runner.
+_HEREDOC_REFUSAL = ("uninspectable command (Windows runner reading its commands from a "
+                    "heredoc)")
+_PIPE_REFUSAL = "shell reading its commands from a pipe (uninspectable)"
+_PS_BODY = "& {git push --force}"
+
+
+def _heredoc(head, body=_PS_BODY, after=""):
+    """head, a quoted-delimiter heredoc holding body, then the text after it."""
+    return head + " <<'EOF'\n" + body + "\nEOF" + after
+
+
+_HEREDOC_ROWS = [
+    # The heredoc is on the runner's own segment.
+    ("pwsh reading a heredoc", _heredoc("pwsh")),
+    ("pwsh -c - reading a heredoc", _heredoc("pwsh -c -")),
+    ("pwsh -Command - reading a heredoc", _heredoc("pwsh -Command -")),
+    ("pwsh -File - reading a heredoc", _heredoc("pwsh -File -")),
+    ("pwsh -NoProfile reading a heredoc", _heredoc("pwsh -NoProfile")),
+    ("powershell reading a heredoc", _heredoc("powershell")),
+    ("pwsh reading a <<- heredoc", "pwsh <<-EOF\n\t" + _PS_BODY + "\n\tEOF"),
+    ("pwsh reading an unquoted-delimiter heredoc", "pwsh <<EOF\n" + _PS_BODY + "\nEOF"),
+    ("pwsh reading a heredoc, NBSP between the words",
+     _heredoc("pwsh", "git" + _NBSP + "push" + _NBSP + "--force")),
+    ("pwsh reading a heredoc, a grouped argument", _heredoc("pwsh", "git push ('--force')")),
+    ("cmd reading a heredoc, a ^ escape", _heredoc("cmd", "git push --f^orce")),
+    ("cmd /k reading a heredoc after its command", _heredoc("cmd //k echo a", "git push --f^orce")),
+    ("pwsh -NoExit reading a heredoc after its command", _heredoc("pwsh -NoExit -c 'Get-Date'")),
+    ("pwsh - reading a heredoc", _heredoc("pwsh -")),
+    ("pwsh -c evaluating its stdin from a heredoc", _heredoc("pwsh -c '$input | iex'")),
+    ("pwsh -c evaluating [Console]::In from a heredoc",
+     _heredoc("pwsh -c 'iex ([Console]::In.ReadToEnd())'")),
+    ("sudo pwsh reading a heredoc", _heredoc("sudo pwsh")),
+    ("coproc pwsh reading a heredoc", _heredoc("coproc pwsh")),
+    ("the heredoc before the runner's word", "<<'EOF' pwsh\n" + _PS_BODY + "\nEOF"),
+    # On a group or compound command (heredoc_wide).
+    ("a { } group reading a heredoc", _heredoc("{ true; pwsh; }")),
+    ("a ( ) subshell reading a heredoc", _heredoc("( pwsh )")),
+    ("a while loop reading a heredoc", _heredoc("while read l; do pwsh; done")),
+    ("an if reading a heredoc", _heredoc("if true; then pwsh; fi")),
+    ("a group spanning lines reading a heredoc", _heredoc("{\npwsh\n}")),
+    # On a group closer alone on its line, quote-blind (orphan_heredoc).
+    ("a group closer alone on its line in a substitution",
+     'echo "$(\n{\npwsh\n} <<\'EOF\'\n' + _PS_BODY + '\nEOF\n)"'),
+    ("a subshell closer alone on its line in a substitution",
+     'echo "$(\n(\npwsh\n) <<\'EOF\'\n' + _PS_BODY + '\nEOF\n)"'),
+    # Every command of the text is fed (_heredoc_feeds_all).
+    ("a bash heredoc whose body runs pwsh", _heredoc("bash", "pwsh\n" + _PS_BODY)),
+    ("bash -s reading a heredoc whose body runs pwsh", _heredoc("bash -s", "pwsh\n" + _PS_BODY)),
+    ("bash -c bash reading a heredoc whose body runs pwsh",
+     _heredoc("bash -c bash", "pwsh\n" + _PS_BODY)),
+    ("cmd /c bash reading a heredoc whose body runs pwsh",
+     _heredoc("cmd //c bash", "pwsh\n" + _PS_BODY)),
+    ("wsl -e bash reading a heredoc whose body runs pwsh.exe",
+     _heredoc("wsl -e bash", "pwsh.exe\n" + _PS_BODY)),
+    ("wsl bash reading a heredoc whose body runs pwsh", _heredoc("wsl bash", "pwsh\n" + _PS_BODY)),
+    ("an exec heredoc read by a later pwsh", _heredoc("exec", after="\npwsh")),
+    ("an exec fd heredoc read by a later pwsh",
+     "exec 3<<'EOF'\n" + _PS_BODY + "\nEOF\npwsh <&3"),
+    ("a function called with a heredoc", "f() { pwsh; }\n" + _heredoc("f")),
+    ("a function keyword function called with a heredoc", "function g { pwsh; }\n" + _heredoc("g")),
+    # Quote-blind: the segments of a line holding a heredoc (lenient_fed).
+    ("pwsh reading a heredoc in a substitution", 'echo "$(' + _heredoc("pwsh", after="\n)") + '"'),
+    ("pwsh with an odd quote reading a heredoc in a substitution",
+     'echo "$(' + _heredoc("pwsh ';x'", after="\n)") + '"'),
+    ("cmd /c pwsh reading a heredoc in a substitution",
+     'echo "$(' + _heredoc("cmd //c pwsh", after="\n)") + '"'),
+    # Inherited: the script of a fed command, through the inline split and the runner path.
+    ("bash -c pwsh reading a heredoc", _heredoc("bash -c pwsh")),
+    ("bash -c 'pwsh -c -' reading a heredoc", _heredoc("bash -c 'pwsh -c -'")),
+    ("cmd /c pwsh reading a heredoc", _heredoc("cmd //c pwsh")),
+    ("wsl -e pwsh reading a heredoc", _heredoc("wsl -e pwsh")),
+    ("a bash -c script holding a pwsh heredoc", "bash -c \"" + _heredoc("pwsh") + "\""),
+    # A shell two levels down reads the heredoc, and a body line runs a script of its own.
+    ("bash -c 'bash -c bash' reading a heredoc whose body runs pwsh",
+     _heredoc("bash -c 'bash -c bash'", "pwsh\n" + _PS_BODY)),
+    ("bash -c bash reading a heredoc whose body runs bash -c pwsh",
+     _heredoc("bash -c bash", "bash -c pwsh\n" + _PS_BODY)),
+    ("a substitution: bash -c bash reading a heredoc whose body runs pwsh",
+     'echo "$(' + _heredoc("bash -c bash", "pwsh\n" + _PS_BODY, "\n)") + '"'),
+    # ...and through the same-depth re-entry of a line break decoded one level down: the
+    # `v is a vertical tab only in the inner pwsh's reading of its script.
+    ("pwsh -c whose decoded line break starts a pwsh, reading a heredoc",
+     _heredoc("pwsh -c 'true`vpwsh'")),
+    # ...and through the shell's own reading of a drive-letter path (windows_paths off),
+    # where the backslash before each quote escapes it: only there is pwsh a command.
+    ("a bash -c script whose drive path hides a pwsh, reading a heredoc",
+     _heredoc('bash -c "echo C:' + chr(92) + "x" + chr(92) + "' ; pwsh ; echo C:" + chr(92)
+              + "y" + chr(92) + "'" + chr(92) + "'\"")),
+    # xargs' {} is read away with the group characters, so pwsh looks like `pwsh -c` with
+    # no script: refused for that, not for what xargs substitutes.
+    ("xargs pwsh -c {} reading a heredoc", _heredoc("xargs -I{} pwsh -c {}")),
+    # Accepted costs: a harmless body is refused too, and so is a heredoc that only quotes
+    # one (use --body-file for such a PR body).
+    ("fp cost: pwsh reading a heredoc with a harmless body", _heredoc("pwsh", "Write-Output hi")),
+    ("fp cost: a PR body quoting a pwsh heredoc",
+     "gh pr create --title x --body \"$(cat <<'EOF'\n- a runner fed by `pwsh <<EOF` is "
+     "refused\nEOF\n)\""),
+]
+CASES += [(label, cmd, B, ()) for label, cmd in _HEREDOC_ROWS]
+STRUCT_CASES += [(f"heredoc refusal: {label}", lambda c=cmd: m.evaluate(c), [_HEREDOC_REFUSAL])
+                 for label, cmd in _HEREDOC_ROWS]
+
+# A runner that reads stdin as commands, fed by a pipe: the existing refusal.
+_PIPE_ROWS = [
+    ("pwsh - fed by a pipe", "echo '" + _PS_BODY + "' | pwsh -"),
+    ("powershell - fed by a pipe", "echo '" + _PS_BODY + "' | powershell -"),
+    ("pwsh -NoProfile - fed by a pipe", "echo '" + _PS_BODY + "' | pwsh -NoProfile -"),
+    ("cmd /k fed by a pipe", "echo 'git push --f^orce' | cmd //k echo a"),
+    ("cmd /K fed by a pipe", "echo 'git push --f^orce' | cmd /K echo a"),
+    ("pwsh -noe fed by a pipe", "echo '" + _PS_BODY + "' | pwsh -noe -c 'Get-Date'"),
+    ("powershell -NoExit fed by a pipe", "echo '" + _PS_BODY + "' | powershell -NoExit -c 'Get-Date'"),
+    ("pwsh -c evaluating its piped stdin", "echo '" + _PS_BODY + "' | pwsh -c '$input | iex'"),
+    ("powershell evaluating its piped stdin (positional command)",
+     "echo '" + _PS_BODY + "' | powershell '$input | Invoke-Expression'"),
+    ("coproc pwsh fed by a pipe", "echo '" + _PS_BODY + "' | coproc pwsh"),
+]
+CASES += [(label, cmd, B, ()) for label, cmd in _PIPE_ROWS]
+STRUCT_CASES += [(f"pipe refusal: {label}", lambda c=cmd: m.evaluate(c), [_PIPE_REFUSAL])
+                 for label, cmd in _PIPE_ROWS]
+
+CASES += [
+    # cmd /r is /c: its command is read, ^ escapes and all.
+    ("cmd /r runs its command", "cmd //r git push --f^orce", B, ()),
+    ("cmd /d/r runs its command", "cmd /d/r git push --f^orce", B, ()),
+    # A function's body is judged on one line too.
+    ("a one-line function keyword body is judged", "function g { rm -rf ~; }\ng", B, ()),
+    ("a one-line function keyword body is judged, called after", "function g { git push --force; }; g",
+     B, ()),
+    ("coproc is a wrapper", "coproc git push --force", B, ()),
+    # Not fed, or not read as commands.
+    ("fp cat heredoc whose body names cmd", _heredoc("cat > n.md", "cmd quoting notes"), A, ()),
+    ("fp commit message heredoc naming cmd",
+     "git commit -m \"$(cat <<'EOF'\nfix\ncmd quoting fix\nEOF\n)\"", A, ()),
+    ("fp bash heredoc with a harmless body", _heredoc("bash", "echo hi"), A, ()),
+    ("fp bash -c cat reading a heredoc", _heredoc("bash -c 'cat > f'", "cmd quoting notes"), A, ()),
+    ("fp cmd /c type reading a heredoc", _heredoc("cmd //c type", "cmd quoting notes"), A, ()),
+    ("fp a substitution: bash -c cat reading a heredoc",
+     'echo "$(' + _heredoc("bash -c 'cat'", "cmd quoting notes", "\n)") + '"', A, ()),
+    ("fp wsl reading a heredoc with a harmless body", _heredoc("wsl", "echo hi"), A, ()),
+    ("fp python reading a heredoc that names pwsh",
+     _heredoc("python -", "import subprocess\ncmd = ['pwsh']\nprint(cmd)"), A, ()),
+    ("fp pwsh -c with a heredoc it reads as data", _heredoc("pwsh -c 'Get-Date'", "x"), A, ()),
+    ("fp pwsh -File script with a heredoc", _heredoc("pwsh -File x.ps1", "x"), A, ()),
+    ("fp pwsh -Interactive -c with a heredoc", _heredoc("pwsh -Interactive -c 'Get-Date'", "x"), A, ()),
+    ("fp cmd /c with a heredoc", _heredoc("cmd //c ver", "x"), A, ()),
+    # A redirect from a named file is not a heredoc: the file is not in the payload, as
+    # for `bash < x.sh`.
+    ("fp pwsh reading a script file on stdin", "pwsh -NoProfile < setup.ps1", A, ()),
+    ("fp cmd reading a batch file on stdin", "cmd < x.bat", A, ()),
+    ("fp script written by a heredoc, then run",
+     _heredoc("cat > s.ps1", "Write-Output hi", "\npwsh -NoProfile -File s.ps1"), A, ()),
+    ("fp a heredoc and a pwsh -c script", "pwsh -c 'Get-Date'; " + _heredoc("cat", "x"), A, ()),
+    ("fp a function defined, a heredoc to cat", "f() { echo; }\n" + _heredoc("cat", "x"), A, ()),
+    ("fp arithmetic shift beside cmd /c", "echo $((1<<2)) && cmd //c ver", A, ()),
+    ("fp pwsh -no (ambiguous) fed by a pipe", "echo x | pwsh -no -c 'Get-Date'", A, ()),
+    ("fp pwsh -c reading its piped stdin as data", "git diff | pwsh -c '$input | Measure-Object'",
+     A, ()),
+    ("fp cmd /r", "cmd //r ver", A, ()),
+    ("fp a one-line function keyword body", "function g { git status; }; g", A, ()),
+    ("fp coproc", "coproc sleep 1", A, ()),
+]
+PS_CASES += [
+    ("ps cmd /r runs its command", "cmd /r git push --f^orce", B, ()),
+    ("ps fp cmd /r", "cmd /r ver", A, ()),
+]
+STRUCT_CASES += [
+    (f"cmd /r: {label} ({tool})", lambda c=cmd, t=tool: "forced git push is forbidden"
+     in m.evaluate(c, shell=t), True)
+    for label, cmd, tool in [("//r", "cmd //r git push --f^orce", "bash"),
+                             ("/d/r", "cmd /d/r git push --f^orce", "bash"),
+                             ("/r", "cmd /r git push --f^orce", "powershell")]
 ]
 
 

@@ -50,7 +50,7 @@ normalizer was defeated by ordinary shell quoting):
     a table gap cannot hide the command. `eval`, `watch "..."`, `env -S` (found
     after env's own options; the words after the script run with it),
     `su/script/flock -c` and `bash <<< '...'` are inline scripts like `sh -c`, and
-    so is what a Windows runner at the command position runs: `cmd /c|/k`,
+    so is what a Windows runner at the command position runs: `cmd /c|/r|/k`,
     `pwsh|powershell -Command` (and Windows PowerShell's positional command), and
     `wsl` (see _runner_rests); `pwsh -EncodedCommand` is uninspectable -> BLOCK.
     git's global options are read under every reading of which take a value
@@ -58,8 +58,9 @@ normalizer was defeated by ordinary shell quoting):
     A redirection does not end a command (`>/dev/null rm -rf /` is rm), and a
     shell reading its script from a pipe, a here-string or a process substitution
     (`... | sh`, `bash - <<< ...`, `source <(...)`) is uninspectable -> BLOCK, as is
-    `eval "$(...)"`. An `rm -rf` fed by xargs, directly or through an inline script
-    xargs runs, has targets of unknown scope -> BLOCK.
+    `eval "$(...)"`, and so is a cmd or PowerShell runner reading its commands from a
+    heredoc (`pwsh <<EOF`; see _heredoc_check). An `rm -rf` fed by xargs, directly or
+    through an inline script xargs runs, has targets of unknown scope -> BLOCK.
   * The command word is normalized like a path: split on BOTH / and \\ (Git Bash
     / Windows) with a trailing .exe/.cmd/.bat/.com stripped, so a "git.exe" or
     "C:/tools/rm.exe" invocation is matched like its bare equivalent.
@@ -143,7 +144,7 @@ _ROOT_PARAM_RE = re.compile(r"^\$\{(home|pwd|oldpwd)[:?#%/=+\-][^}]*\}")
 # were the uncovered side, which let an `if <destructive>; then :; fi` form through.
 _WRAPPERS = {"env", "sudo", "doas", "time", "nice", "ionice", "nohup", "setsid",
              "stdbuf", "xargs", "command", "builtin", "exec", "busybox", "toybox",
-             "timeout", "watch", "winpty", "runuser", "chroot", "flock",
+             "timeout", "watch", "winpty", "runuser", "chroot", "flock", "coproc",
              "if", "elif", "then", "while", "until", "for", "do", "else", "fi",
              "done", "esac"}
 # Wrapper options that CONSUME THE NEXT WORD, per wrapper, so that `sudo -u root rm`
@@ -217,6 +218,13 @@ _PROTECTED_REFS = {"main", "master", "head"}
 
 # Windows runners that take a command line or a command (see _runner_rests).
 _PS_RUNNERS = {"pwsh", "powershell"}
+# A pwsh/powershell command that reads the runner's stdin itself and turns text into code
+# (`$input | iex`), so what is fed to it runs; see _runner_reads_stdin. Reading stdin as
+# data (`git diff | pwsh -c '$input | Out-String'`) is not enough.
+_PS_STDIN_RE = re.compile(r"\$input\b|console\]::in\b|readtoend|openstandardinput",
+                          re.IGNORECASE)
+_PS_EVAL_RE = re.compile(r"\biex\b|invoke-expression|scriptblock|invokescript"
+                         r"|invoke-command|add-type", re.IGNORECASE)
 # Characters pwsh's command-line parser accepts as a switch prefix: -, /, and the dashes.
 _PS_SWITCH_CHARS = "-/–—―"
 # pwsh / powershell options that take a value, by full name; a switch matches by prefix.
@@ -789,6 +797,72 @@ def _shell_reads_stdin(toks) -> bool:
     return False
 
 
+def _runner_reads_heredoc(toks) -> bool:
+    """True if the segment's command is cmd, pwsh or powershell reading its commands from
+    stdin (see _runner_reads_stdin), past wrappers. Not wsl or a POSIX shell: the body of
+    their heredoc is shell text, judged line by line as the rest of the payload is."""
+    for consume in _READINGS:
+        i = _shell_index(toks, consume)
+        if i is None:
+            continue
+        base = _cmd_word(toks[i])
+        if (base == "cmd" or base in _PS_RUNNERS) and _runner_reads_stdin(base, toks[i + 1:]):
+            return True
+    return False
+
+
+# A shell function (`f() {`, `function f`) or alias the text defines: a heredoc on a call
+# of it feeds the commands in its body. Names are lowercased like the tokens.
+_DEFINED_NAME_RE = re.compile(
+    r"""(?:^|[\s;&|(){}])(?:function\s+([^\s;&|(){}<>'"`$=]+)"""
+    r"""|([^\s;&|(){}<>'"`$=]+)\s*\(\s*\)|alias\s+([^\s;&|(){}<>'"`$=]+)=)""")
+
+
+def _heredoc_feeds_all(seg, defined) -> bool:
+    """A heredoc on seg reaches every command of the text: the command reads its script
+    from stdin (`bash <<EOF`: each body line runs with the rest of the body as its stdin,
+    so a body line `pwsh` reads the lines after it), is an `exec` with no command (it
+    redirects the shell's own stdin for every later command), or calls a function or
+    alias the text defines. (A shell the command's own scripts start, `bash -c bash
+    <<EOF`, is found when they are expanded: see _segments.)"""
+    if _shell_reads_stdin(seg):
+        return True
+    starts = [_shell_index(seg, c) for c in _READINGS]
+    if all(i is None for i in starts):
+        return bool(seg) and _cmd_word(seg[0]) == "exec"
+    return any(i is not None and _cmd_word(seg[i]) in defined for i in starts)
+
+
+def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) -> bool:
+    """Refuse a cmd or PowerShell runner that a heredoc feeds: the heredoc's body is its
+    commands, and it is not read as cmd or PowerShell here (bash heredoc bodies are judged
+    line by line, as bash). Raises _Uninspectable (a block), as for a runner fed by a pipe.
+
+    The fed segments: every segment of the text when it is the script of a fed command
+    (inherited), when a heredoc is on a group or compound command (heredoc_wide, or
+    orphan: on a closer with no segment before it on its line), or on a command that
+    reaches every command of the text (_heredoc_feeds_all, which a runner reading the
+    heredoc itself satisfies; for the quote-blind pass, a shell reading stdin among the
+    segments of a heredoc's line, the inline scripts _lenient_inline took from it
+    included). Otherwise the quote-blind segments of a line holding one (lenient_fed).
+    Returns whether every segment is fed, for the scripts _segments expands from this
+    text."""
+    here = [s for s in main + lenient if getattr(s, "heredoc", False)]
+    defined = None
+    if here:
+        defined = {n.lower() for m in _DEFINED_NAME_RE.finditer(text) for n in m.groups() if n}
+    wide = (inherited or orphan
+            or any(getattr(s, "heredoc_wide", False) for s in main + lenient)
+            or any(_heredoc_feeds_all(s, defined) for s in here)
+            or any(_shell_reads_stdin(s) for s in lenient_fed))
+    # A runner a heredoc is on reads stdin, so it already made the text wide.
+    fed = main + lenient if wide else lenient_fed
+    for toks in fed:
+        if _runner_reads_heredoc(toks):
+            raise _Uninspectable("Windows runner reading its commands from a heredoc")
+    return wide
+
+
 def _first_positional(args):
     for a in args:
         if not a.startswith("-"):
@@ -1350,14 +1424,15 @@ def _ps_positionals(args, consume: bool):
 
 
 def _cmd_run_switch(args):
-    """(index, glued text) of cmd's /c or /k switch, which may share a word with other
-    switches or with the command (`/d/c`, `/cgit`, `//c` from Git Bash); else None."""
+    """(index, glued text) of cmd's /c, /r (the same as /c) or /k switch, which may share
+    a word with other switches or with the command (`/d/c`, `/cgit`, `//c` from Git
+    Bash); else None."""
     for j, a in enumerate(args):
         if not a.startswith("/"):
             continue
         start = 0
         for part in a.split("/"):
-            if part[:1] in ("c", "k"):
+            if part[:1] in ("c", "k", "r"):
                 return j, a[start + 1:]
             start += len(part) + 1
     return None
@@ -1389,7 +1464,7 @@ def _wsl_rests(args):
 
 def _runner_rests(toks):
     """(kind, words, outer) for each command a Windows runner at the command position would
-    run: `cmd /c|/k ...`, `pwsh|powershell -Command ...` (and 5.1's positional command),
+    run: `cmd /c|/r|/k ...`, `pwsh|powershell -Command ...` (and 5.1's positional command),
     and `wsl ...`. Both readings of wrapper options are tried. Empty commands are dropped.
     outer: a word after the runner holds a `$` the shell expands (see expanding on _Seg),
     so the words are not the text the runner gets."""
@@ -1483,17 +1558,54 @@ def _lenient_runner(toks, outer_expanded=False):
     return out
 
 
+def _ps_no_exit(args) -> bool:
+    """-NoExit among pwsh/powershell's OWN switches (before the first positional word or
+    -Command/-File/-EncodedCommand), on either reading of value switches. pwsh matches it
+    by prefix, `-noe` at the shortest (`-no` is ambiguous). The runner runs its command,
+    then reads stdin as more commands."""
+    for consume in (True, False):
+        j = 0
+        while j < len(args):
+            kind, name = _ps_switch(args[j]), _ps_switch_name(args[j])
+            if kind != "other":
+                break
+            if len(name) >= 3 and "noexit".startswith(name):
+                return True
+            j += 2 if consume and _ps_takes_value(args[j]) else 1
+    return False
+
+
+def _ps_evals_stdin(words) -> bool:
+    """A pwsh/powershell command (its words) that reads stdin and turns text into code."""
+    text = " ".join(words)
+    return bool(_PS_STDIN_RE.search(text) and _PS_EVAL_RE.search(text))
+
+
 def _runner_reads_stdin(base: str, args) -> bool:
-    """A Windows runner taking its commands from stdin: cmd with no /c or /k; pwsh or
-    powershell with `-Command -`, `-File -`, or no command, file or positional word; wsl
-    with nothing but value options (its default shell then reads stdin)."""
+    """A Windows runner taking its commands from stdin: cmd with no /c, or with /k (it
+    keeps running after the command); pwsh or powershell with `-Command -`, `-File -`, a
+    `-` as its first positional word, no command, file or positional word, -NoExit (see
+    _ps_no_exit), or a command that evaluates what it reads from stdin (_ps_evals_stdin);
+    wsl with nothing but value options (its default shell then reads stdin)."""
     if base == "cmd":
-        return _cmd_run_switch(args) is None
+        run = _cmd_run_switch(args)
+        if run is None:
+            return True
+        j, glued = run
+        return args[j][len(args[j]) - len(glued) - 1] == "k"
     if base in _PS_RUNNERS:
+        if _ps_no_exit(args):
+            return True
         kind, j = _ps_decisive_switch(args)
+        if kind == "command" and _ps_evals_stdin(args[j + 1:]):
+            return True                     # `pwsh -c '$input | iex'`: stdin becomes code
         if kind in ("command", "file"):
             return args[j + 1:j + 2] in ([], ["-"])
-        return kind is None and any(not _ps_positionals(args, c) for c in (True, False))
+        # No decisive switch: 5.1 runs its positional words as a command (which may
+        # evaluate stdin), and a `-` there is stdin itself, for pwsh (`-File -`) and 5.1.
+        return kind is None and any(_ps_positionals(args, c)[:1] in ([], ["-"])
+                                    or _ps_evals_stdin(_ps_positionals(args, c))
+                                    for c in (True, False))
     if base == "wsl":
         j = 0
         while j < len(args):
@@ -1828,8 +1940,11 @@ class _Seg(list):
     indexes of the words that hold a `$` the shell expands (see expanding on _Words), or
     a `$` at all when the words were read quote-blind; a PowerShell script in such a word
     is not the text pwsh gets: its segments are marked ps_outer, and a $ word in them is
-    no expression (see _rules_at).
+    no expression (see _rules_at). heredoc: a `<<` heredoc redirect is on the segment;
+    heredoc_wide: one is on a group or compound command that ends here, so it feeds every
+    command in it (see _heredoc_check).
     """
+    heredoc = heredoc_wide = False
     piped = False
     redirs = ()
     ps_script = False
@@ -1903,9 +2018,11 @@ def _ps_argument_group(values, cur, quoted):
 class _Latch(list):
     """The state _words_to_segments shares across the lines of one text: non-empty once a
     called or runner-argument group has opened; last, the latest segment; closer, the
-    operator that ended the words before the current ones."""
+    operator that ended the words before the current ones; orphan_heredoc, a heredoc was
+    on a group closer with no segment before it to mark (see _heredoc_check)."""
     last = None
     closer = None
+    orphan_heredoc = False
 
 
 def _words_to_segments(words, split_words: bool = True, latch=None):
@@ -1925,6 +2042,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
     segments, cur, redirs, herestr = [], [], [], []
     here_exp = []                          # per herestr target: see expanding on _Seg
     piped, pending = False, None           # pending: redirect awaiting its target
+    heredoc_here = False                   # a `<<` target was taken for this segment
     call_next = arg_next = foreach_next = False   # see ps_call and ps_foreach on _Seg
     quoted, quoted_value = set(), set()
     exp = set()                            # see expanding on _Seg
@@ -1933,7 +2051,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
 
     def close(next_piped, fed=False, op=None, glued_op=False, real_op=False):
         nonlocal cur, redirs, herestr, piped, pending, call_next, arg_next, foreach_next
-        nonlocal quoted, quoted_value, exp, here_exp
+        nonlocal quoted, quoted_value, exp, here_exp, heredoc_here
         toks = cur + [w for target in herestr for w in ("-c", target)]
         # Each word's value: `$x=.` and `$x=sudo` hold a `.` and a `sudo`.
         values = [w.rsplit("=", 1)[-1] for w in cur]
@@ -1960,10 +2078,18 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             # A here-string target follows its `-c` at the end of toks (see above).
             seg.expanding = frozenset(exp) | {len(cur) + 2 * j + 1
                                               for j, e in enumerate(here_exp) if e}
+            # A heredoc on `done`, `fi` or `esac` feeds the whole compound command.
+            seg.heredoc = heredoc_here
+            seg.heredoc_wide = heredoc_here and cur[:1] in (["done"], ["fi"], ["esac"])
             segments.append(seg)
             latch.last = seg
             piped = next_piped
         else:
+            if heredoc_here:                   # `{ ...; } <<EOF`, `( ... ) <<EOF`
+                if latch.last is not None:
+                    latch.last.heredoc_wide = True
+                else:
+                    latch.orphan_heredoc = True
             piped = piped or next_piped        # `| (bash)`: the group keeps the pipe
         call_next = calls
         # The first statement of a group in argument position: `git push ($x) --force`.
@@ -1977,7 +2103,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             latch.append(True)
         foreach_next = op == "(" and cur[-1:] == ["foreach"]
         cur, redirs, herestr, pending = [], [], [], None
-        here_exp = []
+        here_exp, heredoc_here = [], False
         quoted, quoted_value = set(), set()
         exp = set()
 
@@ -2011,6 +2137,11 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
                     glued, prev_op = False, op
                 continue
             prev_op = None
+            # `function f { ...; }`: the body's first command starts after the `{`, as
+            # it does after `f() {` (whose `(` already ends the segment).
+            if piece == "{" and len(cur) == 2 and cur[0] == "function":
+                close(False)
+                continue
             piece = piece.lstrip(_LEAD_GROUP_CHARS)
             if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
                 continue
@@ -2022,6 +2153,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
                     here_exp.append((k in expanding) if expanding is not None else ("$" in piece))
                 else:
                     redirs.append(piece)
+                    heredoc_here = heredoc_here or pending == "<<"
                 pending = None
                 continue
             if isinstance(word, _QuotedWord):
@@ -2100,7 +2232,8 @@ _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
               piped: bool = False, lenient_on_error: bool = False,
               windows_paths: bool = True, ps_script: bool = False,
-              ps_tool: bool = False, outer_expanded: bool = False):
+              ps_tool: bool = False, outer_expanded: bool = False,
+              heredoc: bool = False):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -2112,16 +2245,19 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     runner hands to pwsh/powershell; its own segments are marked so (scripts nested
     inside it are not). ps_tool: raw is the PowerShell tool's own payload; its segments
     are marked so, and what their statements run is added (see _ps_statement_tails).
+    heredoc: raw is the script of a command a heredoc feeds (see _heredoc_check).
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
                   lenient_on_error=lenient_on_error, windows_paths=windows_paths,
-                  ps_script=ps_script, ps_tool=ps_tool, outer_expanded=outer_expanded)
+                  ps_script=ps_script, ps_tool=ps_tool, outer_expanded=outer_expanded,
+                  heredoc=heredoc)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
     segments, lenient, lenient_runs, latch = [], [], [], _Latch()
+    lenient_fed, orphan = [], False    # see _heredoc_check
     slashed = _slashify_windows_paths(raw) if windows_paths else raw
     text = _expand_ifs(slashed)
     if shell == "powershell" and ps_slashes:
@@ -2148,12 +2284,19 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # state: a desync that leaves the scanner inside a quote also stops it
             # joining `git push \` + newline + `--force`, which bash still joins.
             for line in dict.fromkeys(physical + _cont_chains(physical)):
-                for toks in (t for words in _lenient_words(line)
-                             for t in _words_to_segments(words)):
-                    toks.ps_tool = ps_tool
-                    lenient.append(toks)
-                    lenient.extend(_lenient_inline(toks))
-                    lenient_runs.extend(_lenient_runner(toks, outer_expanded))
+                first, first_run = len(lenient), len(lenient_runs)
+                for words in _lenient_words(line):
+                    line_latch = _Latch()      # one per call, as before; read back below
+                    for toks in _words_to_segments(words, latch=line_latch):
+                        toks.ps_tool = ps_tool
+                        lenient.append(toks)
+                        lenient.extend(_lenient_inline(toks))
+                        lenient_runs.extend(_lenient_runner(toks, outer_expanded))
+                    orphan = orphan or line_latch.orphan_heredoc
+                # Quote-blind words do not model groups: a heredoc on the line feeds
+                # every command the line's readings found.
+                if any(getattr(s, "heredoc", False) for s in lenient[first:]):
+                    lenient_fed += lenient[first:] + lenient_runs[first_run:]
                 # The quote-blind pass resolves backslashes and splits on spaces,
                 # which shreds a quoted Windows path ("C:\Program Files\Git\bin\
                 # bash.exe" -c ...). Also read the line on its own with quotes kept
@@ -2165,6 +2308,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                         _shell_words(line.replace("\\", "/")), split_words=False))
                 except ValueError:
                     pass
+    heredoc = _heredoc_check(text, segments, lenient + lenient_runs, lenient_fed,
+                             orphan or latch.orphan_heredoc, heredoc)
     if piped:                      # this is the inline script of a piped segment
         for seg in segments + lenient + lenient_runs:
             if isinstance(seg, _Seg):
@@ -2192,39 +2337,14 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                     f"inline scripts nested too deep to inspect (> {_MAX_INLINE_DEPTH} "
                     "levels)")
     else:
-        expanded = []
-        for toks in segments:
-            # A script an outer shell expands first (`bash -c "pwsh -c '$CMD'"`, `pwsh -c
-            # "$CMD"`) is not the text it runs: a pwsh script in it is marked ps_outer.
-            # Its words from the shell's on count, the shell's own included (`watch "..."`).
-            starts = [j for j in (_shell_index(toks, c) for c in _READINGS) if j is not None]
-            first = min(starts) if starts else -1
-            outer = outer_expanded or any(e >= first for e in getattr(toks, "expanding", ()))
-            head, inline = _split_inline_script(toks)
-            if head:
-                expanded.append(head)
-            # `xargs sh -c 'rm -rf "$@"' _`: xargs' items reach the script's commands (as
-            # "$@", or substituted for -I's string), so they are marked too.
-            fed = getattr(toks, "xargs_fed", False) or any(
-                _effective_cmd_index(toks, c)[1] for c in _READINGS)
-            for script in (inline if isinstance(inline, tuple) else (inline,)):
-                if not (script and script.strip()):
-                    continue
-                # `echo ... | bash -c "true; sh"`: the pipe reaches every command of
-                # the script, so the script's segments start out piped.
-                subs = _segments(script, _depth + 1, piped=getattr(toks, "piped", False),
-                                 outer_expanded=outer)
-                expanded.extend(_xargs_fed_copy(s) if fed and isinstance(s, _Seg) else s
-                                for s in subs)
-            # A Windows runner's command (`cmd /c`, `pwsh -Command`, `wsl`), judged in
-            # addition to the inline split above, from the segment's own tokens. Lenient:
-            # a runner's command line re-split on spaces can leave an odd quote
-            # (`cmd /c git commit -m "don't"`); such a line is judged piecewise.
-            for script, ps, outer_run in _runner_scripts(toks):
-                outer_run = outer_expanded or outer_run
-                expanded.extend(_runner_segments(script, _depth + 1,
-                                                 getattr(toks, "piped", False),
-                                                 ps, outer_run))
+        expanded, reached = _expand_scripts(segments, _depth, outer_expanded, heredoc)
+        if reached and not heredoc:
+            # A heredoc reaches a shell that one of the expanded scripts starts (`bash -c
+            # bash <<EOF`): every command of this text is fed after all. Check them, and
+            # expand their scripts again as fed ones.
+            heredoc = _heredoc_check(text, segments, lenient + lenient_runs, lenient_fed,
+                                     orphan, True)
+            expanded = _expand_scripts(segments, _depth, outer_expanded, True)[0]
         segments = expanded
     # Lenient segments skip the inline split: with the quotes deleted, the script
     # of `bash -c "rm -rf ~"` is already bare tokens. Splitting would take only its
@@ -2248,8 +2368,57 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         segments += _segments(raw, _depth, shell=shell, ps_slashes=ps_slashes,
                               piped=piped, lenient_on_error=True, windows_paths=False,
                               ps_script=ps_script, ps_tool=ps_tool,
-                              outer_expanded=outer_expanded)
+                              outer_expanded=outer_expanded, heredoc=heredoc)
     return segments
+
+
+def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool):
+    """The segments of _segments() below its depth limit, each followed by what its inline
+    scripts and Windows runner's command run, tokenized one level down. Returns them, and
+    whether a heredoc on a segment reaches a shell reading its script from stdin among
+    those (see _heredoc_check). heredoc: every segment is fed by a heredoc."""
+    expanded, reached = [], False
+    for toks in segments:
+        start = len(expanded)
+        # A script an outer shell expands first (`bash -c "pwsh -c '$CMD'"`, `pwsh -c
+        # "$CMD"`) is not the text it runs: a pwsh script in it is marked ps_outer.
+        # Its words from the shell's on count, the shell's own included (`watch "..."`).
+        starts = [j for j in (_shell_index(toks, c) for c in _READINGS) if j is not None]
+        first = min(starts) if starts else -1
+        outer = outer_expanded or any(e >= first for e in getattr(toks, "expanding", ()))
+        head, inline = _split_inline_script(toks)
+        if head:
+            expanded.append(head)
+            start = len(expanded)
+        # `xargs sh -c 'rm -rf "$@"' _`: xargs' items reach the script's commands (as
+        # "$@", or substituted for -I's string), so they are marked too.
+        fed = getattr(toks, "xargs_fed", False) or any(
+            _effective_cmd_index(toks, c)[1] for c in _READINGS)
+        # A heredoc on the segment (or on the text, see _heredoc_check) feeds the
+        # commands its script runs: `bash -c pwsh <<EOF`, `cmd /c pwsh <<EOF`.
+        here = heredoc or getattr(toks, "heredoc", False)
+        for script in (inline if isinstance(inline, tuple) else (inline,)):
+            if not (script and script.strip()):
+                continue
+            # `echo ... | bash -c "true; sh"`: the pipe reaches every command of
+            # the script, so the script's segments start out piped.
+            subs = _segments(script, _depth + 1, piped=getattr(toks, "piped", False),
+                             outer_expanded=outer, heredoc=here)
+            expanded.extend(_xargs_fed_copy(s) if fed and isinstance(s, _Seg) else s
+                            for s in subs)
+        # A Windows runner's command (`cmd /c`, `pwsh -Command`, `wsl`), judged in
+        # addition to the inline split above, from the segment's own tokens. Lenient:
+        # a runner's command line re-split on spaces can leave an odd quote
+        # (`cmd /c git commit -m "don't"`); such a line is judged piecewise.
+        for script, ps, outer_run in _runner_scripts(toks):
+            outer_run = outer_expanded or outer_run
+            expanded.extend(_runner_segments(script, _depth + 1,
+                                             getattr(toks, "piped", False),
+                                             ps, outer_run, here))
+        # The scripts' segments come back flattened from every depth below.
+        reached = reached or (getattr(toks, "heredoc", False) and any(
+            _shell_reads_stdin(s) for s in expanded[start:]))
+    return expanded, reached
 
 
 class _RunnerBudget:
@@ -2258,7 +2427,8 @@ class _RunnerBudget:
 
 
 @functools.lru_cache(maxsize=4096)
-def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool = False):
+def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool = False,
+                     heredoc: bool = False):
     """_segments() of a Windows runner's script (see _runner_scripts), memoized: the
     PowerShell readings and nested runners hand the same script text down many times.
     The arguments are all the result depends on, and no segment is changed after the
@@ -2279,7 +2449,7 @@ def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool
         raise _Uninspectable(
             f"Windows runner scripts too long to inspect (> {_MAX_RUNNER_CHARS} chars)")
     return tuple(_segments(script, depth, piped=piped, lenient_on_error=True,
-                           ps_script=ps, outer_expanded=outer))
+                           ps_script=ps, outer_expanded=outer, heredoc=heredoc))
 
 
 def _lenient_inline(toks):
