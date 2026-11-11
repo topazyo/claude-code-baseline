@@ -811,10 +811,11 @@ def _runner_reads_heredoc(toks) -> bool:
     return False
 
 
-# A shell function the text defines (`f() {`, `function f`): a heredoc on a call of it
-# feeds the commands in its body. Names are lowercased like the tokens.
+# A shell function the text defines (`f() {`, `function f`, also in an eval's string): a
+# heredoc on a call of it feeds the commands in its body. Names are lowercased like the
+# tokens.
 _DEFINED_NAME_RE = re.compile(
-    r"""(?:^|[\s;&|(){}])(?:function\s+([^\s;&|(){}<>'"`$=]+)"""
+    r"""(?:^|[\s;&|(){}'"])(?:function\s+([^\s;&|(){}<>'"`$=]+)"""
     r"""|([^\s;&|(){}<>'"`$=]+)\s*\(\s*\))""")
 def _exec_only(words) -> bool:
     """An exec (perhaps behind wrappers) with no command: only redirects. With a heredoc

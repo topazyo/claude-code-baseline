@@ -37,7 +37,7 @@ FP_FLOOR = 442
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 936
+BLOCK_FLOOR = 937
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2619,6 +2619,8 @@ _HEREDOC_ROWS = [
      "alias p='pwsh'\n" + _heredoc("cat", "x")),
     ("a function called with a heredoc", "f() { pwsh; }\n" + _heredoc("f")),
     ("a function keyword function called with a heredoc", "function g { pwsh; }\n" + _heredoc("g")),
+    ("a function defined in an eval, called with a heredoc",
+     "eval 'f() { pwsh; }'\n" + _heredoc("f")),
     # Quote-blind: the segments of a line holding a heredoc (lenient_fed).
     ("pwsh reading a heredoc in a substitution", 'echo "$(' + _heredoc("pwsh", after="\n)") + '"'),
     ("pwsh with an odd quote reading a heredoc in a substitution",
