@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 441
+FP_FLOOR = 442
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 932
+BLOCK_FLOOR = 936
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2609,6 +2609,12 @@ _HEREDOC_ROWS = [
      "alias p=\"pw\"sh\n" + _heredoc("p")),
     ("an alias defined in an eval, called with a heredoc", "eval 'alias p=pwsh'\n" + _heredoc("p")),
     ("an alias of a function, called with a heredoc", "alias p=f\nf() { pwsh; }\n" + _heredoc("p")),
+    # A here-string on a function or alias call feeds its body the same way.
+    ("a function called with a here-string", "f() { pwsh; }\nf <<<'" + _PS_BODY + "'"),
+    ("a function keyword function called with a here-string",
+     "function f { pwsh; }\nf <<<'" + _PS_BODY + "'"),
+    ("an alias of a function, called with a here-string",
+     "alias p=f\nf() { pwsh; }\np <<<'" + _PS_BODY + "'"),
     ("fp cost: an alias of pwsh beside a heredoc to cat",
      "alias p='pwsh'\n" + _heredoc("cat", "x")),
     ("a function called with a heredoc", "f() { pwsh; }\n" + _heredoc("f")),
@@ -2673,6 +2679,8 @@ _PIPE_ROWS = [
     # An alias's value counts as fed by any pipe in the command, called or not.
     ("fp cost: an alias of pwsh beside a pipe", "alias ps1=pwsh\nls | head"),
     ("an alias of pwsh fed by a pipe", "alias p=pwsh\necho '" + _PS_BODY + "' | p"),
+    # A here-string on the runner itself stays a piped one (not a heredoc refusal).
+    ("pwsh -c - reading a here-string", "pwsh -c - <<<'Get-Date'"),
     ("pwsh -c evaluating a line of its piped stdin",
      "echo '" + _PS_BODY + "' | pwsh -c 'iex ([Console]::ReadLine())'"),
 ]
@@ -2717,6 +2725,7 @@ CASES += [
      _heredoc("cat > s.ps1", "Write-Output hi", "\npwsh -NoProfile -File s.ps1"), A, ()),
     ("fp a heredoc and a pwsh -c script", "pwsh -c 'Get-Date'; " + _heredoc("cat", "x"), A, ()),
     ("fp a function defined, a heredoc to cat", "f() { echo; }\n" + _heredoc("cat", "x"), A, ()),
+    ("fp a harmless function called with a here-string", "f() { cat; }\nf <<<'x'", A, ()),
     ("fp arithmetic shift beside cmd /c", "echo $((1<<2)) && cmd //c ver", A, ()),
     ("fp pwsh -no (ambiguous) fed by a pipe", "echo x | pwsh -no -c 'Get-Date'", A, ()),
     ("fp pwsh -c reading its piped stdin as data", "git diff | pwsh -c '$input | Measure-Object'",

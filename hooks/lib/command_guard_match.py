@@ -831,8 +831,11 @@ def _heredoc_feeds_all(seg, defined) -> bool:
     so a body line `pwsh` reads the lines after it), or calls a function the text
     defines. (A shell the command's own scripts start, `bash -c bash <<EOF`, is found
     when they are expanded: see _segments; an exec: see _exec_only.)"""
-    if _shell_reads_stdin(seg):
-        return True
+    return _shell_reads_stdin(seg) or _calls_defined(seg, defined)
+
+
+def _calls_defined(seg, defined) -> bool:
+    """seg's command word (past wrappers) is a function or alias the text defines."""
     return any(i is not None and _cmd_word(seg[i]) in defined
                for i in (_shell_index(seg, c) for c in _READINGS))
 
@@ -866,14 +869,18 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     any heredoc in the text: see _expand_scripts.) Returns whether every segment is fed,
     for the scripts _segments expands from this text."""
     here = [s for s in main + lenient if getattr(s, "heredoc", False)]
+    # A here-string on a function or alias call feeds its body too. (One on the runner
+    # itself is a piped one, refused as such.)
+    strs = [s for s in main + lenient if getattr(s, "herestr_fed", False)]
     defined = set()
-    if here:
+    if here or strs:
         # Functions, and aliases (whose value may call a function: `alias p=f`).
         defined = {n.lower() for m in _DEFINED_NAME_RE.finditer(text) for n in m.groups() if n}
         defined |= _alias_names(main + lenient)
     wide = (inherited or orphan
             or any(getattr(s, "heredoc_wide", False) for s in main + lenient)
             or any(_heredoc_feeds_all(s, defined) for s in here)
+            or any(_calls_defined(s, defined) for s in strs)
             or any(_shell_reads_stdin(s) for s in lenient_fed))
     # A runner a heredoc is on reads stdin, so it already made the text wide.
     fed = main + lenient if wide else lenient_fed
@@ -1969,10 +1976,11 @@ class _Seg(list):
     a `$` at all when the words were read quote-blind; a PowerShell script in such a word
     is not the text pwsh gets: its segments are marked ps_outer, and a $ word in them is
     no expression (see _rules_at). heredoc: a `<<` heredoc redirect is on the segment;
-    heredoc_wide: one is on a group or compound command that ends here, so it feeds every
-    command in it (see _heredoc_check).
+    herestr_fed: a `<<<` here-string is; heredoc_wide: one of them is on a group or
+    compound command that ends here, so it feeds every command in it (see
+    _heredoc_check).
     """
-    heredoc = heredoc_wide = False
+    heredoc = heredoc_wide = herestr_fed = False
     piped = False
     redirs = ()
     ps_script = False
@@ -2117,7 +2125,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             # One on `done`, `fi` or `esac` feeds the whole compound command, and one on
             # an exec with no command every later one. (A here-string on the runner
             # itself is a piped one, refused as such.)
-            seg.heredoc = heredoc_here
+            seg.heredoc, seg.herestr_fed = heredoc_here, bool(herestr)
             seg.heredoc_wide = (bool(heredoc_here or herestr)
                                 and (cur[:1] in (["done"], ["fi"], ["esac"])
                                      or _exec_only(cur)))
