@@ -128,7 +128,7 @@ _MAX_CHAIN_CHARS = 131072
 # nested runners multiply; see _runner_segments). Past it: BLOCK.
 _MAX_RUNNER_CHARS = 524288
 # Levels of inline script (`sh -c`, eval, a Windows runner's command, ...) _segments()
-# expands. A segment past it that still holds one: BLOCK (see _segments).
+# expands. A segment at the limit that still holds one: BLOCK (see _segments).
 _MAX_INLINE_DEPTH = 3
 
 # Catastrophic delete "roots" (after canonicalization). Targeted paths are allowed.
@@ -2181,7 +2181,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     # Re-tokenize inline `sh -c` scripts. Depth-bounded so a nested
     # `sh -c 'sh -c "..."'` chain cannot recurse without limit. At the limit a segment
     # that still holds an inline script or a Windows runner's command would run text
-    # no reading has judged, so the command is refused as uninspectable (a block).
+    # no reading has expanded, so the command is refused as uninspectable (a block).
     if _depth >= _MAX_INLINE_DEPTH:
         for toks in segments:
             inline = _split_inline_script(toks)[1]

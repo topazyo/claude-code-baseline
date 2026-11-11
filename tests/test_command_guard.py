@@ -37,7 +37,7 @@ FP_FLOOR = 408
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 826
+BLOCK_FLOOR = 831
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2409,7 +2409,39 @@ for _name, _tool, _build, _deep in NEST_SHAPES:
                                     and "forced git push is forbidden" in r)(
              m.evaluate(b(_NEST_BLOCKED, 3), shell=t)), True),
     ]
+
+
+def _dq(s):
+    """s inside bash double quotes, with no expansion of its own."""
+    for c in (chr(92), '"', "$", "`"):
+        s = s.replace(c, chr(92) + c)
+    return '"' + s + '"'
+
+
+# Each of these holds a script at the limit that only one reading or one path finds:
+# the refusal is pinned exactly, so a check that skipped that reading would show.
+_LIMIT_ONLY = [
+    # Only the shell's own reading of the drive-letter path (windows_paths off), where
+    # the backslash before each quote escapes it, balances the quotes around the script.
+    ("the drive path's shell reading at the depth limit is checked",
+     _nested([_bash_c], "echo C:" + chr(92) + "x" + chr(92) + "' ; bash -c \"git status\" C:"
+             + chr(92) + "y" + chr(92) + "'" + chr(92) + "'", 3)),
+    # wsl's later reading (the value option not consumed) is the one with a command.
+    ("a later wsl reading at the depth limit is checked",
+     _nested([_bash_c], "wsl -d x ' '", 3)),
+    # The outer shell expands a word of the first level's script.
+    ("an outer-expanded script at the depth limit is checked",
+     'bash -c "true $HOME; ' + _dq(_nested([_bash_c], "git status", 3))[1:]),
+    # A line break decoded from a pwsh escape one level down keeps that level's depth.
+    ("a decoded line break in a pwsh script keeps its depth",
+     "pwsh -c 'true`veval eval eval git status'"),
+]
+CASES += [(f"fp cost: {label}", cmd, B, ()) for label, cmd in _LIMIT_ONLY]
+STRUCT_CASES += [(f"depth limit: {label}", lambda c=cmd: m.evaluate(c), [_NEST_REFUSAL])
+                 for label, cmd in _LIMIT_ONLY]
 CASES += [
+    ("a decoded line break in a pwsh script before a blocked command at the depth limit",
+     "pwsh -c 'true`veval eval eval git push --force'", B, ()),
     # A blank script at the limit runs nothing, so it is not refused.
     ("fp blank bash -c script at the depth limit",
      _nested([_bash_c], "bash -c ' '", 3), A, ()),
@@ -2434,8 +2466,7 @@ CASES += [
     # not blank.
     ("fp cost: a later reading's script at the depth limit is refused",
      _nested([_bash_c], "env -a x eval bash -c ' '", 3), B, ()),
-    # The quote-blind pass's segments are never expanded, at any depth, so they are not
-    # checked at the limit either: a substitution there is judged as it always was.
+    # A substitution at the limit is judged by the quote-blind pass, as before.
     ("fp substitution with bash -c at the depth limit",
      _nested([_bash_c], "echo \"$(bash -c 'git status')\"", 3), A, ()),
     ("fp substitution with cmd /c at the depth limit",
