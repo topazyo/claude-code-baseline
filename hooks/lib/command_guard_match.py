@@ -1434,10 +1434,13 @@ def _runner_scripts(toks):
     parser sees them (cmd /c, pwsh -Command, wsl's default shell): `cmd /c "git reset
     --hard"` is `git reset --hard`. (A quoted script for a shell later in the words,
     `wsl -e bash -c '...'`, is still found whole by _split_inline_script.) cmd's text is
-    also read with its ^ escapes removed, and a pwsh/powershell script in its grouping
-    reading (_ps_ungroup), with PowerShell's own quoting (_ps_unescape; see
-    _powershell_segments) and with its backtick escapes decoded. Both decoders read the
-    same base texts, never each other's output, so no escape is decoded twice. ps marks
+    also read with its ^ escapes removed. A pwsh/powershell script is also read with each
+    of _PS_SPACES a space, as PowerShell separates words on them; then each of those two
+    in its grouping and block readings (_ps_ungroup, _ps_block_statements), and all of
+    those with PowerShell's own quoting (_ps_unescape; see _powershell_segments) and with
+    its backtick escapes decoded. The spaces are read before the escapes, so a space an
+    escape produces stays inside its word. Both decoders read the same base texts, never
+    each other's output, so no escape is decoded twice. ps marks
     a PowerShell script (see ps_script in _rules_at); outer, see _runner_rests.
     """
     out = []
@@ -1446,8 +1449,12 @@ def _runner_scripts(toks):
         if kind == "cmd":
             texts.append(texts[0].replace("^", ""))
         if kind == "ps":
-            texts += [_ps_ungroup(t) for t in texts]
-            texts += [_ps_block_statements(t) for t in texts[:1] if "{" in t or "}" in t]
+            spaced = texts[0].translate(_PS_AS_SPACE)
+            if spaced != texts[0]:
+                texts.append(spaced)
+            plain = list(texts)
+            texts += [_ps_ungroup(t) for t in plain]
+            texts += [_ps_block_statements(t) for t in plain if "{" in t or "}" in t]
             base = list(texts)
             texts += [_ps_unescape(t) for t in base]
             texts += [_ps_unescape_everywhere(t) for t in base if "`" in t]
@@ -2033,10 +2040,12 @@ def _lenient_words(line: str):
     the quotes makes every separator on the line visible, so a command that bash would
     run is inspected even where the quote scanner took it for part of a string -- the
     scanner does not model comments, the fresh quoting context inside "$(...)", or
-    heredoc bodies, and a divergence there must not become a bypass.
+    heredoc bodies, and a divergence there must not become a bypass. Every one of
+    _PS_SPACES separates words here too, as it does in a pwsh script the line may run:
+    str.split() covers all of them but U+180E, which Python no longer counts as a space.
     """
     resolved = re.sub(r"\\(.)", r"\1", line)
-    return resolved.replace("'", "").replace('"', "").split()
+    return resolved.replace("'", "").replace('"', "").translate(_PS_AS_SPACE).split()
 
 
 # Characters str.splitlines() treats as line breaks but bash reads as part of a word:
@@ -2064,7 +2073,8 @@ _AS_IN_WORD = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\x01"))
 # U+180E was a space separator before Unicode 6.3, and .NET Framework 4 to 4.5.2,
 # which Windows PowerShell 5.1 can run on, classify characters with Unicode 5.0.
 # A PowerShell payload holding any of them is also judged with each one a space (see
-# _powershell_segments); bash reads them as part of a word, so a Bash payload is not.
+# _powershell_segments); bash reads them as part of a word, so a Bash payload is not,
+# but a pwsh/powershell script inside it is (see _runner_scripts and _lenient_words).
 # The mapping covers the whole text, quoted strings and inline bash -c scripts too:
 # a quoted string stays one word, and the extra splitting there only adds segments.
 # The readings that keep one inside its word stay, so a command word glued by one to
