@@ -37,7 +37,7 @@ FP_FLOOR = 441
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 930
+BLOCK_FLOOR = 932
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2608,6 +2608,7 @@ _HEREDOC_ROWS = [
     ("an alias whose value concatenates quotes, called with a heredoc",
      "alias p=\"pw\"sh\n" + _heredoc("p")),
     ("an alias defined in an eval, called with a heredoc", "eval 'alias p=pwsh'\n" + _heredoc("p")),
+    ("an alias of a function, called with a heredoc", "alias p=f\nf() { pwsh; }\n" + _heredoc("p")),
     ("fp cost: an alias of pwsh beside a heredoc to cat",
      "alias p='pwsh'\n" + _heredoc("cat", "x")),
     ("a function called with a heredoc", "f() { pwsh; }\n" + _heredoc("f")),
@@ -2669,6 +2670,8 @@ _PIPE_ROWS = [
     # coproc is read as a wrapper, so its command looks piped, though the coprocess reads
     # its own pipe: a refusal the shell would not need.
     ("fp cost: coproc pwsh after a pipe", "echo '" + _PS_BODY + "' | coproc pwsh"),
+    # An alias's value counts as fed by any pipe in the command, called or not.
+    ("fp cost: an alias of pwsh beside a pipe", "alias ps1=pwsh\nls | head"),
     ("an alias of pwsh fed by a pipe", "alias p=pwsh\necho '" + _PS_BODY + "' | p"),
     ("pwsh -c evaluating a line of its piped stdin",
      "echo '" + _PS_BODY + "' | pwsh -c 'iex ([Console]::ReadLine())'"),

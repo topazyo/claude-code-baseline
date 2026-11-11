@@ -837,6 +837,18 @@ def _heredoc_feeds_all(seg, defined) -> bool:
                for i in (_shell_index(seg, c) for c in _READINGS))
 
 
+def _alias_names(segs):
+    """The NAMEs of every `alias NAME=VALUE` word among the segments (dequoted tokens,
+    as _split_inline_script reads the values)."""
+    out = set()
+    for seg in segs:
+        for consume in (True, False):
+            k = _shell_index(seg, consume)
+            if k is not None and _cmd_word(seg[k]) == "alias":
+                out.update(t.split("=", 1)[0] for t in seg[k + 1:] if "=" in t)
+    return out
+
+
 def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) -> bool:
     """Refuse a cmd or PowerShell runner that a heredoc feeds: the heredoc's body is its
     commands, and it is not read as cmd or PowerShell here (bash heredoc bodies are judged
@@ -856,7 +868,9 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     here = [s for s in main + lenient if getattr(s, "heredoc", False)]
     defined = set()
     if here:
+        # Functions, and aliases (whose value may call a function: `alias p=f`).
         defined = {n.lower() for m in _DEFINED_NAME_RE.finditer(text) for n in m.groups() if n}
+        defined |= _alias_names(main + lenient)
     wide = (inherited or orphan
             or any(getattr(s, "heredoc_wide", False) for s in main + lenient)
             or any(_heredoc_feeds_all(s, defined) for s in here)
@@ -1307,7 +1321,7 @@ def _split_inline_script(toks):
         extras.append(" ".join(toks[k + 1:]))
     # `alias NAME=VALUE ...`: each value is text the shell runs where NAME is called
     # (under expand_aliases), so each is judged as a script, as eval's words are.
-    for consume in (True, False):
+    for consume in ((True, False) if any("alias" in t for t in toks) else ()):
         k = _shell_index(toks, consume)
         if k is not None and _cmd_word(toks[k]) == "alias":
             values = tuple(t.split("=", 1)[1] for t in toks[k + 1:] if "=" in t)
@@ -2429,8 +2443,7 @@ def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool, 
             _effective_cmd_index(toks, c)[1] for c in _READINGS)
         # A heredoc on the segment (or on the text, see _heredoc_check) feeds the
         # commands its script runs: `bash -c pwsh <<EOF`, `cmd /c pwsh <<EOF`.
-        on_toks = getattr(toks, "heredoc", False) or alias_here
-        here = heredoc or on_toks
+        here = heredoc or getattr(toks, "heredoc", False) or alias_here
         for script in (inline if isinstance(inline, tuple) else (inline,)):
             if not (script and script.strip()):
                 continue
@@ -2453,7 +2466,8 @@ def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool, 
         # The scripts' segments come back flattened from every depth below.
         subs = expanded[start:]
         reached = (reached
-                   or (on_toks and any(_shell_reads_stdin(s) for s in subs))
+                   or (getattr(toks, "heredoc", False)
+                       and any(_shell_reads_stdin(s) for s in subs))
                    or (bool(words & {"eval", "alias"})
                        and any(getattr(s, "heredoc_wide", False) for s in subs)))
     return expanded, reached
@@ -2902,6 +2916,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
         # must not be waved through. Fail closed, like the hook's other
         # "CONTROL COULD NOT RUN" paths.
         return [f"uninspectable command (unbalanced quoting: {exc})"]
+    finally:
+        _Command.raw = ""                  # no later direct _segments() call reads it
 
     # The readings overlap heavily; judge each distinct segment once. The key holds
     # everything a rule reads, ps_script included, so an exempt copy of a segment
