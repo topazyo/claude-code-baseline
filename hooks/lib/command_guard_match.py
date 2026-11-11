@@ -816,15 +816,13 @@ def _runner_reads_heredoc(toks) -> bool:
 _DEFINED_NAME_RE = re.compile(
     r"""(?:^|[\s;&|(){}])(?:function\s+([^\s;&|(){}<>'"`$=]+)"""
     r"""|([^\s;&|(){}<>'"`$=]+)\s*\(\s*\))""")
-# An alias the text defines and its value: a heredoc on a call of it feeds the command
-# the value names (under expand_aliases).
-_ALIAS_RE = re.compile(
-    r"""(?:^|[\s;&|(){}])alias\s+([^\s;&|(){}<>'"`$=]+)=('[^']*'|"[^"]*"|[^\s;&|]*)""")
-# An exec with a heredoc or here-string and no command (`exec <<EOF`, `exec 3<<EOF`,
-# `command exec <<<x`, inside an eval): it redirects the shell's own stdin for every
-# later command. Read on the text, so neither a wrapper nor an eval hides it. (The scan
-# after `<<` stops at the next `<`, so a run of them stays linear.)
-_EXEC_HEREDOC_RE = re.compile(r"\bexec\b[^\n;&|]*<<|<<[^\n;&|<]*\bexec\b")
+def _exec_only(words) -> bool:
+    """An exec (perhaps behind wrappers) with no command: only redirects. With a heredoc
+    or here-string (`exec <<EOF`, `exec 2>&1 3<<EOF`, `command exec <<<x`) it redirects
+    the shell's own stdin for every later command, so the segment is marked heredoc_wide;
+    in an eval's script, that reaches the text around the eval (see _expand_scripts)."""
+    return (any(_cmd_word(t) == "exec" for t in words)
+            and all(_shell_index(words, c) is None for c in _READINGS))
 
 
 def _heredoc_feeds_all(seg, defined) -> bool:
@@ -832,25 +830,11 @@ def _heredoc_feeds_all(seg, defined) -> bool:
     from stdin (`bash <<EOF`: each body line runs with the rest of the body as its stdin,
     so a body line `pwsh` reads the lines after it), or calls a function the text
     defines. (A shell the command's own scripts start, `bash -c bash <<EOF`, is found
-    when they are expanded: see _segments; an exec, on the text: see _heredoc_check.)"""
+    when they are expanded: see _segments; an exec: see _exec_only.)"""
     if _shell_reads_stdin(seg):
         return True
     return any(i is not None and _cmd_word(seg[i]) in defined
                for i in (_shell_index(seg, c) for c in _READINGS))
-
-
-def _alias_calls(here, text):
-    """Each heredoc segment that calls an alias the text defines, with the alias's value
-    in place of its name: what the heredoc then feeds."""
-    aliases = {m.group(1).lower(): m.group(2).strip("'\"").lower().split()
-               for m in _ALIAS_RE.finditer(text)}
-    out = []
-    for seg in here:
-        for i in {_shell_index(seg, c) for c in _READINGS} - {None}:
-            if _cmd_word(seg[i]) in aliases:
-                out.append(_new_seg(list(seg[:i]) + aliases[_cmd_word(seg[i])]
-                                    + list(seg[i + 1:]), False))
-    return out
 
 
 def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) -> bool:
@@ -861,25 +845,24 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     The fed segments: every segment of the text when it is the script of a fed command
     (inherited), when a heredoc or here-string is on a group or compound command
     (heredoc_wide, or orphan: on a closer with no segment before it on its line) or on an
-    exec with no command (_EXEC_HEREDOC_RE), or when a heredoc is on a command that
-    reaches every command of the text (_heredoc_feeds_all, which a runner reading the
-    heredoc itself satisfies; for the quote-blind pass, a shell reading stdin among the
-    segments of a heredoc's line, the inline scripts _lenient_inline took from it
-    included; an alias call, as its value). Otherwise the quote-blind segments of a line
-    holding one (lenient_fed), and alias calls. Returns whether every segment is fed, for
-    the scripts _segments expands from this text."""
+    exec with no command (heredoc_wide too, see _exec_only), or when a heredoc is on a
+    command that reaches every command of the text
+    (_heredoc_feeds_all, which a runner reading the heredoc itself satisfies; for the
+    quote-blind pass, a shell reading stdin among the segments of a heredoc's line, the
+    inline scripts _lenient_inline took from it included). Otherwise the quote-blind
+    segments of a line holding one (lenient_fed). (An alias's value is a script fed by
+    any heredoc in the text: see _expand_scripts.) Returns whether every segment is fed,
+    for the scripts _segments expands from this text."""
     here = [s for s in main + lenient if getattr(s, "heredoc", False)]
-    defined, aliased = set(), []
+    defined = set()
     if here:
         defined = {n.lower() for m in _DEFINED_NAME_RE.finditer(text) for n in m.groups() if n}
-        aliased = _alias_calls(here, text)
     wide = (inherited or orphan
             or any(getattr(s, "heredoc_wide", False) for s in main + lenient)
-            or ("exec" in text and _EXEC_HEREDOC_RE.search(text) is not None)
-            or any(_heredoc_feeds_all(s, defined) for s in here + aliased)
+            or any(_heredoc_feeds_all(s, defined) for s in here)
             or any(_shell_reads_stdin(s) for s in lenient_fed))
     # A runner a heredoc is on reads stdin, so it already made the text wide.
-    fed = (main + lenient if wide else lenient_fed) + aliased
+    fed = main + lenient if wide else lenient_fed
     for toks in fed:
         if _runner_reads_heredoc(toks):
             raise _Uninspectable("Windows runner reading its commands from a heredoc")
@@ -1322,6 +1305,14 @@ def _split_inline_script(toks):
     k = _shell_index(toks, _WIDE)
     if k is not None and _cmd_word(toks[k]) == "eval":
         extras.append(" ".join(toks[k + 1:]))
+    # `alias NAME=VALUE ...`: each value is text the shell runs where NAME is called
+    # (under expand_aliases), so each is judged as a script, as eval's words are.
+    for consume in (True, False):
+        k = _shell_index(toks, consume)
+        if k is not None and _cmd_word(toks[k]) == "alias":
+            values = tuple(t.split("=", 1)[1] for t in toks[k + 1:] if "=" in t)
+            if values:
+                return keep(toks[:k + 1]), values
     for i, t in enumerate(toks):
         base = _cmd_word(t)
         if base == "watch":                        # watch hands its joined words to sh -c
@@ -2109,11 +2100,13 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             # A here-string target follows its `-c` at the end of toks (see above).
             seg.expanding = frozenset(exp) | {len(cur) + 2 * j + 1
                                               for j, e in enumerate(here_exp) if e}
-            # One on `done`, `fi` or `esac` feeds the whole compound command. (A
-            # here-string on the runner itself is a piped one, refused as such.)
+            # One on `done`, `fi` or `esac` feeds the whole compound command, and one on
+            # an exec with no command every later one. (A here-string on the runner
+            # itself is a piped one, refused as such.)
             seg.heredoc = heredoc_here
             seg.heredoc_wide = (bool(heredoc_here or herestr)
-                                and cur[:1] in (["done"], ["fi"], ["esac"]))
+                                and (cur[:1] in (["done"], ["fi"], ["esac"])
+                                     or _exec_only(cur)))
             segments.append(seg)
             latch.last = seg
             piped = next_piped
@@ -2167,9 +2160,9 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             prev_op = None
             # `function f { ...; }` and `coproc NAME { ...; }`: the body's first command
             # starts after the `{`, as it does after `f() {` (whose `(` already ends the
-            # segment). A pipe into the coprocess feeds the body.
+            # segment).
             if piece == "{" and len(cur) == 2 and cur[0] in ("function", "coproc"):
-                close(piped if cur[0] == "coproc" else False)
+                close(False)
                 continue
             piece = piece.lstrip(_LEAD_GROUP_CHARS)
             if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
@@ -2366,14 +2359,15 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                     f"inline scripts nested too deep to inspect (> {_MAX_INLINE_DEPTH} "
                     "levels)")
     else:
-        expanded, reached = _expand_scripts(segments, _depth, outer_expanded, heredoc)
+        expanded, reached = _expand_scripts(segments, _depth, outer_expanded, heredoc, text)
         if reached and not heredoc:
             # A heredoc reaches a shell that one of the expanded scripts starts (`bash -c
-            # bash <<EOF`): every command of this text is fed after all. Check them, and
-            # expand their scripts again as fed ones.
+            # bash <<EOF`), or an eval's exec redirects this shell's stdin: every command
+            # of this text is fed after all. Check them, and expand their scripts again
+            # as fed ones.
             heredoc = _heredoc_check(text, segments, lenient + lenient_runs, lenient_fed,
                                      False, True)
-            expanded = _expand_scripts(segments, _depth, outer_expanded, True)[0]
+            expanded = _expand_scripts(segments, _depth, outer_expanded, True, text)[0]
         segments = expanded
     # Lenient segments skip the inline split: with the quotes deleted, the script
     # of `bash -c "rm -rf ~"` is already bare tokens. Splitting would take only its
@@ -2401,11 +2395,13 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     return segments
 
 
-def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool):
+def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool, text: str):
     """The segments of _segments() below its depth limit, each followed by what its inline
     scripts and Windows runner's command run, tokenized one level down. Returns them, and
-    whether a heredoc on a segment reaches a shell reading its script from stdin among
-    those (see _heredoc_check). heredoc: every segment is fed by a heredoc."""
+    whether a heredoc reaches every command of the text through them (see
+    _heredoc_check): one on a segment reaches a shell reading its script from stdin among
+    them, or an eval's script holds a heredoc_wide segment (it runs in this shell).
+    heredoc: every segment is fed by a heredoc. text: the text the segments are from."""
     expanded, reached = [], False
     for toks in segments:
         start = len(expanded)
@@ -2414,6 +2410,14 @@ def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool):
         # Its words from the shell's on count, the shell's own included (`watch "..."`).
         starts = [j for j in (_shell_index(toks, c) for c in _READINGS) if j is not None]
         first = min(starts) if starts else -1
+        words = {_cmd_word(toks[j]) for j in starts}
+        # An alias's value runs wherever it is called, in this text or (defined in an
+        # eval) the command around it: what feeds a call is not known, so a heredoc, or a
+        # pipe or redirect, anywhere in either feeds it.
+        aliasing = "alias" in words
+        whole = text + "\n" + _Command.raw if aliasing else ""
+        alias_here = aliasing and "<<" in whole
+        alias_piped = aliasing and ("|" in whole or "<" in whole)
         outer = outer_expanded or any(e >= first for e in getattr(toks, "expanding", ()))
         head, inline = _split_inline_script(toks)
         if head:
@@ -2425,13 +2429,15 @@ def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool):
             _effective_cmd_index(toks, c)[1] for c in _READINGS)
         # A heredoc on the segment (or on the text, see _heredoc_check) feeds the
         # commands its script runs: `bash -c pwsh <<EOF`, `cmd /c pwsh <<EOF`.
-        here = heredoc or getattr(toks, "heredoc", False)
+        on_toks = getattr(toks, "heredoc", False) or alias_here
+        here = heredoc or on_toks
         for script in (inline if isinstance(inline, tuple) else (inline,)):
             if not (script and script.strip()):
                 continue
             # `echo ... | bash -c "true; sh"`: the pipe reaches every command of
             # the script, so the script's segments start out piped.
-            subs = _segments(script, _depth + 1, piped=getattr(toks, "piped", False),
+            subs = _segments(script, _depth + 1,
+                             piped=getattr(toks, "piped", False) or alias_piped,
                              outer_expanded=outer, heredoc=here)
             expanded.extend(_xargs_fed_copy(s) if fed and isinstance(s, _Seg) else s
                             for s in subs)
@@ -2445,8 +2451,11 @@ def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool):
                                              getattr(toks, "piped", False),
                                              ps, outer_run, here))
         # The scripts' segments come back flattened from every depth below.
-        reached = reached or (getattr(toks, "heredoc", False) and any(
-            _shell_reads_stdin(s) for s in expanded[start:]))
+        subs = expanded[start:]
+        reached = (reached
+                   or (on_toks and any(_shell_reads_stdin(s) for s in subs))
+                   or (bool(words & {"eval", "alias"})
+                       and any(getattr(s, "heredoc_wide", False) for s in subs)))
     return expanded, reached
 
 
@@ -2455,14 +2464,20 @@ class _RunnerBudget:
     used = 0
 
 
+class _Command:
+    """The whole payload of this evaluate() call: what an alias defined anywhere in it may
+    be fed by (see _expand_scripts)."""
+    raw = ""
+
+
 @functools.lru_cache(maxsize=4096)
 def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool = False,
                      heredoc: bool = False):
     """_segments() of a Windows runner's script (see _runner_scripts), memoized: the
     PowerShell readings and nested runners hand the same script text down many times.
-    The arguments are all the result depends on, and no segment is changed after the
-    call that made it returns, so sharing the result is safe. evaluate() clears the
-    cache and the budget on entry.
+    The arguments are all the result depends on (with _Command.raw, fixed for one
+    evaluation), and no segment is changed after the call that made it returns, so
+    sharing the result is safe. evaluate() clears the cache and the budget on entry.
 
     Budgeted: the readings multiply per nesting level, so a 4 KB chain of nested
     runners can hand down thousands of distinct long scripts (~3 MB). Past
@@ -2876,6 +2891,7 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
 
     _runner_segments.cache_clear()
     _RunnerBudget.used = 0
+    _Command.raw = raw
     try:
         segments = (_powershell_segments(raw) if shell == "powershell"
                     else _segments(raw, shell=shell))

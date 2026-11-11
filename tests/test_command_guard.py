@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 438
+FP_FLOOR = 441
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 913
+BLOCK_FLOOR = 930
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2582,9 +2582,34 @@ _HEREDOC_ROWS = [
     ("an exec heredoc in an eval, read by a later pwsh",
      "eval 'exec <<EOF\n" + _PS_BODY + "\nEOF'\npwsh"),
     ("an exec here-string read by a later pwsh", "exec <<<'" + _PS_BODY + "'\npwsh"),
+    ("an exec heredoc behind a redirect, read by a later pwsh",
+     _heredoc("exec 2>&1", after="\npwsh")),
+    ("an exec heredoc behind a >&2 redirect, read by a later pwsh",
+     _heredoc("exec >&2", after="\npwsh")),
+    ("an exec here-string behind a redirect, read by a later pwsh",
+     "exec 2>&1 <<<'" + _PS_BODY + "'\npwsh"),
+    ("a heredoc before an exec, read by a later pwsh",
+     "<<'EOF' 2>&1 exec\n" + _PS_BODY + "\nEOF\npwsh"),
+    ("a quoted exec's heredoc, read by a later pwsh", _heredoc("e''xec", after="\npwsh")),
+    ("an escaped exec's heredoc, read by a later pwsh",
+     _heredoc("ex" + chr(92) + "ec", after="\npwsh")),
+    ("a quoted exec's heredoc in an eval, read by a later pwsh",
+     "eval \"e''xec <<EOF\n" + _PS_BODY + "\nEOF\"\npwsh"),
+    # An alias's value is a script fed by any heredoc in the text.
     ("an alias called with a heredoc", "shopt -s expand_aliases\nalias p='pwsh'\n" + _heredoc("p")),
     ("an alias of bash called with a heredoc whose body runs pwsh",
      "shopt -s expand_aliases\nalias b=bash\n" + _heredoc("b", "pwsh\n" + _PS_BODY)),
+    ("the second alias of one command, called with a heredoc", "alias x=y p=pwsh\n" + _heredoc("p")),
+    ("an alias running two commands, called with a heredoc",
+     "alias p='true; pwsh'\n" + _heredoc("p")),
+    ("an alias of an alias, called with a heredoc", "alias b=pwsh\nalias a=b\n" + _heredoc("a")),
+    ("an alias called in a group with a heredoc", "alias p=pwsh\n" + _heredoc("{ p; }")),
+    ("an alias after --, called with a heredoc", "alias -- p=pwsh\n" + _heredoc("p")),
+    ("an alias whose value concatenates quotes, called with a heredoc",
+     "alias p=\"pw\"sh\n" + _heredoc("p")),
+    ("an alias defined in an eval, called with a heredoc", "eval 'alias p=pwsh'\n" + _heredoc("p")),
+    ("fp cost: an alias of pwsh beside a heredoc to cat",
+     "alias p='pwsh'\n" + _heredoc("cat", "x")),
     ("a function called with a heredoc", "f() { pwsh; }\n" + _heredoc("f")),
     ("a function keyword function called with a heredoc", "function g { pwsh; }\n" + _heredoc("g")),
     # Quote-blind: the segments of a line holding a heredoc (lenient_fed).
@@ -2641,8 +2666,10 @@ _PIPE_ROWS = [
     ("pwsh -c evaluating its piped stdin", "echo '" + _PS_BODY + "' | pwsh -c '$input | iex'"),
     ("powershell evaluating its piped stdin (positional command)",
      "echo '" + _PS_BODY + "' | powershell '$input | Invoke-Expression'"),
-    ("coproc pwsh fed by a pipe", "echo '" + _PS_BODY + "' | coproc pwsh"),
-    ("a coproc group fed by a pipe", "echo '" + _PS_BODY + "' | coproc P { pwsh; }"),
+    # coproc is read as a wrapper, so its command looks piped, though the coprocess reads
+    # its own pipe: a refusal the shell would not need.
+    ("fp cost: coproc pwsh after a pipe", "echo '" + _PS_BODY + "' | coproc pwsh"),
+    ("an alias of pwsh fed by a pipe", "alias p=pwsh\necho '" + _PS_BODY + "' | p"),
     ("pwsh -c evaluating a line of its piped stdin",
      "echo '" + _PS_BODY + "' | pwsh -c 'iex ([Console]::ReadLine())'"),
 ]
@@ -2659,6 +2686,10 @@ CASES += [
     ("a one-line function keyword body is judged, called after", "function g { git push --force; }; g",
      B, ()),
     ("coproc is a wrapper", "coproc git push --force", B, ()),
+    # An alias's value is judged as the script it is.
+    ("an alias's value is judged", "alias p='rm -rf ~'\np", B, ()),
+    ("an alias's value is judged, a second definition",
+     "alias x=y p='git push --force'\np", B, ()),
     # Not fed, or not read as commands.
     ("fp cat heredoc whose body names cmd", _heredoc("cat > n.md", "cmd quoting notes"), A, ()),
     ("fp commit message heredoc naming cmd",
@@ -2693,10 +2724,14 @@ CASES += [
      A, ()),
     ("fp pwsh -c running a local script block beside its piped stdin",
      "git diff | pwsh -c '$input | Out-String; Invoke-Command -ScriptBlock {Get-Date}'", A, ()),
-    ("fp an alias defined, a heredoc to cat", "alias p='pwsh'\n" + _heredoc("cat", "x"), A, ()),
+    ("fp an alias defined, a heredoc to cat", "alias ll='ls -la'\n" + _heredoc("cat", "x"), A, ()),
+    ("fp an alias defined, a pipe", "alias ll='ls -la'\nll | head", A, ()),
+    ("fp an alias of a harmless command", "alias gs='git status'\ngs", A, ()),
     ("fp an exec heredoc read by cat", "exec 3<<'EOF'\nx\nEOF\ncat <&3", A, ()),
     ("fp a here-string on a group of harmless commands", "{ cat; } <<< 'x'", A, ()),
     ("fp a coproc group", "coproc P { sleep 1; }", A, ()),
+    ("fp a coproc group after a pipe (it reads its own pipe)",
+     "echo x | coproc P { pwsh; }", A, ()),
     ("fp cmd /r", "cmd //r ver", A, ()),
     ("fp a one-line function keyword body", "function g { git status; }; g", A, ()),
     ("fp coproc", "coproc sleep 1", A, ()),
