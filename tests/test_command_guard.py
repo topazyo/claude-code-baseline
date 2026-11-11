@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 432
+FP_FLOOR = 438
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 899
+BLOCK_FLOOR = 913
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2539,6 +2539,13 @@ _HEREDOC_ROWS = [
     ("pwsh -c evaluating its stdin from a heredoc", _heredoc("pwsh -c '$input | iex'")),
     ("pwsh -c evaluating [Console]::In from a heredoc",
      _heredoc("pwsh -c 'iex ([Console]::In.ReadToEnd())'")),
+    ("pwsh -c evaluating [Console]::ReadLine() from a heredoc",
+     _heredoc("pwsh -c 'iex ([Console]::ReadLine())'")),
+    ("pwsh -c evaluating [System.Console]::ReadLine() from a heredoc",
+     _heredoc("pwsh -c 'iex ([System.Console]::ReadLine())'")),
+    ("pwsh -c evaluating Read-Host from a heredoc", _heredoc("pwsh -c 'Read-Host | iex'")),
+    ("pwsh -c building a script block from its stdin, reading a heredoc",
+     _heredoc("pwsh -c '& ([scriptblock]::Create([Console]::In.ReadToEnd()))'")),
     ("sudo pwsh reading a heredoc", _heredoc("sudo pwsh")),
     ("coproc pwsh reading a heredoc", _heredoc("coproc pwsh")),
     ("the heredoc before the runner's word", "<<'EOF' pwsh\n" + _PS_BODY + "\nEOF"),
@@ -2548,6 +2555,10 @@ _HEREDOC_ROWS = [
     ("a while loop reading a heredoc", _heredoc("while read l; do pwsh; done")),
     ("an if reading a heredoc", _heredoc("if true; then pwsh; fi")),
     ("a group spanning lines reading a heredoc", _heredoc("{\npwsh\n}")),
+    ("a coproc group reading a heredoc", _heredoc("coproc P { pwsh; }")),
+    # A here-string on a group or loop feeds every command in it the same way.
+    ("a { } group reading a here-string", "{ pwsh; } <<< '" + _PS_BODY + "'"),
+    ("a while loop reading a here-string", "while true; do pwsh; done <<< '" + _PS_BODY + "'"),
     # On a group closer alone on its line, quote-blind (orphan_heredoc).
     ("a group closer alone on its line in a substitution",
      'echo "$(\n{\npwsh\n} <<\'EOF\'\n' + _PS_BODY + '\nEOF\n)"'),
@@ -2566,6 +2577,14 @@ _HEREDOC_ROWS = [
     ("an exec heredoc read by a later pwsh", _heredoc("exec", after="\npwsh")),
     ("an exec fd heredoc read by a later pwsh",
      "exec 3<<'EOF'\n" + _PS_BODY + "\nEOF\npwsh <&3"),
+    ("an exec heredoc behind a wrapper, read by a later pwsh",
+     _heredoc("command exec", after="\npwsh")),
+    ("an exec heredoc in an eval, read by a later pwsh",
+     "eval 'exec <<EOF\n" + _PS_BODY + "\nEOF'\npwsh"),
+    ("an exec here-string read by a later pwsh", "exec <<<'" + _PS_BODY + "'\npwsh"),
+    ("an alias called with a heredoc", "shopt -s expand_aliases\nalias p='pwsh'\n" + _heredoc("p")),
+    ("an alias of bash called with a heredoc whose body runs pwsh",
+     "shopt -s expand_aliases\nalias b=bash\n" + _heredoc("b", "pwsh\n" + _PS_BODY)),
     ("a function called with a heredoc", "f() { pwsh; }\n" + _heredoc("f")),
     ("a function keyword function called with a heredoc", "function g { pwsh; }\n" + _heredoc("g")),
     # Quote-blind: the segments of a line holding a heredoc (lenient_fed).
@@ -2623,6 +2642,9 @@ _PIPE_ROWS = [
     ("powershell evaluating its piped stdin (positional command)",
      "echo '" + _PS_BODY + "' | powershell '$input | Invoke-Expression'"),
     ("coproc pwsh fed by a pipe", "echo '" + _PS_BODY + "' | coproc pwsh"),
+    ("a coproc group fed by a pipe", "echo '" + _PS_BODY + "' | coproc P { pwsh; }"),
+    ("pwsh -c evaluating a line of its piped stdin",
+     "echo '" + _PS_BODY + "' | pwsh -c 'iex ([Console]::ReadLine())'"),
 ]
 CASES += [(label, cmd, B, ()) for label, cmd in _PIPE_ROWS]
 STRUCT_CASES += [(f"pipe refusal: {label}", lambda c=cmd: m.evaluate(c), [_PIPE_REFUSAL])
@@ -2665,6 +2687,16 @@ CASES += [
     ("fp pwsh -no (ambiguous) fed by a pipe", "echo x | pwsh -no -c 'Get-Date'", A, ()),
     ("fp pwsh -c reading its piped stdin as data", "git diff | pwsh -c '$input | Measure-Object'",
      A, ()),
+    # Code beside the stdin read that does not evaluate it.
+    ("fp pwsh -c loading an assembly and reading its piped stdin as data",
+     "cat f.json | pwsh -NoProfile -c 'Add-Type -AssemblyName System.Web; $input | ConvertFrom-Json'",
+     A, ()),
+    ("fp pwsh -c running a local script block beside its piped stdin",
+     "git diff | pwsh -c '$input | Out-String; Invoke-Command -ScriptBlock {Get-Date}'", A, ()),
+    ("fp an alias defined, a heredoc to cat", "alias p='pwsh'\n" + _heredoc("cat", "x"), A, ()),
+    ("fp an exec heredoc read by cat", "exec 3<<'EOF'\nx\nEOF\ncat <&3", A, ()),
+    ("fp a here-string on a group of harmless commands", "{ cat; } <<< 'x'", A, ()),
+    ("fp a coproc group", "coproc P { sleep 1; }", A, ()),
     ("fp cmd /r", "cmd //r ver", A, ()),
     ("fp a one-line function keyword body", "function g { git status; }; g", A, ()),
     ("fp coproc", "coproc sleep 1", A, ()),

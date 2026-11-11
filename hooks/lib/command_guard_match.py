@@ -221,10 +221,10 @@ _PS_RUNNERS = {"pwsh", "powershell"}
 # A pwsh/powershell command that reads the runner's stdin itself and turns text into code
 # (`$input | iex`), so what is fed to it runs; see _runner_reads_stdin. Reading stdin as
 # data (`git diff | pwsh -c '$input | Out-String'`) is not enough.
-_PS_STDIN_RE = re.compile(r"\$input\b|console\]::in\b|readtoend|openstandardinput",
-                          re.IGNORECASE)
-_PS_EVAL_RE = re.compile(r"\biex\b|invoke-expression|scriptblock|invokescript"
-                         r"|invoke-command|add-type", re.IGNORECASE)
+_PS_STDIN_RE = re.compile(r"\$input\b|console\]::(?:in\b|read)|readtoend|readline"
+                          r"|read-host|openstandardinput", re.IGNORECASE)
+_PS_EVAL_RE = re.compile(r"\biex\b|invoke-expression|scriptblock\]|newscriptblock"
+                         r"|invokescript|add-type\b[^;|]*-typedefinition", re.IGNORECASE)
 # Characters pwsh's command-line parser accepts as a switch prefix: -, /, and the dashes.
 _PS_SWITCH_CHARS = "-/–—―"
 # pwsh / powershell options that take a value, by full name; a switch matches by prefix.
@@ -811,26 +811,46 @@ def _runner_reads_heredoc(toks) -> bool:
     return False
 
 
-# A shell function (`f() {`, `function f`) or alias the text defines: a heredoc on a call
-# of it feeds the commands in its body. Names are lowercased like the tokens.
+# A shell function the text defines (`f() {`, `function f`): a heredoc on a call of it
+# feeds the commands in its body. Names are lowercased like the tokens.
 _DEFINED_NAME_RE = re.compile(
     r"""(?:^|[\s;&|(){}])(?:function\s+([^\s;&|(){}<>'"`$=]+)"""
-    r"""|([^\s;&|(){}<>'"`$=]+)\s*\(\s*\)|alias\s+([^\s;&|(){}<>'"`$=]+)=)""")
+    r"""|([^\s;&|(){}<>'"`$=]+)\s*\(\s*\))""")
+# An alias the text defines and its value: a heredoc on a call of it feeds the command
+# the value names (under expand_aliases).
+_ALIAS_RE = re.compile(
+    r"""(?:^|[\s;&|(){}])alias\s+([^\s;&|(){}<>'"`$=]+)=('[^']*'|"[^"]*"|[^\s;&|]*)""")
+# An exec with a heredoc or here-string and no command (`exec <<EOF`, `exec 3<<EOF`,
+# `command exec <<<x`, inside an eval): it redirects the shell's own stdin for every
+# later command. Read on the text, so neither a wrapper nor an eval hides it. (The scan
+# after `<<` stops at the next `<`, so a run of them stays linear.)
+_EXEC_HEREDOC_RE = re.compile(r"\bexec\b[^\n;&|]*<<|<<[^\n;&|<]*\bexec\b")
 
 
 def _heredoc_feeds_all(seg, defined) -> bool:
     """A heredoc on seg reaches every command of the text: the command reads its script
     from stdin (`bash <<EOF`: each body line runs with the rest of the body as its stdin,
-    so a body line `pwsh` reads the lines after it), is an `exec` with no command (it
-    redirects the shell's own stdin for every later command), or calls a function or
-    alias the text defines. (A shell the command's own scripts start, `bash -c bash
-    <<EOF`, is found when they are expanded: see _segments.)"""
+    so a body line `pwsh` reads the lines after it), or calls a function the text
+    defines. (A shell the command's own scripts start, `bash -c bash <<EOF`, is found
+    when they are expanded: see _segments; an exec, on the text: see _heredoc_check.)"""
     if _shell_reads_stdin(seg):
         return True
-    starts = [_shell_index(seg, c) for c in _READINGS]
-    if all(i is None for i in starts):
-        return bool(seg) and _cmd_word(seg[0]) == "exec"
-    return any(i is not None and _cmd_word(seg[i]) in defined for i in starts)
+    return any(i is not None and _cmd_word(seg[i]) in defined
+               for i in (_shell_index(seg, c) for c in _READINGS))
+
+
+def _alias_calls(here, text):
+    """Each heredoc segment that calls an alias the text defines, with the alias's value
+    in place of its name: what the heredoc then feeds."""
+    aliases = {m.group(1).lower(): m.group(2).strip("'\"").lower().split()
+               for m in _ALIAS_RE.finditer(text)}
+    out = []
+    for seg in here:
+        for i in {_shell_index(seg, c) for c in _READINGS} - {None}:
+            if _cmd_word(seg[i]) in aliases:
+                out.append(_new_seg(list(seg[:i]) + aliases[_cmd_word(seg[i])]
+                                    + list(seg[i + 1:]), False))
+    return out
 
 
 def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) -> bool:
@@ -839,24 +859,27 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     line by line, as bash). Raises _Uninspectable (a block), as for a runner fed by a pipe.
 
     The fed segments: every segment of the text when it is the script of a fed command
-    (inherited), when a heredoc is on a group or compound command (heredoc_wide, or
-    orphan: on a closer with no segment before it on its line), or on a command that
+    (inherited), when a heredoc or here-string is on a group or compound command
+    (heredoc_wide, or orphan: on a closer with no segment before it on its line) or on an
+    exec with no command (_EXEC_HEREDOC_RE), or when a heredoc is on a command that
     reaches every command of the text (_heredoc_feeds_all, which a runner reading the
     heredoc itself satisfies; for the quote-blind pass, a shell reading stdin among the
     segments of a heredoc's line, the inline scripts _lenient_inline took from it
-    included). Otherwise the quote-blind segments of a line holding one (lenient_fed).
-    Returns whether every segment is fed, for the scripts _segments expands from this
-    text."""
+    included; an alias call, as its value). Otherwise the quote-blind segments of a line
+    holding one (lenient_fed), and alias calls. Returns whether every segment is fed, for
+    the scripts _segments expands from this text."""
     here = [s for s in main + lenient if getattr(s, "heredoc", False)]
-    defined = None
+    defined, aliased = set(), []
     if here:
         defined = {n.lower() for m in _DEFINED_NAME_RE.finditer(text) for n in m.groups() if n}
+        aliased = _alias_calls(here, text)
     wide = (inherited or orphan
             or any(getattr(s, "heredoc_wide", False) for s in main + lenient)
-            or any(_heredoc_feeds_all(s, defined) for s in here)
+            or ("exec" in text and _EXEC_HEREDOC_RE.search(text) is not None)
+            or any(_heredoc_feeds_all(s, defined) for s in here + aliased)
             or any(_shell_reads_stdin(s) for s in lenient_fed))
     # A runner a heredoc is on reads stdin, so it already made the text wide.
-    fed = main + lenient if wide else lenient_fed
+    fed = (main + lenient if wide else lenient_fed) + aliased
     for toks in fed:
         if _runner_reads_heredoc(toks):
             raise _Uninspectable("Windows runner reading its commands from a heredoc")
@@ -1582,8 +1605,8 @@ def _ps_evals_stdin(words) -> bool:
 
 
 def _runner_reads_stdin(base: str, args) -> bool:
-    """A Windows runner taking its commands from stdin: cmd with no /c, or with /k (it
-    keeps running after the command); pwsh or powershell with `-Command -`, `-File -`, a
+    """A Windows runner taking its commands from stdin: cmd with no /c or /r run switch,
+    or with /k (it keeps running after the command); pwsh or powershell with `-Command -`, `-File -`, a
     `-` as its first positional word, no command, file or positional word, -NoExit (see
     _ps_no_exit), or a command that evaluates what it reads from stdin (_ps_evals_stdin);
     wsl with nothing but value options (its default shell then reads stdin)."""
@@ -2069,6 +2092,14 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
                 and cur[0].startswith((".", "[", "::", "?.")) and latch.last is not None):
             latch.last.ps_call = True
         latch.closer = op
+        # A heredoc or here-string on a group closer (`{ ...; } <<EOF`, `( ... ) <<< x`)
+        # feeds every command in the group: the segment before it is marked, or with none
+        # before it in these words, the text (see _heredoc_check).
+        if (heredoc_here or herestr) and not cur:
+            if latch.last is not None:
+                latch.last.heredoc_wide = True
+            else:
+                latch.orphan_heredoc = True
         if toks:
             # A here-string feeds stdin too: `bash - <<< '...'` reads it as its script.
             seg = _new_seg(toks, piped or fed or bool(herestr), redirs)
@@ -2078,18 +2109,15 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             # A here-string target follows its `-c` at the end of toks (see above).
             seg.expanding = frozenset(exp) | {len(cur) + 2 * j + 1
                                               for j, e in enumerate(here_exp) if e}
-            # A heredoc on `done`, `fi` or `esac` feeds the whole compound command.
+            # One on `done`, `fi` or `esac` feeds the whole compound command. (A
+            # here-string on the runner itself is a piped one, refused as such.)
             seg.heredoc = heredoc_here
-            seg.heredoc_wide = heredoc_here and cur[:1] in (["done"], ["fi"], ["esac"])
+            seg.heredoc_wide = (bool(heredoc_here or herestr)
+                                and cur[:1] in (["done"], ["fi"], ["esac"]))
             segments.append(seg)
             latch.last = seg
             piped = next_piped
         else:
-            if heredoc_here:                   # `{ ...; } <<EOF`, `( ... ) <<EOF`
-                if latch.last is not None:
-                    latch.last.heredoc_wide = True
-                else:
-                    latch.orphan_heredoc = True
             piped = piped or next_piped        # `| (bash)`: the group keeps the pipe
         call_next = calls
         # The first statement of a group in argument position: `git push ($x) --force`.
@@ -2137,10 +2165,11 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
                     glued, prev_op = False, op
                 continue
             prev_op = None
-            # `function f { ...; }`: the body's first command starts after the `{`, as
-            # it does after `f() {` (whose `(` already ends the segment).
-            if piece == "{" and len(cur) == 2 and cur[0] == "function":
-                close(False)
+            # `function f { ...; }` and `coproc NAME { ...; }`: the body's first command
+            # starts after the `{`, as it does after `f() {` (whose `(` already ends the
+            # segment). A pipe into the coprocess feeds the body.
+            if piece == "{" and len(cur) == 2 and cur[0] in ("function", "coproc"):
+                close(piped if cur[0] == "coproc" else False)
                 continue
             piece = piece.lstrip(_LEAD_GROUP_CHARS)
             if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
@@ -2343,7 +2372,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # bash <<EOF`): every command of this text is fed after all. Check them, and
             # expand their scripts again as fed ones.
             heredoc = _heredoc_check(text, segments, lenient + lenient_runs, lenient_fed,
-                                     orphan, True)
+                                     False, True)
             expanded = _expand_scripts(segments, _depth, outer_expanded, True)[0]
         segments = expanded
     # Lenient segments skip the inline split: with the quotes deleted, the script
