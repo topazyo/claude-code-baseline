@@ -29,14 +29,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 369
+FP_FLOOR = 376
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 752
+BLOCK_FLOOR = 772
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -829,6 +829,65 @@ CASES = [
      "pwsh -c 'Write-Output \"<# not a comment #>\"'", A, ()),
     ("fp pwsh script after a block comment", "pwsh -c '<# list #> Get-ChildItem'", A, ()),
     ("fp a long cmd /c echo", "cmd /c echo " + "word " * 780, A, ()),
+    # PowerShell separates words on Unicode spaces (see _PS_SPACES and SPACE_CASES), so a
+    # pwsh script reached from bash is read that way too; bash itself does not.
+    ("pwsh script with a no-break space", "pwsh -c 'git push" + chr(0xA0) + "--force'", B, ()),
+    ("pwsh script with an em space", "pwsh -c 'rm" + chr(0x2003) + "-rf ~'", B, ()),
+    ("powershell -Command script with an ideographic space",
+     "powershell -Command 'git" + chr(0x3000) + "push --force'", B, ()),
+    ("cmd /c pwsh script with a no-break space",
+     "cmd /c pwsh -c 'git push" + chr(0xA0) + "--force'", B, ()),
+    ("wsl pwsh script with a no-break space",
+     "wsl pwsh -c 'git push" + chr(0xA0) + "--force'", B, ()),
+    ("pwsh script in a bash script, with a no-break space",
+     "bash -c \"pwsh -c 'git push" + chr(0xA0) + "--force'\"", B, ()),
+    ("pwsh script in a pwsh script, with a no-break space",
+     "pwsh -c \"pwsh -c 'git push" + chr(0xA0) + "--force'\"", B, ()),
+    ("pwsh script block with a no-break space",
+     "pwsh -c '& {git" + chr(0xA0) + "push --force}'", B, ()),
+    ("pwsh else block with a no-break space",
+     "pwsh -c 'if (1) { $x = 1 } else { git push" + chr(0xA0) + "--force }'", B, ()),
+    ("pwsh grouped argument after a no-break space",
+     "pwsh -c 'git push" + chr(0xA0) + "(\"--force\")'", B, ()),
+    ("pwsh script after a block comment, with a no-break space",
+     "pwsh -c '<#x#>git push" + chr(0xA0) + "--force'", B, ()),
+    ("pwsh script in a substitution, with U+180E",
+     "echo \"$(pwsh -c 'git push" + chr(0x180E) + "--force')\"", B, ()),
+    ("second pwsh statement in a substitution, with U+180E",
+     "echo \"$(pwsh -c 'Write-Output hi;git push" + chr(0x180E) + "--force')\"", B, ()),
+    ("fp pwsh script with a no-break space between harmless words",
+     "pwsh -c 'Write-Output" + chr(0xA0) + "hello'", A, ()),
+    ("fp pwsh git status with a no-break space", "pwsh -c 'git" + chr(0xA0) + "status'", A, ()),
+    ("fp pwsh string holding a no-break space",
+     "pwsh -c 'Write-Output \"a" + chr(0xA0) + "b\"'", A, ()),
+    # An escape's value is a literal character: the command word is `git<NBSP>push`.
+    ("fp pwsh escaped no-break space inside the command word",
+     "pwsh -c 'git`u{a0}push --force'", A, ()),
+    ("fp pwsh escaped no-break space inside rm's word", "pwsh -c 'rm`u{a0}-rf ~'", A, ()),
+    ("fp bash keeps a no-break space inside a word",
+     "bash -c 'git push" + chr(0xA0) + "--force'", A, ()),
+    ("fp substitution with U+180E in an echo", "echo \"$(echo a" + chr(0x180E) + "b)\"", A, ()),
+    # Accepted costs: the spaces are read before escapes are decoded, so a backtick before
+    # a literal no-break space escapes a space instead; and a bash script string in a pwsh
+    # script is split on it, though bash keeps it inside the word. The first row is also
+    # the only one that needs the context-free decode of the spaced text: if its cost is
+    # removed, pin that reading with another row. The quote-blind pass splits a bash
+    # substitution on U+180E as it has always split on the other _PS_SPACES characters.
+    ("fp cost: pwsh backtick before a literal no-break space",
+     "pwsh -c 'git`" + chr(0xA0) + "push --force'", B, ()),
+    ("fp cost: bash script string in a pwsh script with a no-break space",
+     "pwsh -c 'bash -c \"git push" + chr(0xA0) + "--force\"'", B, ()),
+    ("fp cost: bash substitution split on U+180E",
+     "echo \"$(git" + chr(0x180E) + "push" + chr(0x180E) + "--force)\"", B, ()),
+    # The quote-blind pass keeps U+180E inside its word too (pwsh 7 does): a command
+    # word glued by it to a $ word is still an expansion in command position.
+    ("substitution: a command word glued to a $ word by U+180E",
+     "echo \"$(x" + chr(0x180E) + "$CMD)\"", B, ()),
+    ("pwsh script with an odd quote: a command word glued to a $ word by U+180E",
+     "pwsh -c 'x" + chr(0x180E) + "$CMD \"q'", B, ()),
+    # A backtick escape in the spaced text is decoded too.
+    ("pwsh script with a no-break space and an escaped dash",
+     "pwsh -c 'git push" + chr(0xA0) + "-`-force'", B, ()),
     ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
      ("status ; echo",)),
 
@@ -904,6 +963,8 @@ PS_CASES = [
     ("ps a10 backslash before @", "curl.exe 'http://localhost\\@evil.example/'", B, ()),
     ("ps a10 double backslash before @", "curl.exe 'http://localhost\\\\@evil.example/'", B, ()),
     ("ps a10 NBSP before @", "curl.exe http://localhost\u00a0@evil.example/", B, ()),
+    ("ps substitution: a command word glued to a $ word by U+180E",
+     "echo \"$(x" + chr(0x180E) + "$CMD)\"", B, ()),
     ("ps fp here-string commit with apostrophe",
      "git commit -m @'\nFix the parser\n\nIt's quote-aware now.\n'@", A, ()),
     ("ps fp expandable here-string commit",
@@ -1582,6 +1643,15 @@ SPACE_CASES = [
     ("context-free reading of the spaced text: '...'", "powershell",
      "Write-Output" + _NBSP + "'a`tb'", [["write-output", "a\tb"]], []),
 ] + [
+    (f"U+{ord(c):04X} separates words in a pwsh script from bash", "bash",
+     "pwsh -c 'Write-Output" + c + "hello'", [["write-output", "hello"]], [])
+    for c in m._PS_SPACES
+] + [
+    (f"U+{ord(c):04X} separates words in a pwsh script in a substitution", "bash",
+     "echo \"$(pwsh -c 'Write-Output hi;Write-Output" + c + "hello')\"",
+     [["write-output", "hello"]], [])
+    for c in m._PS_SPACES
+] + [
     ("bash reads a no-break space as part of a word", "bash",
      "echo" + _NBSP + "hello", [["echo" + _NBSP + "hello"]], [["echo", "hello"]]),
     ("a no-break space inside a string stays in its word", "powershell",
@@ -1754,6 +1824,22 @@ def _dense_grouped_pwsh_payload():
         if len(out) + len(unit) > m._MAX_INSPECT_LEN:
             return out
         out, i = out + unit, i + 1
+
+
+def _nbsp_at_every_level(payload):
+    """A Bash payload of `pwsh -c '...'; ` units with every space inside each unit's
+    script a no-break space: each pwsh level gets its spaced reading."""
+    head = "pwsh -c '"
+    return "; ".join(head + u[len(head):].replace(" ", chr(0xA0)) if u.startswith(head)
+                     else u for u in payload.split("; "))
+
+
+def _dense_payload_nbsp_innermost():
+    """_dense_grouped_pwsh_payload with no-break spaces in its innermost script only."""
+    nb = chr(0xA0)
+    return (_dense_grouped_pwsh_payload()
+            .replace("& { gci (", "&" + nb + "{" + nb + "gci" + nb + "(")
+            .replace(") `t }", ")" + nb + "`t" + nb + "}").replace("a b", "a" + nb + "b"))
 
 
 def _runner_budget_used(shell, text):
@@ -2107,6 +2193,17 @@ STRUCT_CASES = [
     ("runner budget: a 4 KB three-level nested pwsh script uses under half the cap",
      lambda: _runner_budget_used("powershell", _nested_pwsh_payload())
      < m._MAX_RUNNER_CHARS // 2, True),
+    # From bash, a pwsh script with Unicode spaces gets a spaced reading at each level.
+    ("runner budget: no-break spaces at every pwsh level (Bash) are not refused",
+     lambda: m.evaluate(_nbsp_at_every_level(_nested_pwsh_payload())), []),
+    ("runner budget: no-break spaces at every pwsh level (Bash) use under half the cap",
+     lambda: _runner_budget_used("bash", _nbsp_at_every_level(_nested_pwsh_payload()))
+     < m._MAX_RUNNER_CHARS // 2, True),
+    # Accepted cost, as for the PowerShell row above: the dense payload with no-break
+    # spaces in its innermost script reaches the cap from bash too, and is refused.
+    ("fp cost: runner budget: the dense payload with no-break spaces (Bash) is refused",
+     lambda: (m.evaluate(_dense_payload_nbsp_innermost()) or [""])[0]
+     .startswith("uninspectable command (Windows runner scripts too long"), True),
     ("switch -c", lambda: m._ps_switch("-c"), "command"),
     ("switch /c", lambda: m._ps_switch("/c"), "command"),
     ("switch --command", lambda: m._ps_switch("--command"), "command"),
