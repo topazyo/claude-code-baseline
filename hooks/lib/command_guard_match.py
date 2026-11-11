@@ -2040,12 +2040,20 @@ def _lenient_words(line: str):
     the quotes makes every separator on the line visible, so a command that bash would
     run is inspected even where the quote scanner took it for part of a string -- the
     scanner does not model comments, the fresh quoting context inside "$(...)", or
-    heredoc bodies, and a divergence there must not become a bypass. Every one of
-    _PS_SPACES separates words here too, as it does in a pwsh script the line may run:
-    str.split() covers all of them but U+180E, which Python no longer counts as a space.
+    heredoc bodies, and a divergence there must not become a bypass.
+
+    Returns a list of word lists, one per reading. str.split() separates words on every
+    one of _PS_SPACES but U+180E, which Python no longer counts as a space; a line with
+    U+180E is ALSO read with it a separator, as a pwsh script the line may run reads
+    it on Windows PowerShell 5.1 with an older .NET. The reading that keeps it inside
+    its word stays (pwsh 7 does that), so `x<U+180E>$CMD` is still one command word.
     """
-    resolved = re.sub(r"\\(.)", r"\1", line)
-    return resolved.replace("'", "").replace('"', "").translate(_PS_AS_SPACE).split()
+    bare = re.sub(r"\\(.)", r"\1", line).replace("'", "").replace('"', "")
+    out = [bare.split()]
+    spaced = bare.translate(_PS_AS_SPACE).split()
+    if spaced != out[0]:
+        out.append(spaced)
+    return out
 
 
 # Characters str.splitlines() treats as line breaks but bash reads as part of a word:
@@ -2079,7 +2087,8 @@ _AS_IN_WORD = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\x01"))
 # a quoted string stays one word, and the extra splitting there only adds segments.
 # The readings that keep one inside its word stay, so a command word glued by one to
 # a $ word (Write-Output, NBSP, $env:PATH) is still blocked as an expansion in command
-# position.
+# position. The one exception is the quote-blind pass (_lenient_words): str.split()
+# has always split there on every one of them but U+180E, which keeps both readings.
 _PS_SPACES = "".join(map(chr, (0xA0, 0x1680, 0x180E, *range(0x2000, 0x200B),
                                0x202F, 0x205F, 0x3000)))
 _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
@@ -2136,7 +2145,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # state: a desync that leaves the scanner inside a quote also stops it
             # joining `git push \` + newline + `--force`, which bash still joins.
             for line in dict.fromkeys(physical + _cont_chains(physical)):
-                for toks in _words_to_segments(_lenient_words(line)):
+                for toks in (t for words in _lenient_words(line)
+                             for t in _words_to_segments(words)):
                     toks.ps_tool = ps_tool
                     lenient.append(toks)
                     lenient.extend(_lenient_inline(toks))

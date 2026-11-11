@@ -36,7 +36,7 @@ FP_FLOOR = 376
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 767
+BLOCK_FLOOR = 771
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -874,6 +874,15 @@ CASES = [
      "pwsh -c 'git`" + chr(0xA0) + "push --force'", B, ()),
     ("fp cost: bash script string in a pwsh script with a no-break space",
      "pwsh -c 'bash -c \"git push" + chr(0xA0) + "--force\"'", B, ()),
+    # The quote-blind pass keeps U+180E inside its word too (pwsh 7 does): a command
+    # word glued by it to a $ word is still an expansion in command position.
+    ("substitution: a command word glued to a $ word by U+180E",
+     "echo \"$(x" + chr(0x180E) + "$CMD)\"", B, ()),
+    ("pwsh script with an odd quote: a command word glued to a $ word by U+180E",
+     "pwsh -c 'x" + chr(0x180E) + "$CMD \"q'", B, ()),
+    # A backtick escape in the spaced text is decoded too.
+    ("pwsh script with a no-break space and an escaped dash",
+     "pwsh -c 'git push" + chr(0xA0) + "-`-force'", B, ()),
     ("extraPattern spanning a repeated segment", "git status; rm x; git status; echo hi", B,
      ("status ; echo",)),
 
@@ -949,6 +958,8 @@ PS_CASES = [
     ("ps a10 backslash before @", "curl.exe 'http://localhost\\@evil.example/'", B, ()),
     ("ps a10 double backslash before @", "curl.exe 'http://localhost\\\\@evil.example/'", B, ()),
     ("ps a10 NBSP before @", "curl.exe http://localhost\u00a0@evil.example/", B, ()),
+    ("ps substitution: a command word glued to a $ word by U+180E",
+     "echo \"$(x" + chr(0x180E) + "$CMD)\"", B, ()),
     ("ps fp here-string commit with apostrophe",
      "git commit -m @'\nFix the parser\n\nIt's quote-aware now.\n'@", A, ()),
     ("ps fp expandable here-string commit",
