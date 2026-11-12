@@ -2424,13 +2424,53 @@ _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
 # Characters after which a `#` starts a bash comment (it must start a word).
 _COMMENT_AFTER = set(" \t\n;&|()<>")
 # Reserved words that open (and close) a compound command: a pipe before one feeds every
-# command inside it (see _bash_substitutions).
-_BASH_OPEN_WORDS = {"{", "if", "while", "until", "for", "select", "case"}
-_BASH_CLOSE_WORDS = {"}", "fi", "done", "esac"}
+# command inside it (see _bash_substitutions). `case` and `esac` are read on their own.
+_BASH_OPEN_WORDS = {"{", "if", "while", "until", "for", "select"}
+_BASH_CLOSE_WORDS = {"}", "fi", "done"}
+# Reserved words a command follows, so a reserved word may come next (`! case ...`).
+_BASH_LEAD_WORDS = {"{", "if", "while", "until", "then", "do", "else", "elif", "!", "time",
+                    "coproc"}
 _BASH_WORD_RE = re.compile(r"[^\s;&|()<>'\"`$\\]+")
+# The readings of _bash_substitutions (all four) and _ps_subexpressions (the first
+# three); callers judge the bodies of every one.
+_SCAN_READINGS = ("strict", "open", "hash", "eager")
 
 
-def _bash_substitutions(text: str, permissive: bool = False):
+def _heredoc_word(text: str, j: int):
+    """(delimiter, quoted, end) for the heredoc word at text[j], as bash reads it: the
+    word ends at an unquoted blank or operator character, quotes and backslashes are
+    removed (`E\\ O`, `'E O'`, `"E\\"F"`; `$'...'` decoded), and any of them makes the
+    body literal. An empty quoted word (`<<''`) ends at an empty line."""
+    n, out, quoted = len(text), [], False
+    while j < n and text[j] not in " \t\n;&|()<>":
+        c = text[j]
+        if c == "\\":
+            quoted = True
+            out.append(text[j + 1:j + 2])
+            j += 2
+        elif c in "'\"" or (c == "$" and text[j + 1:j + 2] in ("'", '"')):
+            quoted, ansi = True, c == "$" and text[j + 1] == "'"
+            if c == "$":
+                j += 1
+                c = text[j]
+            j += 1
+            while j < n and text[j] != c:
+                if text[j] == "\\" and j + 1 < n and ansi:
+                    s, j = _ansi_escape(text, j)
+                    out.append(s)
+                    continue
+                if text[j] == "\\" and j + 1 < n and c == '"' and text[j + 1] in '$`"\\\n':
+                    j += 1
+                out.append(text[j])
+                j += 1
+            j += 1
+        else:
+            out.append(c)
+            j += 1
+    return "".join(out), quoted, min(j, n)
+
+
+def _bash_substitutions(text: str, reading: str = "strict"):
     """(bodies, uncommented) for bash text: (body, fed) for every command substitution
     bash runs in it (`$(...)`, backticks, `<(...)` / `>(...)`), at every nesting level,
     and the text with its `#` comments removed (None when it has none).
@@ -2439,10 +2479,15 @@ def _bash_substitutions(text: str, permissive: bool = False):
     `$(` body starts a fresh quoting context (`"$(pwsh -c 'pwsh -c ''x''')"`), a word
     starting with `#` is a comment to the line's end (`C:\\x\\' ; ... #'`; not right after
     a substitution or `${...}`, which the word goes on past), and a heredoc's lines are
-    its body (literal for a quoted delimiter; for a bare one, only `\\`, `$(`, `${` and
-    backticks count). Inside `${...}` only quotes, `\\`, `$(`, `${`, backticks and braces
-    count; inside arithmetic (`((...))`, `$((...))`) there is no comment or heredoc; a
-    `case` open in a `$(` body makes an unmatched `)` a pattern's end, not the body's.
+    its body (literal for a quoted delimiter, read with its quoting: see _heredoc_word;
+    for a bare one, only `\\`, `$(`, `${` and backticks count). Inside `${...}` only
+    quotes, `\\`, `$(`, `${`, backticks, braces and process substitutions count; inside
+    arithmetic (`((...))`, `$((...))`, `$[...]`) there is no comment, heredoc or reserved
+    word, and a '...' only hides the end, not a substitution. A reserved word counts only
+    where a command starts (after `;` `&` `|` a line break `(` `)` or one of
+    _BASH_LEAD_WORDS, or a `function` name): `case` opens a case, whose `|` between
+    patterns is no pipe and whose pattern's `)` ends neither a body nor a subshell, and
+    `esac` closes it there or as a pattern's first word.
     A backtick body runs to the next unescaped backtick, with `\\$` `` \\` `` and `\\\\`
     (and `\\"` inside "...") unescaped, as bash reads it; its own substitutions are found
     when it is judged. Each `$(` body comes back with its direct substitutions replaced
@@ -2452,18 +2497,23 @@ def _bash_substitutions(text: str, permissive: bool = False):
 
     fed: the substitution is expanded for a command after a `|` in its pipeline (or
     inside such a body), whose stdin is the pipe. `;` `&` `&&` `||` and a line break end
-    the pipeline, but not inside a group, subshell or compound command the pipe feeds
-    (`x | { a; b "$(c)"; }`, `x | while ...; do ...; done`).
+    the pipeline, but not right after the `|` (blank lines and comments may follow it),
+    nor inside a group, subshell or compound command the pipe feeds (`x | { a; b "$(c)";
+    }`, `x | while ...; do ...; done`).
 
-    permissive: a reading for the decisions that hide text, so a wrong one fails toward
-    reading more: no comment is skipped (none is returned), and every heredoc body is
-    read as a bare delimiter's. Callers judge the bodies of both readings."""
+    reading: each decision that hides text has a reading that decides it the other way,
+    and callers judge the bodies of every one (see _bash_bodies). "strict" is bash's.
+    "open" skips no comment (none is returned), reads every heredoc body as a bare
+    delimiter's, and reads no `case`, so any unmatched `)` ends a body. "hash" starts a
+    comment at every `#` outside a word's quotes and arithmetic. "eager" opens a case at
+    any word `case` that starts a word, where a command starts or not."""
     bodies, comments = [], []
+    open_, hash_, eager = (reading == r for r in _SCAN_READINGS[1:])
 
     def frame(kind, start, parent, **extra):
-        f = {"kind": kind, "start": start, "quote": "", "depth": 0, "kw": 0, "cases": 0,
-             "children": [], "pipe": False, "pipe_nest": 0,
-             "fed": bool(parent) and (parent["fed"] or parent["pipe"])}
+        f = {"kind": kind, "start": start, "quote": "", "depth": 0, "kw": 0, "cases": [],
+             "children": [], "pipe": False, "pipe_nest": 0, "wait": False, "cmd": True,
+             "lead": "", "fed": bool(parent) and (parent["fed"] or parent["pipe"])}
         f.update(extra)
         return f
 
@@ -2504,7 +2554,10 @@ def _bash_substitutions(text: str, permissive: bool = False):
                 f["quote"] = ""
             i += 2 if c == "\\" else 1
             continue
+        if f["wait"] and c not in " \t\n#" and not text.startswith("\\\n", i):
+            f["wait"] = False                          # the command after a `|` starts
         if c == "\\":
+            f["cmd"] = f["cmd"] and text.startswith("\\\n", i)
             i += 2
             continue
         if c == "`":
@@ -2514,18 +2567,21 @@ def _bash_substitutions(text: str, permissive: bool = False):
             esc = r"\\([$`\\\"])" if q == '"' else r"\\([$`\\])"
             bodies.append((re.sub(esc, r"\1", text[i + 1:min(j, n)]), f["fed"] or f["pipe"]))
             f["children"].append((i, min(j + 1, n), "`"))
+            f["cmd"] = False
             i = closed_at = j + 1
             continue
-        if c == "$" and text.startswith("(", i + 1):
-            stack.append(frame("$(", i + 2, f, open=i, arith=text.startswith("((", i + 1)))
+        if c == "$" and text[i + 1:i + 2] in ("(", "[", "{"):
+            f["cmd"] = False
+            if text[i + 1] == "(":
+                stack.append(frame("$(", i + 2, f, open=i, arith=text.startswith("((", i + 1)))
+            elif text[i + 1] == "[":
+                stack.append(frame("$[", i + 2, f))      # arithmetic, as $((...))
+            else:
+                stack.append(frame("${", i + 2, f, indq=q in ('"', "a'") or kind == "H"))
             i += 2
             continue
-        if c == "$" and text.startswith("{", i + 1):
-            stack.append(frame("${", i + 2, f, indq=q == '"' or kind == "H"))
-            i += 2
-            continue
-        if q == '"':
-            if c == '"':
+        if q in ('"', "a'"):                   # "a'": a '...' in arithmetic hides no $(
+            if c == q[-1]:
                 f["quote"] = ""
             i += 1
             continue
@@ -2535,6 +2591,10 @@ def _bash_substitutions(text: str, permissive: bool = False):
         if kind == "${":
             if c == '"' or (c == "'" and not f["indq"]):
                 f["quote"] = c
+            elif c in "<>" and text.startswith("(", i + 1) and not f["indq"]:
+                stack.append(frame("$(", i + 2, f, open=i))   # process substitution
+                i += 2
+                continue
             elif c == "{":
                 f["depth"] += 1
             elif c == "}":
@@ -2545,54 +2605,102 @@ def _bash_substitutions(text: str, permissive: bool = False):
                     closed_at = i + 1
             i += 1
             continue
-        arith = f.get("arith", False) or kind == "(("
+        if c in " \t":
+            i += 1
+            continue
+        arith = f.get("arith", False) or kind in ("((", "$[")
         word_start = (i == f["start"] or text[i - 1] in _COMMENT_AFTER) and i != closed_at
         nest = f["depth"] + f["kw"]
+        cmd = f["cmd"]
+        case = f["cases"][-1] if f["cases"] and f["cases"][-1][0] == f["depth"] else None
         if c in "'\"":
-            f["quote"] = c
+            f["quote"] = "a'" if arith and c == "'" else c
+            f["cmd"] = False
+            if case:
+                case[2] = False
         elif c == "$" and text.startswith("'", i + 1):
-            f["quote"] = "$'"
+            f["quote"], f["cmd"] = "a'" if arith else "$'", False
+            if case:
+                case[2] = False
             i += 1
-        elif c == "#" and word_start and not arith and not permissive:
+        elif c == "#" and not arith and not open_ and (hash_ or word_start):
             j = text.find("\n", i)
             j = n if j < 0 else j
             comments.append((i, j))
             i = j
             continue
-        elif c in "<>" and text.startswith("(", i + 1) and not arith:
+        elif arith:                     # no comment, heredoc, pipe or reserved word inside
+            if c == ("[" if kind == "$[" else "("):
+                f["depth"] += 1
+            elif c == ("]" if kind == "$[" else ")"):
+                if f["depth"]:
+                    f["depth"] -= 1
+                elif kind == "$[":
+                    pop(i)
+                    closed_at = i + 1
+                elif kind in ("$(", "(("):
+                    pop(i, i + 1)
+                    if kind == "((" and text.startswith(")", i + 1):
+                        i += 1                         # `((...))` ends a word: `#` may follow
+                    else:
+                        closed_at = i + 1
+        elif case and case[1] == "pattern":            # `case w in` until a pattern's `)`
+            if c == ")":
+                case[1] = "body"
+                f["cmd"] = True
+            elif c == "(" and case[2]:
+                case[2] = False                        # a pattern's optional opening paren
+            elif c not in "|;\n":                      # `|` between patterns: no pipe
+                m = _BASH_WORD_RE.match(text, i) if word_start else None
+                if (m and case[2] and m.group() == "esac"
+                        and (m.end() == n or text[m.end()] in _COMMENT_AFTER)):
+                    f["cases"].pop()
+                    f["kw"] = max(f["kw"] - 1, 0)
+                    f["cmd"] = False
+                case[2] = False
+                if m:
+                    i = m.end()
+                    continue
+        elif c in "<>" and text.startswith("(", i + 1):
+            f["cmd"] = False
             stack.append(frame("$(", i + 2, f, open=i))   # process substitution
             i += 2
             continue
-        elif c == "(" and word_start and text.startswith("((", i) and not arith:
+        elif c == "(" and word_start and text.startswith("((", i):
             stack.append(frame("((", i + 2, f))          # an arithmetic command
             i += 2
             continue
         elif c == "(":
             f["depth"] += 1
+            f["cmd"] = True
         elif c == ")":
+            f["cmd"] = True                            # `f() case ...`
             if f["depth"]:
                 f["depth"] -= 1
-            elif kind == "$(" and f["cases"] and not arith:
-                pass                                     # a case pattern's end
-            elif kind in ("$(", "(("):
+            elif kind == "$(":
                 pop(i, i + 1)
-                if kind == "((" and text.startswith(")", i + 1):
-                    i += 1
                 closed_at = i + 1
-        elif arith:
-            pass
         elif c == "|" and not text.startswith("||", i):  # `|` or `|&`: a pipe
-            f["pipe"], f["pipe_nest"] = True, nest
+            f["pipe"], f["pipe_nest"], f["wait"], f["cmd"] = True, nest, True, True
             i += 2 if text.startswith("|&", i) else 1
             continue
         elif (c in ";|" or (c == "&" and text[i - 1:i] not in ("<", ">")
                              and text[i + 1:i + 2] != ">")
               or (c == "\n" and not pending)):         # the pipeline ends (not `>&`, `&>`)
+            f["cmd"] = True
+            if c == "\n" and f["wait"]:                # a `|` goes on past a line break
+                i += 1
+                continue
             if nest <= f["pipe_nest"]:
                 f["pipe"] = False
+            if c == ";" and case and case[1] == "body" and text.startswith((";;", ";&"), i):
+                case[1], case[2] = "pattern", True     # `;;` `;&` `;;&`: the next pattern
+                i += 3 if text.startswith(";;&", i) else 2
+                continue
             i += 2 if text.startswith(("&&", "||", ";;"), i) else 1
             continue
         elif text.startswith("<<<", i):                # a here-string: an ordinary word follows
+            f["cmd"] = False
             i += 3
             continue
         elif text.startswith("<<", i):
@@ -2601,13 +2709,10 @@ def _bash_substitutions(text: str, permissive: bool = False):
             j += strip
             while j < n and text[j] in " \t":
                 j += 1
-            k = j
-            while j < n and text[j] not in " \t\n;&|()<>":
-                j += 1
-            word = text[k:j]
-            delim = re.sub(r"[\\'\"]", "", word)
-            if delim:
-                pending.append((delim, strip, word != delim and not permissive))
+            delim, quoted, j = _heredoc_word(text, j)
+            if delim or quoted:
+                pending.append((delim, strip, quoted and not open_))
+            f["cmd"] = False
             i = j
             continue
         elif c == "\n" and pending:
@@ -2630,23 +2735,40 @@ def _bash_substitutions(text: str, permissive: bool = False):
                 heres.append(len(stack))
                 stack.append(frame("H", start, stack[-1], end=end, after=after,
                                    literal=quoted))
-            if nest <= f["pipe_nest"]:
+            if nest <= f["pipe_nest"] and not f["wait"]:
                 f["pipe"] = False
+            f["cmd"] = True
             i += 1
             continue
-        elif word_start:
-            m = _BASH_WORD_RE.match(text, i)
-            if m and (m.end() == n or text[m.end()] in _COMMENT_AFTER):
-                w = m.group()
-                if w in _BASH_OPEN_WORDS:
-                    f["kw"] += 1
-                    f["cases"] += w == "case"
-                elif w in _BASH_CLOSE_WORDS:
-                    f["kw"] = max(f["kw"] - 1, 0)
-                    f["cases"] = max(f["cases"] - (w == "esac"), 0)
-            if m:
-                i = m.end()
-                continue
+        elif word_start and _BASH_WORD_RE.match(text, i):
+            end = _BASH_WORD_RE.match(text, i).end()
+            if hash_ and "#" in text[i:end]:
+                end = text.index("#", i)               # the comment starts inside the word
+            w = text[i:end] if end == n or text[end] in _COMMENT_AFTER else ""
+            # A command (so a reserved word) may follow `time [-p] [--]`, and a reserved
+            # word the name after `function` or `coproc`.
+            timed = f["lead"] == "time" and w in ("-p", "--")
+            lead, f["lead"] = f["lead"], ("time" if timed else w if cmd and w in (
+                "time", "function", "coproc") else "")
+            if case and case[1] == "subject":
+                if w == "in":
+                    case[1], case[2] = "pattern", True
+            elif (cmd or eager) and w == "case" and not open_:
+                f["cases"].append([f["depth"], "subject", False])
+                f["kw"] += 1
+            elif cmd and w == "esac" and case:
+                f["cases"].pop()
+                f["kw"] = max(f["kw"] - 1, 0)
+            elif cmd and w in _BASH_OPEN_WORDS:
+                f["kw"] += 1
+            elif cmd and w in _BASH_CLOSE_WORDS:
+                f["kw"] = max(f["kw"] - 1, 0)
+            f["cmd"] = ((cmd and (w in _BASH_LEAD_WORDS or timed))
+                        or (lead in ("function", "coproc") and w != "case"))
+            i = end
+            continue
+        else:
+            f["cmd"] = False
         i += 1
     while len(stack) > 1:                              # unterminated: to the text's end
         pop(n)
@@ -2661,15 +2783,21 @@ def _bash_substitutions(text: str, permissive: bool = False):
 
 
 def _bash_bodies(text: str):
-    """(bodies, uncommented): the substitution bodies of both readings of
-    _bash_substitutions, each once, and the strict reading's uncommented text."""
+    """(bodies, uncommented): the substitution bodies of every reading of
+    _bash_substitutions, each once, and the strict reading's uncommented text. A body
+    the strict reading also gives keeps its fed (a case-blind reading reads a `|`
+    between patterns as a pipe)."""
     bodies, uncommented = _bash_substitutions(text)
-    return list(dict.fromkeys(bodies + _bash_substitutions(text, True)[0])), uncommented
+    strict = {body for body, _ in bodies}
+    for reading in _SCAN_READINGS[1:]:
+        bodies += [b for b in _bash_substitutions(text, reading)[0] if b[0] not in strict]
+    return list(dict.fromkeys(bodies)), uncommented
 
 
 def _ps_bodies(text: str):
-    """The subexpression bodies of both readings of _ps_subexpressions, each once."""
-    return list(dict.fromkeys(_ps_subexpressions(text) + _ps_subexpressions(text, True)))
+    """The subexpression bodies of every reading of _ps_subexpressions, each once."""
+    return list(dict.fromkeys(
+        b for r in _SCAN_READINGS[:3] for b in _ps_subexpressions(text, r)))
 
 
 def _subst_body(text: str, f, end: int) -> str:
@@ -2684,19 +2812,21 @@ def _subst_body(text: str, f, end: int) -> str:
     return "".join(out)
 
 
-def _ps_subexpressions(text: str, permissive: bool = False):
+def _ps_subexpressions(text: str, reading: str = "strict"):
     """The body of every $( ) subexpression PowerShell runs in text, at every nesting
     level: in code, in a "..." string and in an @"..."@ here-string, not in a '...' one
     or a comment. One pass that follows PowerShell's quoting, which no reading does
     inside a string: a doubled quote character is one literal character, a backtick
     escapes the next character (`` `$( `` is literal text), a "..." string ends at any
-    of _PS_DQ, a here-string (`@'` or `@"` ending its line, after anything but a word
-    character: `$x=@'`) at a line starting with its closer, ${...} is one variable, and a
-    # starting a word (or <# #>) is a comment. Each body comes back as
-    _bash_substitutions gives one: its direct subexpressions replaced by `$(:)`, so the
-    work stays linear; an unterminated one runs to the end of the text. permissive: the
-    reading for the decisions that hide text (see _bash_substitutions): a here-string
-    opens after any character, and no comment is skipped."""
+    of _PS_DQ, a here-string (`@` and any of _PS_SQ or _PS_DQ ending its line, after
+    anything but a word character: `$x=@'`) at a line starting with any of the same
+    kind's and `@`, ${...} is one variable, and a # starting a word (or <# #>) is a
+    comment. Each body comes back as _bash_substitutions gives one: its direct
+    subexpressions replaced by `$(:)`, so the work stays linear; an unterminated one
+    runs to the end of the text. reading (see _bash_substitutions): "open" opens a
+    here-string after any character and skips no comment; "hash" starts a comment at
+    every # (and <#) outside a string."""
+    open_, hash_ = reading == "open", reading == "hash"
     bodies = []
     stack = [{"kind": "top", "start": 0, "quote": "", "depth": 0, "children": []}]
     i, n = 0, len(text)
@@ -2704,7 +2834,7 @@ def _ps_subexpressions(text: str, permissive: bool = False):
         f = stack[-1]
         kind, q, c = f["kind"], f["quote"], text[i]
         if (q in ("@'", '@"') and (i == 0 or text[i - 1] == "\n")
-                and text.startswith(q[1] + "@", i)):
+                and c in (_PS_SQ if q == "@'" else _PS_DQ) and text.startswith("@", i + 1)):
             f["quote"] = ""                            # a here-string's closer
             i += 2
             continue
@@ -2739,11 +2869,11 @@ def _ps_subexpressions(text: str, permissive: bool = False):
             i += 1
             continue
         word_start = i == f["start"] or text[i - 1] in " \t\r\n;|&(){}"
-        opener = permissive or i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
-        if c == "@" and opener and text[i + 1:i + 2] in ("'", '"'):
+        opener = open_ or i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+        if c == "@" and opener and (text[i + 1:i + 2] in _PS_SQ or text[i + 1:i + 2] in _PS_DQ):
             eol = text.find("\n", i)
             if eol != -1 and not text[i + 2:eol].strip():
-                f["quote"] = "@" + text[i + 1]
+                f["quote"] = "@'" if text[i + 1] in _PS_SQ else '@"'
                 i = eol + 1
                 continue
         if c in _PS_SQ:
@@ -2756,11 +2886,11 @@ def _ps_subexpressions(text: str, permissive: bool = False):
                 j += 2 if text[j] == "`" else 1
             i = j + 1
             continue
-        elif c == "<" and word_start and text.startswith("<#", i) and not permissive:
+        elif c == "<" and text.startswith("<#", i) and not open_ and (hash_ or word_start):
             j = text.find("#>", i + 2)
             i = n if j < 0 else j + 2
             continue
-        elif c == "#" and word_start and not permissive:
+        elif c == "#" and not open_ and (hash_ or word_start):
             j = text.find("\n", i)
             i = n if j < 0 else j
             continue

@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 509
+FP_FLOOR = 518
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1192
+BLOCK_FLOOR = 1276
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3260,7 +3260,85 @@ for _sub_tag, _sub_pay in (("pwsh", 'echo "$(' + _SUB_P + ')"'), ("eval", 'echo 
         (f"{_sub_tag} after << in arithmetic", "(( y = 1 <<'2' ))" + _SUB_NL + _sub_pay),
         (f"{_sub_tag} after << in $((...))", "y=$(( 1 <<'2' ))" + _SUB_NL + _sub_pay),
     ]
-CASES += [(f"subst: {label}", cmd, B, ()) for label, cmd in _SUB_ROWS]
+# Rows main blocks too, through other readings (top-level, quote-blind): they keep the
+# substitution readings from regressing but do not pin them; the helper checks below do.
+_SUB_CONTROLS = {
+    "nested quoted substitutions", "unterminated quoted substitution",
+    "a bare heredoc's quoted substitution", "process substitution",
+    "a comment hiding a continuation", "a #' comment line before eval",
+    "a #' comment line before pwsh",
+}
+# Reserved words count only where a command starts: `case` opens a case there (after a
+# separator, `(`, `!`, `time [-p] [--]`, `coproc [NAME]`, `f()`, `function f`), and its
+# pattern's `)` and `|` end no body and make no pipe. {E} is the payload.
+_SUB_CASE_ROWS = [
+    ("esac as an argument", 'echo "$(case a in z) echo esac;; a) {E};; esac)"'),
+    ("case in a subshell", 'echo "$( (case a in a) :;; esac); {E})"'),
+    ("esac as a pattern after |", 'echo "$(case esac in x|esac) {E};; esac)"'),
+    ("case as an argument", 'echo "$(echo case) it' + "'s $({E}) ok'" + '"'),
+    ("case after time", 'echo "$(time case a in a) :;; esac; {E})"'),
+    ("case after time -p", 'echo "$(time -p case a in a) :;; esac; {E})"'),
+    ("case after time -p --", 'echo "$(time -p -- case a in a) :;; esac; {E})"'),
+    ("case after !", 'echo "$(! case a in a) :;; esac; {E})"'),
+    ("case after f()", 'echo "$(f() case a in a) :;; esac; {E})"'),
+    ("case after function f", 'echo "$(function f case a in a) :;; esac; {E})"'),
+    ("case after coproc", 'echo "$(coproc case a in a) :;; esac; {E})"'),
+    ("case after coproc NAME", 'echo "$(coproc N case a in a) :;; esac; {E})"'),
+    ("case with ;&", 'echo "$(case a in a) :;& b) :;; esac; {E})"'),
+    ("case with ;;&", 'echo "$(case a in a) :;;& b) :;; esac; {E})"'),
+    ("case on lines",
+     'echo "$(case a in' + _SUB_NL + "a) :" + _SUB_NL + "esac" + _SUB_NL + '{E})"'),
+    ("nested case", 'echo "$(case a in a) case b in b) :;; esac;; esac; {E})"'),
+]
+# A heredoc's delimiter is read with its quoting (`E\ O`, `''`, `$'...'`, `"E\"F"`);
+# inside arithmetic a '...' hides no substitution; `((...))` ends a word.
+_SUB_HD = "echo " + '"$({E})" # it' + "'s"
+_SUB_WORD_ROWS = [
+    ("heredoc delimiter with an escaped blank",
+     "cat <<E" + _SUB_BS + " O" + _SUB_NL + "E" + _SUB_NL + "it's" + _SUB_NL + "E O" + _SUB_NL
+     + _SUB_HD),
+    ("heredoc delimiter quoted with a blank",
+     "cat <<'E O'" + _SUB_NL + "E" + _SUB_NL + "it's" + _SUB_NL + "E O" + _SUB_NL + _SUB_HD),
+    ("empty quoted heredoc delimiter",
+     "cat <<''" + _SUB_NL + "it's" + _SUB_NL + _SUB_NL + _SUB_HD),
+    ("ANSI-C heredoc delimiter",
+     "cat <<$'E" + _SUB_BS + "x41'" + _SUB_NL + "E" + _SUB_NL + "it's" + _SUB_NL + "EA" + _SUB_NL
+     + _SUB_HD),
+    ("heredoc delimiter with an escaped quote",
+     'cat <<"E' + _SUB_BS + '"F"' + _SUB_NL + "E" + _SUB_NL + "it's" + _SUB_NL + 'E"F' + _SUB_NL
+     + _SUB_HD),
+    ("escaped-blank heredoc in a substitution",
+     'echo "$(cat <<E' + _SUB_BS + " O" + _SUB_NL + "E" + _SUB_NL + "it's" + _SUB_NL + "E O"
+     + _SUB_NL + '{E})"'),
+    ("a '...' in $((...))", "echo $(( ' $({E}) ' ))"),
+    ("a '...' in quoted $((...))", 'echo "$(( ' + "' $({E}) '" + ' ))"'),
+    ("a '...' in ((...))", "(( ' $({E}) ' ))"),
+    ("a '...' in $[...]", "echo $[ ' $({E}) ' ]"),
+    ("a '...' in quoted $[...]", 'echo "$[ ' + "' $({E}) '" + ' ]"'),
+    ("a #' comment after ((...))", "(( 1 ))#'" + _SUB_NL + 'echo "$({E})" # ' + "'"),
+    ("process substitution in ${...}", "echo ${x:-<({E})}"),
+]
+for _sub_tag, _sub_pay in (("eval", _SUB_E), ("pwsh", _SUB_P)):
+    _SUB_ROWS += [(f"{label} ({_sub_tag})", cmd.replace("{E}", _sub_pay))
+                  for label, cmd in _SUB_CASE_ROWS + _SUB_WORD_ROWS]
+    _SUB_CONTROLS |= {f"{label} ({_sub_tag})" for label, _ in _SUB_WORD_ROWS
+                      if "$[" not in label and "in a substitution" not in label}
+# A pipe goes on past a line break, blank lines and a comment line.
+for _sub_tag in ("bash", "pwsh"):
+    _SUB_ROWS += [
+        (f"{_sub_tag} after a pipe and a line break",
+         "echo '" + _SUB_B + "' |" + _SUB_NL + 'cat "$(' + _sub_tag + ')"'),
+        (f"{_sub_tag} after a pipe and a comment",
+         "echo '" + _SUB_B + "' | # c" + _SUB_NL + 'cat "$(' + _sub_tag + ')"'),
+        (f"{_sub_tag} after a pipe and blank lines",
+         "echo '" + _SUB_B + "' |" + _SUB_NL + _SUB_NL + 'cat "$(' + _sub_tag + ')"'),
+        (f"{_sub_tag} in backticks after a pipe and a line break",
+         "echo '" + _SUB_B + "' |" + _SUB_NL + 'cat "`' + _sub_tag + '`"'),
+        (f"{_sub_tag} in a group after a pipe and a line break",
+         "echo '" + _SUB_B + "' |" + _SUB_NL + '{ true; cat "$(' + _sub_tag + ')"; }'),
+    ]
+CASES += [(f"subst{' control' if label in _SUB_CONTROLS else ''}: {label}", cmd, B, ())
+          for label, cmd in _SUB_ROWS]
 
 _SUB_PS_ROWS = [
     ("cmd three levels in a subexpression",
@@ -3284,7 +3362,34 @@ _SUB_PS_ROWS = [
      "$x=@\"" + _SUB_NL + "it's" + _SUB_NL + "\"@" + _SUB_NL
      + 'Write-Output "$(cmd /c cmd /c cmd /c ' + _SUB_B + ')"'),
 ]
-PS_CASES += [(f"subst: {label}", cmd, B, ()) for label, cmd in _SUB_PS_ROWS]
+# A here-string opens and closes with typographic quotes too, and a # after an operator
+# or a number may start a comment (read both ways); {P} is the payload.
+_SUB_PS_WORD_ROWS = [
+    ("a typographic here-string opener",
+     "Write-Output @" + chr(0x201C) + _SUB_NL + 'a"b' + _SUB_NL + chr(0x201C) + "@" + _SUB_NL
+     + "Write-Output '" + _SUB_NL + '"@ ' + "'" + _SUB_NL + 'Write-Output "$({P})"  # ' + "'"),
+    ("a typographic here-string closer",
+     'Write-Output @"' + _SUB_NL + "x" + _SUB_NL + chr(0x201D) + "@" + _SUB_NL
+     + "Write-Output '" + _SUB_NL + '"@ ' + "'" + _SUB_NL + 'Write-Output "$({P})"  # ' + "'"),
+    ("a typographic single-quoted here-string",
+     "Write-Output @" + chr(0x2018) + _SUB_NL + "a" + _SUB_NL + chr(0x2019) + "@" + _SUB_NL
+     + 'Write-Output "$({P})"'),
+    ("a #' after a number", "$x=1#'" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+    ("a #' after =", "$x=#'" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+    ("a #' after a cast",
+     "$x=[int]#'" + _SUB_NL + "1" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+    ("a #' after a comma", "$x=1,#'" + _SUB_NL + "2" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+    ("a #' after )", "Write-Output (1)#'" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+]
+for _sub_tag, _sub_pay in (("cmd", "cmd /c cmd /c cmd /c " + _SUB_B),
+                           ("pwsh", "pwsh -c 'pwsh -c ''" + _SUB_B + "'''")):
+    _SUB_PS_ROWS += [(f"{label} ({_sub_tag})", cmd.replace("{P}", _sub_pay))
+                     for label, cmd in _SUB_PS_WORD_ROWS]
+    if _sub_tag == "pwsh":       # main blocks these through its quote-blind reading
+        _SUB_CONTROLS |= {f"{label} ({_sub_tag})" for label, _ in _SUB_PS_WORD_ROWS
+                          if "#'" in label}
+PS_CASES += [(f"subst{' control' if label in _SUB_CONTROLS else ''}: {label}", cmd, B, ())
+             for label, cmd in _SUB_PS_ROWS]
 CASES += [
     # A pwsh script reached from the Bash tool: its subexpressions likewise.
     ("subst: a pwsh script's subexpression",
@@ -3323,6 +3428,13 @@ _SUB_FP_ROWS = [
      'x | while read l; do :; done; cat "$(bash --version)"'),
     ("case in a substitution", "x=$(case $y in a) echo 1;; *) echo 2;; esac)"),
     ("arithmetic and parameter expansions", "y=$(( 1 << 2 )); echo ${#x} ${x#pre} ${x// /_}"),
+    ("a | between case patterns is no pipe", 'case $y in a|b) cat "$(bash --version)";; esac'),
+    ("case as an argument in a substitution", 'echo "$(echo case) and $(date)"'),
+    ("a case pattern in parens", 'echo "$(case $x in (a) echo 1;; esac)"'),
+    ("a case in a loop", 'for f in $(ls); do case "$f" in *.py) echo "$f";; esac; done'),
+    ("a pipe across a line break", "ls |" + _SUB_NL + "grep x"),
+    ("$[...] arithmetic", "echo $[ 3 ]"),
+    ("a process substitution in a default", "echo ${x:-<(sort a)}"),
 ]
 CASES += [(f"fp subst: {label}", cmd, A, ()) for label, cmd in _SUB_FP_ROWS]
 _SUB_PS_FP_ROWS = [
@@ -3334,6 +3446,9 @@ _SUB_PS_FP_ROWS = [
      "Write-Output '$(cmd /c cmd /c cmd /c " + _SUB_B + ")'"),
     ("a here-string commit message",
      "$m=@'" + _SUB_NL + "fix: don't $(do) it" + _SUB_NL + "'@" + _SUB_NL + "git commit -m $m"),
+    ("a # inside a bareword", "Write-Output a#b"),
+    ("a typographic here-string", "$m=@" + chr(0x201C) + _SUB_NL + "x $(Get-Date)" + _SUB_NL
+     + chr(0x201D) + "@" + _SUB_NL + "Write-Output $m"),
 ]
 PS_CASES += [(f"fp subst: {label}", cmd, A, ()) for label, cmd in _SUB_PS_FP_ROWS]
 CASES += [("fp subst: a pwsh script's subexpression",
@@ -3389,7 +3504,7 @@ STRUCT_CASES += [
      lambda: m._bash_substitutions("cat <<-E" + _SUB_NL + "$(x)" + _SUB_NL + "\tE"
                                    + _SUB_NL + "$(y)")[0], [("x", False), ("y", False)]),
     ("subst: the permissive reading reads a quoted heredoc",
-     lambda: m._bash_substitutions("cat <<'E'" + _SUB_NL + "$(x)" + _SUB_NL + "E", True)[0],
+     lambda: m._bash_substitutions("cat <<'E'" + _SUB_NL + "$(x)" + _SUB_NL + "E", "open")[0],
      [("x", False)]),
     ("subst: a here-string is no heredoc",
      lambda: m._bash_substitutions("cat <<<'x'" + _SUB_NL + "$(y)")[0], [("y", False)]),
@@ -3415,7 +3530,91 @@ STRUCT_CASES += [
     ("subst: PowerShell block comment skipped",
      lambda: m._ps_subexpressions("<# $(a) #> $(b)"), ["b"]),
     ("subst: PowerShell permissive reading reads a block comment",
-     lambda: m._ps_subexpressions("<# $(a) #> $(b)", True), ["a", "b"]),
+     lambda: m._ps_subexpressions("<# $(a) #> $(b)", "open"), ["a", "b"]),
+    # Reserved words where a command starts; a case's patterns.
+    ("subst: esac as an argument closes nothing",
+     lambda: m._bash_substitutions('echo "$(case a in z) echo esac;; a) b;; esac)"')[0],
+     [("case a in z) echo esac;; a) b;; esac", False)]),
+    ("subst: a case in a subshell",
+     lambda: m._bash_substitutions('echo "$( (case a in a) :;; esac); b)"')[0],
+     [(" (case a in a) :;; esac); b", False)]),
+    ("subst: esac after | is a pattern",
+     lambda: m._bash_substitutions('echo "$(case esac in x|esac) b;; esac)"')[0],
+     [("case esac in x|esac) b;; esac", False)]),
+    ("subst: case as an argument opens nothing",
+     lambda: m._bash_substitutions('echo "$(echo case) it' + "'s $(b) ok'" + '"')[0],
+     [("echo case", False), ("b", False)]),
+    ("subst: case after coproc NAME",
+     lambda: m._bash_substitutions("$(coproc N case a in a) :;; esac; b)")[0],
+     [("coproc N case a in a) :;; esac; b", False)]),
+    ("subst: case after time -p --",
+     lambda: m._bash_substitutions("$(time -p -- case a in a) :;; esac; b)")[0],
+     [("time -p -- case a in a) :;; esac; b", False)]),
+    ("subst: the strict reading opens no case for an argument",
+     lambda: m._bash_substitutions("$(echo case a in a) b;; esac)")[0],
+     [("echo case a in a", False)]),
+    ("subst: the eager reading opens one at any word",
+     lambda: m._bash_substitutions("$(echo case a in a) b;; esac)", "eager")[0],
+     [("echo case a in a) b;; esac", False)]),
+    ("subst: the open reading opens no case",
+     lambda: m._bash_substitutions("$(case a in a) b;; esac)", "open")[0],
+     [("case a in a", False)]),
+    ("subst: a | between patterns is no pipe",
+     lambda: m._bash_substitutions('case $y in a|b) c "$(d)";; esac')[0], [("d", False)]),
+    ("subst: the strict reading's fed wins for the same body",
+     lambda: m._bash_bodies('case $y in a|b) c "$(d)";; esac'), ([("d", False)], None)),
+    # Heredoc delimiters, read with their quoting.
+    ("subst: heredoc word with an escaped blank",
+     lambda: m._heredoc_word("E" + _SUB_BS + " O x", 0), ("E O", True, 4)),
+    ("subst: heredoc word quoted with a blank",
+     lambda: m._heredoc_word("'E O'", 0), ("E O", True, 5)),
+    ("subst: heredoc word with an escaped quote",
+     lambda: m._heredoc_word('"E' + _SUB_BS + '"F"', 0), ('E"F', True, 6)),
+    ("subst: ANSI-C heredoc word",
+     lambda: m._heredoc_word("$'E" + _SUB_BS + "x41'", 0), ("EA", True, 8)),
+    ("subst: empty quoted heredoc word", lambda: m._heredoc_word("''", 0), ("", True, 2)),
+    ("subst: bare heredoc word", lambda: m._heredoc_word("EOF;", 0), ("EOF", False, 3)),
+    ("subst: partly quoted heredoc word", lambda: m._heredoc_word("E'O'F x", 0), ("EOF", True, 5)),
+    ("subst: a heredoc ends at its whole delimiter",
+     lambda: m._bash_substitutions("cat <<E" + _SUB_BS + " O" + _SUB_NL + "E" + _SUB_NL + "$(a)"
+                                   + _SUB_NL + "E O" + _SUB_NL + "$(b)")[0], [("b", False)]),
+    ("subst: an empty quoted delimiter ends at an empty line",
+     lambda: m._bash_substitutions("cat <<''" + _SUB_NL + "$(a)" + _SUB_NL + _SUB_NL + "$(b)")[0],
+     [("b", False)]),
+    # A pipe goes on past a line break and a comment.
+    ("subst: a pipe goes on past a line break",
+     lambda: m._bash_substitutions("x |" + _SUB_NL + 'y "$(z)"')[0], [("z", True)]),
+    ("subst: a pipe goes on past a comment",
+     lambda: m._bash_substitutions("x | # c" + _SUB_NL + 'y "$(z)"')[0], [("z", True)]),
+    ("subst: the next line after the piped command is not fed",
+     lambda: m._bash_substitutions("x |" + _SUB_NL + "y" + _SUB_NL + 'w "$(v)"')[0],
+     [("v", False)]),
+    # Arithmetic: a '...' hides only the end; `$[...]`; `((...))` ends a word.
+    ("subst: a '...' in $((...)) hides no substitution",
+     lambda: m._bash_substitutions("echo $(( ' $(a) ' ))")[0],
+     [("a", False), ("( ' $(:) ' )", False)]),
+    ("subst: a '...' in $[...] hides no substitution",
+     lambda: m._bash_substitutions("echo $[ ' $(a) ' ]")[0], [("a", False)]),
+    ("subst: a comment after ((...))",
+     lambda: m._bash_substitutions("(( 1 ))#'" + _SUB_NL + "$(a)"),
+     ([("a", False)], "(( 1 ))" + _SUB_NL + "$(a)")),
+    ("subst: a process substitution in ${...}",
+     lambda: m._bash_substitutions("echo ${x:-<(a)}")[0], [("a", False)]),
+    ("subst: the strict reading reads no comment inside a word",
+     lambda: m._bash_substitutions("a=1#'" + _SUB_NL + "$(b) '")[0], []),
+    ("subst: the hash reading starts one at every #",
+     lambda: m._bash_substitutions("a=1#'" + _SUB_NL + "$(b) '", "hash")[0], [("b", False)]),
+    # PowerShell: typographic here-strings; the hash reading.
+    ("subst: PowerShell typographic expandable here-string",
+     lambda: m._ps_subexpressions("@" + chr(0x201C) + _SUB_NL + "it's $(a)" + _SUB_NL + chr(0x201D)
+                                  + "@" + _SUB_NL + "'$(b)' $(c)"), ["a", "c"]),
+    ("subst: PowerShell typographic literal here-string",
+     lambda: m._ps_subexpressions("@" + chr(0x2018) + _SUB_NL + "$(a)" + _SUB_NL + chr(0x2019)
+                                  + "@" + _SUB_NL + "$(b)"), ["b"]),
+    ("subst: PowerShell strict reading: no comment after a number",
+     lambda: m._ps_subexpressions("$x=1#'" + _SUB_NL + "$(a) '"), []),
+    ("subst: PowerShell hash reading starts one at every #",
+     lambda: m._ps_subexpressions("$x=1#'" + _SUB_NL + "$(a) '", "hash"), ["a"]),
     # Work stays linear in the text: open frames inside a heredoc hand their bodies up
     # (each child becomes a 4-character `$(:)`, so the bodies stay within 3x the text).
     ("subst: bodies of open frames in a heredoc stay linear",
@@ -3426,6 +3625,14 @@ STRUCT_CASES += [
     ("timing: 4 KB of nested quoted substitutions",
      lambda: _timing("bash", _sub_fit(lambda k: "echo " + '"$(echo ' * k + "x" + ')"' * k))
      < 3.0, True),
+    ("timing: 4 KB of substitutions holding the word case",
+     lambda: _timing("bash", _sub_fit(lambda k: 'echo "' + "$(echo case) " * k + '"')) < 3.0,
+     True),
+    ("timing: 4 KB of typographic here-strings",
+     lambda: _timing("powershell", _sub_fit(
+         lambda k: ("@" + chr(0x201C) + _SUB_NL + "$(a)" + _SUB_NL + chr(0x201D) + "@" + _SUB_NL)
+         * k)) < 3.0,
+     True),
     ("timing: 4 KB of nested PowerShell subexpressions",
      lambda: _timing("powershell", _sub_fit(
          lambda k: "Write-Output " + '"$(Write-Output ' * k + "x" + ')"' * k)) < 3.0, True),
