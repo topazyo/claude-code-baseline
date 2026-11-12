@@ -30,7 +30,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 520
+FP_FLOOR = 521
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
@@ -3498,6 +3498,10 @@ _SUB_FP_ROWS = [
     ("a pipe across a line break", "ls |" + _SUB_NL + "grep x"),
     ("$[...] arithmetic", "echo $[ 3 ]"),
     ("a process substitution in a default", "echo ${x:-<(sort a)}"),
+    # A body is judged at its own depth, not one deeper: two runner levels down, an
+    # inline script in a substitution is still inspected.
+    ("eval in a substitution two runner levels down",
+     "bash -c " + shlex.quote("bash -c " + shlex.quote('echo "$(eval echo hi)"'))),
     ("an extglob case pattern",
      "shopt -s extglob" + _SUB_NL
      + 'for f in *; do case "$f" in @(*.py|*.sh)) echo "$f";; esac; done'),
@@ -3662,6 +3666,30 @@ STRUCT_CASES += [
      ("a$(: " + _SUB_BS + "()", False, 8)),
     ("subst: a heredoc word's span stops at a line break",
      lambda: m._heredoc_word('a$(: "' + _SUB_NL + 'x")', 0), ('a$(: "', False, 6)),
+    # Each pins one decision the block rows cannot tell apart (another reading also
+    # catches those payloads).
+    ("subst: a # in the hash reading's arithmetic is no comment",
+     lambda: m._bash_substitutions("echo $((2#101)) $(a)", "hash")[0],
+     [("(2#101)", False), ("a", False)]),
+    ("subst: process substitutions are bodies",
+     lambda: m._bash_substitutions("cat <(a) >(b)")[0], [("a", False), ("b", False)]),
+    ("subst: a '...' in an arithmetic command hides no substitution",
+     lambda: m._bash_substitutions("(( ' $(a) ' ))")[0], [("a", False)]),
+    ("subst: a ${...} hands its substitutions up as placeholders",
+     lambda: m._bash_substitutions("$(b ${x:-$(a)})")[0],
+     [("a", False), ("b ${x:-$(:)}", False)]),
+    ("subst: a ' inside a quoted ${...} is literal",
+     lambda: m._bash_substitutions('echo "${x:-' + "'" + '}" "$(a)"')[0], [("a", False)]),
+    ("subst: <<- strips the tabs before a quoted delimiter",
+     lambda: m._bash_substitutions("cat <<-'E'" + _SUB_NL + "$(x)" + _SUB_NL + chr(9) + "E"
+                                   + _SUB_NL + "$(y)")[0], [("y", False)]),
+    ("subst: a pipe goes on past a heredoc's body",
+     lambda: m._bash_substitutions("cat <<E |" + _SUB_NL + "b" + _SUB_NL + "E" + _SUB_NL
+                                   + 'y "$(z)"')[0], [("z", True)]),
+    ("subst: a heredoc word's span ends at its own close",
+     lambda: m._heredoc_word('a$(: "(") x', 0), ('a$(: "(")', False, 9)),
+    ("subst: an unbalanced heredoc word's span stops at its line",
+     lambda: m._heredoc_word("a$(b" + _SUB_NL + "c)", 0), ("a$(b", False, 4)),
     ("subst: $'...' in an unquoted ${...}",
      lambda: m._bash_substitutions("echo ${x:-$'" + _SUB_BS + "''} " + '"$(y)" ' + "'}'")[0],
      [("y", False)]),
