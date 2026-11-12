@@ -2486,8 +2486,13 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                     for toks in segs:
                         extra = []
                         if cmd_line:
-                            delims = _new_seg(" ".join(toks).translate(_CMD_DELIMS).split(),
-                                              getattr(toks, "piped", False))
+                            delims = _Seg(" ".join(toks).translate(_CMD_DELIMS).split())
+                            delims.__dict__.update(vars(toks))
+                            delims.redirs = list(getattr(toks, "redirs", ()))
+                            # Re-split words: the quote-blind rule (any $ word expands)
+                            # applies to them anew.
+                            delims.expanding = frozenset(
+                                i for i, w in enumerate(delims) if "$" in w)
                             extra = _cmd_prefix_variants(toks) + _cmd_prefix_variants(delims)
                         for seg in [toks] + extra:
                             lenient.append(seg)
