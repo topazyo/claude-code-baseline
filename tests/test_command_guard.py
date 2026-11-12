@@ -37,7 +37,7 @@ FP_FLOOR = 520
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1328
+BLOCK_FLOOR = 1330
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3346,6 +3346,9 @@ _SUB_SPAN_ROWS = [
      "cat <<" + '"a`: "' + "'" + '"`" ; echo "$({E})" # ' + "'" + _SUB_NL + "body"),
     ("a $(...) in a quoted heredoc word before &&",
      "y=1; cat <<" + '"a$(: "' + "'" + '")" && echo "$({E})" # ' + "'"),
+    # A comment inside a quoted word's $(...): the open reading reads the word as code.
+    ("a comment in a heredoc word's $(...)",
+     'cat <<"a"$(: # it' + "'s" + _SUB_NL + ') ; echo "$({E})" # ' + "'" + _SUB_NL + "body"),
     # `$'...'` inside an unquoted ${...}: a backslash escapes its quote.
     ("$'...' in a ${...} default",
      "echo ${x:-$'" + _SUB_BS + "''} " + '"$({E})" ' + "'}'"),
