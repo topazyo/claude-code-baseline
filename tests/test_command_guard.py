@@ -37,7 +37,7 @@ FP_FLOOR = 485
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1097
+BLOCK_FLOOR = 1098
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2865,6 +2865,8 @@ _CMD_PREFIX_ROWS = [
      + "\"')\""),
     ("git bash start & call in a substitution", "echo \"$(start 'echo a & call git push --force')\""),
     ("cmd & if then rm -rf in a substitution", "echo \"$(cmd //c 'echo a & if 1==1 rm -rf ~')\""),
+    ("a pipe into cmd | call, bash in a substitution",
+     "echo \"$(echo x | cmd //c 'echo a | call,bash')\""),
     ("cmd & call, pwsh -c $X in a substitution",
      'echo "$(cmd //c echo a ' + _BS + '& call,pwsh -c $X)"'),
     # cmd has no backslash escape: `"a\"` closes its string, so the & after it separates.
