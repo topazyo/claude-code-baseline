@@ -1539,7 +1539,9 @@ def _runner_rests(toks):
             # Git for Windows' start (/usr/bin/start) is `"$COMSPEC" //c start "$@"`: the
             # words are a cmd script, whose own start _cmd_prefix_variants reads. Not in
             # a cmd script (that start is read there, and a runner would recurse) nor in
-            # PowerShell text, where start is Start-Process.
+            # PowerShell text, where start is Start-Process. (A quote-blind segment of a
+            # pwsh script is marked ps_script only after its runners are read, so there a
+            # start is also read as cmd's: an extra reading, which only adds blocks.)
             out.append(("cmd", ["start"] + args))
         out[found:] = [(kind, words, outer) for kind, words in out[found:]]
     seen, uniq = set(), []
@@ -1556,14 +1558,30 @@ def _runner_rests(toks):
 _CMD_DELIMS = str.maketrans({",": " ", "=": " ", "'": None})
 
 
+def _cmd_texts(words):
+    """The texts a cmd script of these words is read as: joined with spaces; also with
+    each word after the first that is empty or holds a space quoted, as the command line
+    cmd gets quotes it (Git Bash and PowerShell build it so), which keeps `start "a
+    title" /b x` a one-word title (not the first word: a quoted script, `cmd /c "echo
+    $x"`, is unquoted by /c); each of those with its ^ escapes removed; and each of all
+    those with cmd's , = and ' read as cmd reads them (_CMD_DELIMS: `call,git ...`,
+    `echo ' & x & '`)."""
+    texts = [" ".join(words)]
+    if any(not w or any(c.isspace() for c in w) for w in words[1:]):
+        texts.append(" ".join(words[:1] + ['"' + w + '"' if not w or any(
+            c.isspace() for c in w) else w for w in words[1:]]))
+    texts += [t.replace("^", "") for t in texts]
+    return texts + [t.translate(_CMD_DELIMS) for t in texts]
+
+
 def _runner_scripts(toks):
-    """(script text, ps, outer) for every command a Windows runner in the segment would run.
+    """(script text, kind, outer) for every command a Windows runner in the segment would run.
 
     A runner's words are joined with spaces, as a runner that hands a command LINE to a
     parser sees them (cmd /c, pwsh -Command, wsl's default shell): `cmd /c "git reset
     --hard"` is `git reset --hard`. (A quoted script for a shell later in the words,
     `wsl -e bash -c '...'`, is still found whole by _split_inline_script.) cmd's text is
-    also read with its ^ escapes removed. A pwsh/powershell script is also read with each
+    also read as _cmd_texts gives it. A pwsh/powershell script is also read with each
     of _PS_SPACES a space, as PowerShell separates words on them; then each of those two
     in its grouping and block readings (_ps_ungroup, _ps_block_statements), and all of
     those with PowerShell's own quoting (_ps_unescape; see _powershell_segments) and with
@@ -1575,18 +1593,7 @@ def _runner_scripts(toks):
     """
     out = []
     for kind, words, outer in _runner_rests(toks):
-        texts = [" ".join(words)]
-        if kind == "cmd":
-            # The command line cmd gets quotes a word that is empty or holds a space (as
-            # Git Bash and PowerShell build it), so `start "a title" /b x` keeps its
-            # title one word: read that way too.
-            if any(not w or any(c.isspace() for c in w) for w in words):
-                texts.append(" ".join('"' + w + '"' if not w or any(c.isspace() for c in w)
-                                      else w for w in words))
-            texts += [t.replace("^", "") for t in texts]
-            # cmd separates words on , and = as on a space (`call,git ...`), and a ' is
-            # no quote to it (`echo ' & x & '` runs x): read each text that way too.
-            texts += [t.translate(_CMD_DELIMS) for t in texts]
+        texts = _cmd_texts(words) if kind == "cmd" else [" ".join(words)]
         if kind == "ps":
             spaced = texts[0].translate(_PS_AS_SPACE)
             if spaced != texts[0]:
@@ -1610,6 +1617,8 @@ def _lenient_runner(toks, outer_expanded=False):
         variants = [words]
         if kind == "cmd":
             variants.append([w.replace("^", "") for w in words])
+            # cmd's , = and ' (see _CMD_DELIMS), as _runner_scripts reads them.
+            variants += [" ".join(v).translate(_CMD_DELIMS).split() for v in list(variants)]
         for v in variants:
             seg = _new_seg(v, getattr(toks, "piped", False))
             # Quote-blind: any $ word counts as one the shell expands (see expanding).
@@ -2073,13 +2082,14 @@ def _cmd_start_targets(toks, i):
 
 def _cmd_if_targets(toks, i):
     """Indexes where the command after cmd's `if` at toks[i] may begin: past `/i` and
-    `not`, each of the next three words. A condition is one, two or three words (`a==b`;
-    `exist x`, `defined v`, `errorlevel n`, `a== b`; `a == b`, `a equ b`): every count
-    is read, so no table of condition forms can be wrong."""
+    `not`, the word two or three words on. A condition is two or three words (`exist x`,
+    `defined v`, `errorlevel n`, `a== b`; `a == b`, `a equ b`), or one, `a==b`, which every
+    cmd script is also read as two words (`=` is one of _CMD_DELIMS): every count is
+    read, so no table of condition forms can be wrong."""
     j, n = i + 1, len(toks)
     while j < n and toks[j] in ("/i", "not"):
         j += 1
-    return {k for k in (j + 1, j + 2, j + 3) if k < n}
+    return {k for k in (j + 2, j + 3) if k < n}
 
 
 def _seg_suffix(seg, i, first):
@@ -2462,7 +2472,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                 for words in _lenient_words(line):
                     line_latch = _Latch()      # one per call, as before; read back below
                     for toks in _words_to_segments(words, latch=line_latch):
-                        toks.ps_tool = ps_tool
+                        toks.ps_tool, toks.cmd_script = ps_tool, cmd_script
                         for seg in [toks] + (_cmd_prefix_variants(toks)
                                              if cmd_script else []):
                             lenient.append(seg)
@@ -2986,6 +2996,29 @@ def _ps_unescape_everywhere(text: str, legacy: bool = False) -> str:
     return "".join(out)
 
 
+def _ps_stop_parsing_cmd_scripts(raw: str):
+    """(script text, piped) for each `cmd ... --% /c <script>` line of a PowerShell
+    payload, in each reading of _cmd_texts. After the stop-parsing token PowerShell hands
+    the rest of the line, up to a | or the line's end, to the program unparsed, `;` and
+    `&` included, so cmd gets a script the PowerShell reading splits. A line holding `--%`
+    after a cmd word anywhere counts (an extra reading: it can only add blocks)."""
+    out = []
+    for line in raw.splitlines():
+        k = line.find("--%")
+        if k < 0:
+            continue
+        head = line[:k].replace("\\", "/").split()
+        if not any(_cmd_word(w.strip("'\"&;({")).lower() == "cmd" for w in head):
+            continue
+        tail = line[k + 3:].split("|", 1)[0].lower().split()
+        sw = _cmd_run_switch(tail)
+        if sw is not None:
+            j, glued = sw
+            words = ([glued] if glued else []) + tail[j + 1:]
+            out += [(t, "|" in line[:k]) for t in _cmd_texts(words)]
+    return out
+
+
 def _powershell_segments(raw: str):
     """Every segment evaluate() judges for a PowerShell payload: the readings below of
     the raw text and, when it holds one of _PS_SPACES, the same readings of the text
@@ -3039,6 +3072,8 @@ def _powershell_segments(raw: str):
             if reading != text:
                 segments += _segments(reading, shell="powershell", ps_slashes=False,
                                       lenient_on_error=True, ps_tool=True)
+    for script, piped in _ps_stop_parsing_cmd_scripts(raw):
+        segments += _runner_segments(script, 1, piped, False, False, False, True)
     return segments
 
 

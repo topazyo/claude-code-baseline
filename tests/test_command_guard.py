@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 467
+FP_FLOOR = 473
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1031
+BLOCK_FLOOR = 1053
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2838,6 +2838,15 @@ _CMD_PREFIX_ROWS = [
     ("cmd if a==b in a substitution", 'echo "$(cmd //c if 1==1 git push --force)"'),
     ("cmd call with a vertical tab at the end", "cmd //c 'call git push --force" + chr(11) + "'"),
     ("cmd call with a form feed between words", "cmd //c 'call git" + chr(12) + "push --force'"),
+    ("cmd call after a bash-quoted vertical tab", "cmd //c $'" + _BS + "vcall' git push --force"),
+    ("cmd call after a bash-quoted form feed", "cmd //c $'" + _BS + "fcall' git push --force"),
+    ("cmd @ after a bash-quoted vertical tab", "cmd //c $'" + _BS + "v@git' push --force"),
+    ("cmd if after a bash-quoted vertical tab", "cmd //c $'" + _BS + "vif' 1==1 git push --force"),
+    ("cmd call, in a substitution", 'echo "$(cmd //c call,git push --force)"'),
+    ("cmd @, in a substitution", 'echo "$(cmd //c @,git push --force)"'),
+    ("cmd if, in a substitution", 'echo "$(cmd //c if,1==1 git push --force)"'),
+    ("cmd call= rm -rf in a substitution", 'echo "$(cmd //c call=rm -rf ~)"'),
+    ("cmd call, in a backtick substitution", 'echo "`cmd //c call,git push --force`"'),
     ("git bash start at the depth limit",
      "bash -c \"bash -c 'start cmd /c git push --force'\""),
     ("pwsh -c cmd /c call", "pwsh -c 'cmd /c call git push --force'"),
@@ -2873,6 +2882,10 @@ _CMD_PREFIX_FP_ROWS = [
     ("cmd set then echo", "cmd //c set X=1 & echo %X%"),
     ("git bash start two levels deep", "bash -c \"bash -c 'start .'\""),
     ("cmd thirty if exist then echo", "cmd //c \"" + "if exist a " * 30 + "echo hi\""),
+    ("cmd echo a $ word, the script one quoted word", "cmd //c 'echo $x'"),
+    ("cmd.exe echo $HOME, the script one quoted word", "cmd.exe /c 'echo $HOME'"),
+    ("cmd echo an escaped $", 'cmd //c "echo ' + _BS + '$PATH"'),
+    ("cmd commit message with a , in a substitution", 'echo "$(cmd //c git commit -m a,b)"'),
 ]
 CASES += [(f"cmd prefix: {label}", cmd, B, ()) for label, cmd in _CMD_PREFIX_ROWS]
 CASES += [(f"fp cmd prefix: {label}", cmd, A, ()) for label, cmd in _CMD_PREFIX_FP_ROWS]
@@ -2884,6 +2897,10 @@ CASES += [
     # blocks: "cmd call in a substitution").
     ("known limit cmd prefix: two runner levels in a quote-blind substitution",
      'echo "$(cmd //c call cmd /c call git push --force)"', A, ()),
+    # cmd separates words on , and = only to find its own command; a program gets its
+    # line as it is. Reading , and = as spaces in the whole text costs this one.
+    ("fp cost cmd prefix: a push option holding --force", "cmd //c git push --push-option=--force",
+     B, ()),
 ]
 CASES += [
     ("cmd prefix: call pwsh reading a heredoc", _heredoc("cmd //c call pwsh"), B, ()),
@@ -2921,6 +2938,26 @@ PS_CASES += [
     ("ps cmd prefix: pwsh with a stray '",
      "cmd /c \"pwsh -c pwsh -c git push --force & echo '\"", B, ()),
     ("ps fp cmd prefix: dir of a path with a ,", "cmd /c 'dir /b C:" + _BS + "x,y'", A, ()),
+    # After --% PowerShell hands the rest of the line (up to a | or its end) to cmd as it
+    # is, `;` and `&` included.
+    ("ps cmd prefix: --% then ;call", "cmd --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: --% then ; call", "cmd --% /c ; call git push --force", B, ()),
+    ("ps cmd prefix: --% /d /c then ;call", "cmd --% /d /c ;call git push --force", B, ()),
+    ("ps cmd prefix: --% then & call", "cmd --% /c echo x & call git push --force", B, ()),
+    ("ps cmd prefix: --% then & @", "cmd --% /c echo x & @git push --force", B, ()),
+    ("ps cmd prefix: --% then ;start /b", "cmd --% /c ;start /b git push --force", B, ()),
+    ("ps cmd prefix: --% then ;call,", "cmd --% /c ;call,git push --force", B, ()),
+    ("ps cmd prefix: --% then ;call with a ^ escape", "cmd --% /c ;call git push --f^orce",
+     B, ()),
+    ("ps cmd prefix: --% then ;if a==b", "cmd --% /c ;if 1==1 git push --force", B, ()),
+    ("ps cmd prefix: cmd.exe by path, --% then ;call",
+     "C:" + _BS + "Windows" + _BS + "System32" + _BS + "cmd.exe --% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: call, in a substitution", 'echo "$(cmd /c call,git push --force)"', B, ()),
+    ("ps fp cmd prefix: --% then harmless commands", "cmd --% /c echo a;b & echo c", A, ()),
+    ("ps cmd prefix: a pipe into --% then ;call pwsh -c -",
+     "'git push --force' | cmd --% /c ;call pwsh -c -", B, ()),
+    ("ps fp cmd prefix: echo a $ word, the script one quoted word", "cmd /c 'echo $x'", A, ()),
     ("ps fp cmd prefix: call a batch file", "cmd /c call build.bat", A, ()),
     ("ps fp cmd prefix: start a program", "cmd /c start notepad.exe", A, ()),
     # PowerShell's start is Start-Process, which README's limits list (a program run by
