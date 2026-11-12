@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 442
+FP_FLOOR = 485
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 937
+BLOCK_FLOOR = 1106
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -1928,6 +1928,8 @@ MUST_BLOCK = [
     ("cmd /c from PowerShell", "cmd /c rm -rf /", "powershell", (), "(rm -rf)"),
     ("pwsh -Command", 'pwsh -Command "git push --force"', "bash", (), "forced git push is forbidden"),
     ("wsl", "wsl rm -rf /", "bash", (), "(rm -rf)"),
+    ("cmd call", "cmd //c call rm -rf /", "bash", (), "(rm -rf)"),
+    ("cmd start from PowerShell", "cmd /c start /b rm -rf /", "powershell", (), "(rm -rf)"),
     # a repository's own extraPatterns
     ("extraPatterns", "terraform destroy -auto-approve", "bash", ("terraform destroy",),
      "matched repo policy pattern: terraform destroy"),
@@ -2760,6 +2762,344 @@ STRUCT_CASES += [
     for label, cmd, tool in [("//r", "cmd //r git push --f^orce", "bash"),
                              ("/d/r", "cmd /d/r git push --f^orce", "bash"),
                              ("/r", "cmd /r git push --f^orce", "powershell")]
+]
+
+# cmd's command-position prefixes: `@` (stripped from a command), `call`, `start` (its
+# switches, their values and a title among them) and an `if` condition run the word after
+# them as the command. Git Bash's start (/usr/bin/start) is `cmd //c start "$@"`.
+_BS = chr(92)
+_CMD_PREFIX_ROWS = [
+    ("cmd call", "cmd //c call git push --force"),
+    ("cmd call rm -rf home", "cmd /c call rm -rf ~"),
+    ("cmd CALL upper case", "cmd //c CALL git push --force"),
+    ("cmd call call", "cmd //c call call git push --force"),
+    ("cmd @", "cmd //c @git push --force"),
+    ("cmd @ then a space", "cmd //c '@ git push --force'"),
+    ("cmd @@", "cmd //c @@git push --force"),
+    ("cmd @call", "cmd //c @call git push --force"),
+    ("cmd start", "cmd //c start git push --force"),
+    ("cmd START /B upper case", "cmd //c START /B git push --force"),
+    ("cmd start /b /wait", "cmd //c start /b /wait git push --force"),
+    ("cmd start /b /wait, quoted script", 'cmd //c "start /b /wait git push --force"'),
+    ("cmd start, empty title", 'cmd //c start "" git push --force'),
+    ("cmd start, two-word title", 'cmd //c start "a title" /b git push --force'),
+    ("cmd start, title between switches",
+     "cmd //c 'start /b " + '"a title"' + " /wait git push --force'"),
+    ("cmd start /d dir", "cmd //c start /d C:" + _BS + "x git push --force"),
+    ("cmd start /d glued dir", "cmd //c start /dC:" + _BS + "x git push --force"),
+    ("cmd start /node", "cmd //c start /node 1 git push --force"),
+    ("cmd start /affinity", "cmd //c start /affinity 0x3 git push --force"),
+    ("cmd start glued switches", "cmd //c start /b/wait git push --force"),
+    ("cmd start cmd /c", "cmd //c start /min cmd /c git push --force"),
+    ("cmd call cmd /c call", "cmd //c call cmd /c call git push --force"),
+    ("cmd call pwsh -c", 'cmd //c call pwsh -c "git push --force"'),
+    ("cmd start call", "cmd //c start /b /wait call git push --force"),
+    ("cmd call after &", 'cmd //c "echo a & call git push --force"'),
+    ("cmd start after &&", 'cmd //c "echo a && start /b git push --force"'),
+    ("cmd call in a group", 'cmd //c "(call git push --force)"'),
+    ("cmd call with a ^ escape", "cmd //c call git push --f^orce"),
+    ("cmd if a==b", "cmd //c if 1==1 git push --force"),
+    ("cmd if a == b", "cmd //c if a == a git push --force"),
+    ("cmd if a equ b", "cmd //c if a equ a git push --force"),
+    ("cmd if exist", "cmd //c if exist x git push --force"),
+    ("cmd if not exist", "cmd //c if not exist x git push --force"),
+    ("cmd if /i not", "cmd //c if /i not a==b git push --force"),
+    ("cmd if defined", "cmd //c if defined PATH git push --force"),
+    ("cmd if errorlevel", "cmd //c if errorlevel 1 git push --force"),
+    ("cmd if a quoted compare", "cmd //c 'if " + '"a b"=="a b"' + " git push --force'"),
+    ("cmd if then @", 'cmd //c "if 1==1 @git push --force"'),
+    ("cmd for do @", 'cmd //c "for %i in (1) do @git push --force"'),
+    ("cmd else @", 'cmd //c "if 1==2 (echo) else @git push --force"'),
+    ("cmd every prefix at once", "cmd //c '@if 1==1 @call start " + '""' + " /b git push --force'"),
+    ("cmd if /i not exist", "cmd //c if /i not exist x git push --force"),
+    ("cmd if not a == b", "cmd //c if not a == a git push --force"),
+    ("cmd start, title then /d dir",
+     "cmd //c 'start " + '"t"' + " /d C:" + _BS + "x git push --force'"),
+    ("cmd start, title then /node", "cmd //c 'start " + '"t"' + " /node 1 git push --force'"),
+    ("cmd start, title then /machine",
+     "cmd //c 'start " + '"t"' + " /machine amd64 /b git push --force'"),
+    ("cmd start /machine", "cmd //c start /machine amd64 git push --force"),
+    ("cmd start glued to its switches", "cmd //c start/b/wait git push --force"),
+    ("cmd START/B glued, upper case", "cmd //c START/B git push --force"),
+    ("cmd start, two-word title, ^ escape", 'cmd //c start "a title" /b git push --f^orce'),
+    ("cmd , before the command", "cmd //c ',git push --force'"),
+    ("cmd call,", "cmd //c call,git push --force"),
+    ("cmd call=", "cmd //c call=git push --force"),
+    ("cmd @,", "cmd //c @,git push --force"),
+    ("cmd if a==b,", "cmd //c if 1==1,git push --force"),
+    ("cmd if,", "cmd //c if,1==1 git push --force"),
+    ("cmd ' is no quote", "cmd //c \"echo ' & git push --force & '\""),
+    ("cmd for /f over a ' command", "cmd //c \"for /f %i in ('git push --force') do echo %i\""),
+    ("cmd call with an odd double quote", "cmd //c 'call git push --force & echo \"'"),
+    ("cmd nested runners with a stray '", "cmd //c \"cmd /c cmd /c git push --force & echo '\""),
+    ("wsl, then cmd call", "wsl call x & cmd //c call git push --force"),
+    ("cmd call, then wsl", "cmd //c call git push --force & wsl call x"),
+    ("cmd bash -c start", "cmd //c bash -c 'start git push --force'"),
+    ("cmd if a==b in a substitution", 'echo "$(cmd //c if 1==1 git push --force)"'),
+    ("cmd call with a vertical tab at the end", "cmd //c 'call git push --force" + chr(11) + "'"),
+    ("cmd call with a form feed between words", "cmd //c 'call git" + chr(12) + "push --force'"),
+    ("cmd call after a bash-quoted vertical tab", "cmd //c $'" + _BS + "vcall' git push --force"),
+    ("cmd call after a bash-quoted form feed", "cmd //c $'" + _BS + "fcall' git push --force"),
+    ("cmd @ after a bash-quoted vertical tab", "cmd //c $'" + _BS + "v@git' push --force"),
+    ("cmd if after a bash-quoted vertical tab", "cmd //c $'" + _BS + "vif' 1==1 git push --force"),
+    ("cmd call, in a substitution", 'echo "$(cmd //c call,git push --force)"'),
+    ("cmd @, in a substitution", 'echo "$(cmd //c @,git push --force)"'),
+    ("cmd if, in a substitution", 'echo "$(cmd //c if,1==1 git push --force)"'),
+    ("cmd call= rm -rf in a substitution", 'echo "$(cmd //c call=rm -rf ~)"'),
+    ("cmd call, in a backtick substitution", 'echo "`cmd //c call,git push --force`"'),
+    ("pwsh script: cmd --% then ;call", "pwsh -c 'cmd --% /c ;call git push --force'"),
+    # In a quote-blind substitution a cmd script's & | && || split it as the shell's would:
+    # each segment of a line holding a cmd runner also gets cmd's prefix readings.
+    ("cmd & call in a substitution", "echo \"$(cmd //c 'echo a & call git push --force')\""),
+    ("cmd && @ in a substitution", "echo \"$(cmd //c 'echo a && @git push --force')\""),
+    ("cmd | call in a substitution", "echo \"$(cmd //c 'echo a | call git push --force')\""),
+    ("cmd &call glued in a substitution", "echo \"$(cmd //c 'echo a&call git push --force')\""),
+    ("cmd & call, in a substitution", "echo \"$(cmd //c 'echo a & call,git push --force')\""),
+    ("cmd || if in a substitution", "echo \"$(cmd //c 'echo a || if 1==1 git push --force')\""),
+    ("cmd & if then @ in a substitution",
+     "echo \"$(cmd //c 'echo a & if a==b @git push --force')\""),
+    ("cmd escaped & call in a substitution",
+     'echo "$(cmd //c echo a ' + _BS + '& call git push --force)"'),
+    ("cmd backslash-quote & call in a substitution",
+     "echo \"$(cmd //c 'echo \"a" + _BS + "\" & call git push --force & echo \"b" + _BS
+     + "\"')\""),
+    ("git bash start & call in a substitution", "echo \"$(start 'echo a & call git push --force')\""),
+    ("cmd & if then rm -rf in a substitution", "echo \"$(cmd //c 'echo a & if 1==1 rm -rf ~')\""),
+    ("cmd & call git -c a=b in a substitution",
+     "echo \"$(cmd //c 'echo a & call git -c a=b push --force')\""),
+    ("cmd & call git -c core.x=1 in a substitution",
+     "echo \"$(cmd //c 'echo a & call git -c core.x=1 push --force')\""),
+    ("cmd & call env X=1 in a substitution",
+     "echo \"$(cmd //c 'echo a & call env X=1 git push --force')\""),
+    ("a pipe into cmd | call, bash in a substitution",
+     "echo \"$(echo x | cmd //c 'echo a | call,bash')\""),
+    ("cmd & call, pwsh -c $X in a substitution",
+     'echo "$(cmd //c echo a ' + _BS + '& call,pwsh -c $X)"'),
+    # cmd has no backslash escape: `"a\"` closes its string, so the & after it separates.
+    ("cmd backslash-quote, then rm -rf",
+     "cmd //c 'echo \"a" + _BS + "\" & rm -rf ~ & echo \"b" + _BS + "\"'"),
+    ("cmd backslash-quote, then a forced push",
+     "cmd //c 'echo \"a" + _BS + "\" & git push --force & echo \"b" + _BS + "\"'"),
+    ("cmd backslash-quote, then call",
+     "cmd //c 'echo \"a" + _BS + "\" & call git push --force & echo \"b" + _BS + "\"'"),
+    ("cmd backslash-quote, then start /b",
+     "cmd //c 'echo \"a" + _BS + "\" & start /b git push --force & echo \"b" + _BS + "\"'"),
+    ("pwsh script: cmd --% then & call", "pwsh -c 'cmd --% /c echo a & call git push --force'"),
+    ("pwsh script: --% after a decoy in typographic double quotes",
+     "pwsh -c 'Write-Output " + chr(0x201C) + '--% /c x"; cmd --% /c echo "q" & call git push'
+     ' --force & echo "' + "'"),
+    ("git bash start at the depth limit",
+     "bash -c \"bash -c 'start cmd /c git push --force'\""),
+    ("pwsh -c cmd /c call", "pwsh -c 'cmd /c call git push --force'"),
+    ("wsl cmd.exe /c call", "wsl cmd.exe /c call git push --force"),
+    ("bash -c cmd call", "bash -c 'cmd //c call git push --force'"),
+    ("cmd call in a substitution", 'echo "$(cmd //c call git push --force)"'),
+    ("git bash start", "start git push --force"),
+    ("git bash start /b", "start /b git push --force"),
+    ("git bash start, empty title", 'start "" git push --force'),
+    ("git bash start by path", "/usr/bin/start git push --force"),
+    ("git bash start with a ^ escape", "start git push --f^orce"),
+    ("git bash start in bash -c", "bash -c 'start git push --force'"),
+    ("git bash start in a substitution", 'echo "$(start git push --force)"'),
+]
+_CMD_PREFIX_FP_ROWS = [
+    ("cmd call a batch file", "cmd //c call build.bat"),
+    ("cmd call npm run", "cmd //c call npm run build"),
+    ("cmd start a program", "cmd //c start notepad.exe"),
+    ("cmd start a URL", 'cmd //c start "" https://example.com'),
+    ("cmd echo call", "cmd //c echo call git push --force"),
+    ("cmd if exist rmdir", "cmd //c if exist build rmdir /s /q build"),
+    ("cmd @echo off", 'cmd //c "@echo off & echo hi"'),
+    ("git bash start the cwd", "start ."),
+    ("git bash start a browser", "start chrome https://example.com"),
+    ("git bash start a program by path",
+     'start "" "C:' + _BS + "Program Files" + _BS + "x" + _BS + 'x.exe"'),
+    ("npm start", "npm start"),
+    ("echo start", "echo start git push --force"),
+    ("commit message naming call", "git commit -m 'call git push --force'"),
+    ("cmd start a program, odd double quote", "cmd //c 'start notepad.exe & echo \"'"),
+    ("cmd git log with a , and =", "cmd //c git log --format=%H,%s -n 3"),
+    ("cmd echo with delimiters", "cmd //c echo a,b;c=d"),
+    ("cmd set then echo", "cmd //c set X=1 & echo %X%"),
+    ("git bash start two levels deep", "bash -c \"bash -c 'start .'\""),
+    ("cmd thirty if exist then echo", "cmd //c \"" + "if exist a " * 30 + "echo hi\""),
+    ("cmd echo a $ word, the script one quoted word", "cmd //c 'echo $x'"),
+    ("cmd.exe echo $HOME, the script one quoted word", "cmd.exe /c 'echo $HOME'"),
+    ("cmd echo an escaped $", 'cmd //c "echo ' + _BS + '$PATH"'),
+    ("cmd commit message with a , in a substitution", 'echo "$(cmd //c git commit -m a,b)"'),
+    ("pwsh script: cmd --% then harmless commands", "pwsh -c 'cmd --% /c echo a & echo b'"),
+    ("cmd dir of a backslash path", "cmd //c dir C:" + _BS + "Users" + _BS + "x"),
+    ("cmd a quoted program path with backslashes",
+     "cmd //c '\"C:" + _BS + "Program Files" + _BS + "x" + _BS + "x.exe\" --help'"),
+    ("cmd backslash-quote, then a harmless command",
+     "cmd //c 'echo \"a" + _BS + "\" & echo b'"),
+    ("cmd & call a batch file in a substitution", "echo \"$(cmd //c 'echo a & call build.bat')\""),
+    ("cmd & echo with an = in a substitution", "echo \"$(cmd //c 'echo a=b & echo c')\""),
+    ("a substitution, then echo naming call",
+     'echo "$(git status)" && echo call git push --force'),
+]
+CASES += [(f"cmd prefix: {label}", cmd, B, ()) for label, cmd in _CMD_PREFIX_ROWS]
+CASES += [(f"fp cmd prefix: {label}", cmd, A, ()) for label, cmd in _CMD_PREFIX_FP_ROWS]
+CASES += [
+    # A pwsh script's start is Start-Process (README's limits): not read as cmd's start.
+    ("known limit cmd prefix: start in a pwsh script is Start-Process",
+     "pwsh -c \"start git 'push --force'\"", A, ()),
+    # The quote-blind reading of a substitution expands one runner level (one level
+    # blocks: "cmd call in a substitution").
+    ("known limit cmd prefix: two runner levels in a quote-blind substitution",
+     'echo "$(cmd //c call cmd /c call git push --force)"', A, ()),
+    # cmd separates words on , and = only to find its own command; a program gets its
+    # line as it is. Reading , and = as spaces in the whole text costs this one.
+    ("fp cost cmd prefix: a push option holding --force", "cmd //c git push --push-option=--force",
+     B, ()),
+]
+CASES += [
+    ("cmd prefix: call pwsh reading a heredoc", _heredoc("cmd //c call pwsh"), B, ()),
+    ("cmd prefix: call pwsh -c - fed by a pipe",
+     "echo 'git push --force' | cmd //c call pwsh -c -", B, ()),
+    ("cmd prefix: start cmd fed by a pipe",
+     "echo 'git push --force' | cmd //c start /b /wait cmd", B, ()),
+]
+STRUCT_CASES += [
+    ("cmd prefix: call pwsh reading a heredoc is refused",
+     lambda: m.evaluate(_heredoc("cmd //c call pwsh")), [_HEREDOC_REFUSAL]),
+    ("cmd prefix: call pwsh -c - fed by a pipe is refused",
+     lambda: _PIPE_REFUSAL in m.evaluate("echo 'git push --force' | cmd //c call pwsh -c -"),
+     True),
+    ("cmd prefix: start cmd fed by a pipe is refused",
+     lambda: _PIPE_REFUSAL in m.evaluate("echo 'git push --force' | cmd //c start /b /wait cmd"),
+     True),
+]
+PS_CASES += [
+    ("ps cmd prefix: call", "cmd /c call git push --force", B, ()),
+    ("ps cmd prefix: start /b /wait", "cmd /c start /b /wait git push --force", B, ()),
+    ("ps cmd prefix: start, two-word title", "cmd /c 'start " + '"a title"' + " /b git push --force'",
+     B, ()),
+    ("ps cmd prefix: @", "cmd /c @git push --force", B, ()),
+    ("ps cmd prefix: if exist", "cmd /c if exist x git push --force", B, ()),
+    ("ps cmd prefix: call pwsh -c", "cmd /c call pwsh -c 'git push --force'", B, ()),
+    ("ps cmd prefix: call pwsh -c - fed by a pipe",
+     "'git push --force' | cmd /c call pwsh -c -", B, ()),
+    ("ps cmd prefix: pwsh -c cmd /c call", "pwsh -c 'cmd /c call git push --force'", B, ()),
+    ("ps cmd prefix: --% then call", "cmd --% /c call git push --force", B, ()),
+    ("ps cmd prefix: , before the command", "cmd /c ',git push --force'", B, ()),
+    ("ps cmd prefix: nested runners with a stray '",
+     "cmd /c \"cmd /c cmd /c git push --force '\"", B, ()),
+    ("ps cmd prefix: wsl with a stray '", "cmd /c \"wsl -- wsl -- git push --force '\"", B, ()),
+    ("ps cmd prefix: pwsh with a stray '",
+     "cmd /c \"pwsh -c pwsh -c git push --force & echo '\"", B, ()),
+    ("ps fp cmd prefix: dir of a path with a ,", "cmd /c 'dir /b C:" + _BS + "x,y'", A, ()),
+    # After --% PowerShell hands the rest of the line (up to a | or its end) to cmd as it
+    # is, `;` and `&` included.
+    ("ps cmd prefix: --% then ;call", "cmd --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: --% then ; call", "cmd --% /c ; call git push --force", B, ()),
+    ("ps cmd prefix: --% /d /c then ;call", "cmd --% /d /c ;call git push --force", B, ()),
+    ("ps cmd prefix: --% then & call", "cmd --% /c echo x & call git push --force", B, ()),
+    ("ps cmd prefix: --% then & @", "cmd --% /c echo x & @git push --force", B, ()),
+    ("ps cmd prefix: --% then ;start /b", "cmd --% /c ;start /b git push --force", B, ()),
+    ("ps cmd prefix: --% then ;call,", "cmd --% /c ;call,git push --force", B, ()),
+    ("ps cmd prefix: --% then ;call with a ^ escape", "cmd --% /c ;call git push --f^orce",
+     B, ()),
+    ("ps cmd prefix: --% then ;if a==b", "cmd --% /c ;if 1==1 git push --force", B, ()),
+    ("ps cmd prefix: cmd.exe by path, --% then ;call",
+     "C:" + _BS + "Windows" + _BS + "System32" + _BS + "cmd.exe --% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: call, in a substitution", 'echo "$(cmd /c call,git push --force)"', B, ()),
+    ("ps fp cmd prefix: --% then harmless commands", "cmd --% /c echo a;b & echo c", A, ()),
+    ("ps cmd prefix: --% after a quoted --%", "echo '--%'; cmd --% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: --% after a double-quoted --%",
+     'Write-Output "--%"; cmd --% /c ;call git push --force', B, ()),
+    ("ps cmd prefix: --% after a word holding --%",
+     "git --version --%x; cmd --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: /c before --%", "cmd /c --% ;call git push --force", B, ()),
+    ("ps cmd prefix: /d /c before --%", "cmd /d /c --% ;call git push --force", B, ()),
+    ("ps cmd prefix: /c before --%, then &", "cmd /c --% echo a & call git push --force", B, ()),
+    ("ps cmd prefix: & cmd /c before --%", "& cmd /c --% ;call git push --force", B, ()),
+    ("ps cmd prefix: /k before --%", "cmd /k --% ;call git push --force", B, ()),
+    ("ps cmd prefix: an escaped cmd before --%", "& c" + chr(96) + "md --% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: Get-Command cmd before --%",
+     "& (Get-Command cmd) --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: a continuation before --%",
+     "cmd " + chr(96) + chr(10) + "--% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: a vertical tab before --%", "cmd" + chr(11) + "--% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: --% with a quoted |", 'cmd --% /c echo "a|b" & call git push --force', B, ()),
+    ("ps cmd prefix: --% with a quoted /c", 'cmd --% "/c" ;call git push --force', B, ()),
+    ("ps fp cmd prefix: git log --%", "git log --% --format=%h;x", A, ()),
+    ("ps cmd prefix: --% after --% before a pipe",
+     "echo --% a | cmd --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: a pipe after a --% into cmd --% ;call pwsh -c -",
+     "echo --% a | cmd --% /c ;call pwsh -c -", B, ()),
+    # A decoy --% in a string PowerShell closes with a typographic quote leaves an ASCII
+    # quote open in the first tail: each --% window is also read on its own.
+    ("ps cmd prefix: --% after a decoy in typographic double quotes",
+     "Write-Output " + chr(0x201C) + '--% /c x"; cmd --% /c echo "q" & call git push --force'
+     ' & echo "', B, ()),
+    ("ps cmd prefix: --% after a decoy in typographic single quotes",
+     "Write-Output " + chr(0x2018) + '--% /c "' + chr(0x2019) + '; cmd --% /c echo "q" & call'
+     ' git push --force & echo "', B, ()),
+    ("ps cmd prefix: --% after a decoy closed by a typographic quote",
+     'Write-Output "--% /c x' + chr(0x201D) + '; cmd --% /c echo "q" & call git push --force'
+     ' & echo "', B, ()),
+    ("ps fp cmd prefix: echo --% inside a cmd --% script", "cmd --% /c echo --% a & echo b",
+     A, ()),
+    # A --% inside cmd's own string, after a typographic decoy: the first tail is also read
+    # with every " deleted.
+    ("ps cmd prefix: a --% in cmd's string after a typographic decoy",
+     "Write-Output " + chr(0x201C) + '--% /c x"; cmd --% /c echo "--%" & call git push --force'
+     ' & echo "', B, ()),
+    ("ps cmd prefix: a word holding --% in cmd's string after a typographic decoy",
+     "Write-Output " + chr(0x201C) + '--% /c x"; cmd --% /c echo "a--%b" & call git push'
+     ' --force & echo "', B, ()),
+    ("ps cmd prefix: a --% in cmd's string after a typographic single-quote decoy",
+     "Write-Output " + chr(0x2018) + '--% /c "' + chr(0x2019) + '; cmd --% /c echo "--%" & call'
+     ' git push --force & echo "', B, ()),
+    ("ps cmd prefix: a backslash before a quote is no escape to cmd",
+     "cmd /c 'echo \"a" + _BS + "\" & call git push --force & echo \"b" + _BS + "\"'", B, ()),
+    ("ps fp cmd prefix: --% then a quoted &", 'cmd --% /c echo "a & b"', A, ()),
+    ("ps cmd prefix: & call git -c a=b in a substitution",
+     "echo \"$(cmd /c 'echo a & call git -c a=b push --force')\"", B, ()),
+    ("ps cmd prefix: Get-Command cmd, --% /c call", "& (Get-Command cmd) --% /c call git push --force",
+     B, ()),
+    ("ps cmd prefix: gcm cmd, --% /c @", "& (gcm cmd) --% /c @git push --force", B, ()),
+    ("ps cmd prefix: Get-Command cmd.exe, --% /c start /b",
+     "& (Get-Command cmd.exe) --% /c start /b git push --force", B, ()),
+    ("ps cmd prefix: a decoy, then Get-Command cmd, --% /c call",
+     "echo '--% /c'; & (Get-Command cmd) --% /c call git push --force", B, ()),
+    ("ps cmd prefix: & call in a substitution",
+     "echo \"$(cmd /c 'echo a & call git push --force')\"", B, ()),
+    ("ps fp cmd prefix: --% then a commit message with ; and call",
+     'cmd --% /c git commit -m "fix; call it done"', A, ()),
+    ("ps fp cost cmd prefix: --% then a blocked command quoted for echo",
+     'cmd --% /c echo "x & git push --force"', B, ()),
+    ("ps fp cmd prefix: /c before --%, harmless", "cmd /c --% echo a;b", A, ()),
+    ("ps cmd prefix: a pipe into --% then ;call pwsh -c -",
+     "'git push --force' | cmd --% /c ;call pwsh -c -", B, ()),
+    ("ps fp cmd prefix: echo a $ word, the script one quoted word", "cmd /c 'echo $x'", A, ()),
+    ("ps fp cmd prefix: call a batch file", "cmd /c call build.bat", A, ()),
+    ("ps fp cmd prefix: start a program", "cmd /c start notepad.exe", A, ()),
+    # PowerShell's start is Start-Process, which README's limits list (a program run by
+    # Start-Process): not read as cmd's start.
+    ("ps known limit: start is Start-Process", "start git 'push --force'", A, ()),
+]
+# Long runs of prefixes multiply the copies judged; past the runner budget the command is
+# refused, fast, rather than run toward the hook timeout.
+STRUCT_CASES += [
+    # One --% tail per line: a line of many stays far under the runner budget.
+    ("cmd prefix: a line of 300 cmd --% uses under a quarter of the runner budget",
+     lambda: _runner_budget_used("powershell", "cmd --% /c x;" * 300)
+     < m._MAX_RUNNER_CHARS // 4, True),
+    ("cmd prefix: a 4 KB run of 'if a' before a harmless command meets the runner budget",
+     lambda: any("Windows runner scripts too long to inspect" in r
+                 for r in m.evaluate("cmd //c " + "if a " * 798 + "echo hi")), True),
+]
+STRUCT_CASES += [
+    (f"cmd prefix: a 4 KB run of {unit.strip()!r} is refused or blocked",
+     lambda u=unit: bool(m.evaluate("cmd //c " + u * (3990 // len(u)) + "git push --force")),
+     True)
+    for unit in ("if a ", "call ", "start t /b ", "start /d x ", "@")
 ]
 
 
