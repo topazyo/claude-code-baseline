@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 473
+FP_FLOOR = 476
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1053
+BLOCK_FLOOR = 1070
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2847,6 +2847,8 @@ _CMD_PREFIX_ROWS = [
     ("cmd if, in a substitution", 'echo "$(cmd //c if,1==1 git push --force)"'),
     ("cmd call= rm -rf in a substitution", 'echo "$(cmd //c call=rm -rf ~)"'),
     ("cmd call, in a backtick substitution", 'echo "`cmd //c call,git push --force`"'),
+    ("pwsh script: cmd --% then ;call", "pwsh -c 'cmd --% /c ;call git push --force'"),
+    ("pwsh script: cmd --% then & call", "pwsh -c 'cmd --% /c echo a & call git push --force'"),
     ("git bash start at the depth limit",
      "bash -c \"bash -c 'start cmd /c git push --force'\""),
     ("pwsh -c cmd /c call", "pwsh -c 'cmd /c call git push --force'"),
@@ -2886,6 +2888,7 @@ _CMD_PREFIX_FP_ROWS = [
     ("cmd.exe echo $HOME, the script one quoted word", "cmd.exe /c 'echo $HOME'"),
     ("cmd echo an escaped $", 'cmd //c "echo ' + _BS + '$PATH"'),
     ("cmd commit message with a , in a substitution", 'echo "$(cmd //c git commit -m a,b)"'),
+    ("pwsh script: cmd --% then harmless commands", "pwsh -c 'cmd --% /c echo a & echo b'"),
 ]
 CASES += [(f"cmd prefix: {label}", cmd, B, ()) for label, cmd in _CMD_PREFIX_ROWS]
 CASES += [(f"fp cmd prefix: {label}", cmd, A, ()) for label, cmd in _CMD_PREFIX_FP_ROWS]
@@ -2955,6 +2958,31 @@ PS_CASES += [
      B, ()),
     ("ps cmd prefix: call, in a substitution", 'echo "$(cmd /c call,git push --force)"', B, ()),
     ("ps fp cmd prefix: --% then harmless commands", "cmd --% /c echo a;b & echo c", A, ()),
+    ("ps cmd prefix: --% after a quoted --%", "echo '--%'; cmd --% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: --% after a double-quoted --%",
+     'Write-Output "--%"; cmd --% /c ;call git push --force', B, ()),
+    ("ps cmd prefix: --% after a word holding --%",
+     "git --version --%x; cmd --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: /c before --%", "cmd /c --% ;call git push --force", B, ()),
+    ("ps cmd prefix: /d /c before --%", "cmd /d /c --% ;call git push --force", B, ()),
+    ("ps cmd prefix: /c before --%, then &", "cmd /c --% echo a & call git push --force", B, ()),
+    ("ps cmd prefix: & cmd /c before --%", "& cmd /c --% ;call git push --force", B, ()),
+    ("ps cmd prefix: /k before --%", "cmd /k --% ;call git push --force", B, ()),
+    ("ps cmd prefix: an escaped cmd before --%", "& c" + chr(96) + "md --% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: Get-Command cmd before --%",
+     "& (Get-Command cmd) --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: a continuation before --%",
+     "cmd " + chr(96) + chr(10) + "--% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: a vertical tab before --%", "cmd" + chr(11) + "--% /c ;call git push --force",
+     B, ()),
+    ("ps cmd prefix: --% with a quoted |", 'cmd --% /c echo "a|b" & call git push --force', B, ()),
+    ("ps cmd prefix: --% with a quoted /c", 'cmd --% "/c" ;call git push --force', B, ()),
+    ("ps fp cmd prefix: git log --%", "git log --% --format=%h;x", A, ()),
+    ("ps cmd prefix: --% after --% before a pipe",
+     "echo --% a | cmd --% /c ;call git push --force", B, ()),
+    ("ps fp cmd prefix: /c before --%, harmless", "cmd /c --% echo a;b", A, ()),
     ("ps cmd prefix: a pipe into --% then ;call pwsh -c -",
      "'git push --force' | cmd --% /c ;call pwsh -c -", B, ()),
     ("ps fp cmd prefix: echo a $ word, the script one quoted word", "cmd /c 'echo $x'", A, ()),
@@ -2967,6 +2995,10 @@ PS_CASES += [
 # Long runs of prefixes multiply the copies judged; past the runner budget the command is
 # refused, fast, rather than run toward the hook timeout.
 STRUCT_CASES += [
+    # One --% tail per line: a line of many stays far under the runner budget.
+    ("cmd prefix: a line of 300 cmd --% uses under a quarter of the runner budget",
+     lambda: _runner_budget_used("powershell", "cmd --% /c x;" * 300)
+     < m._MAX_RUNNER_CHARS // 4, True),
     ("cmd prefix: a 4 KB run of 'if a' before a harmless command meets the runner budget",
      lambda: any("Windows runner scripts too long to inspect" in r
                  for r in m.evaluate("cmd //c " + "if a " * 798 + "echo hi")), True),

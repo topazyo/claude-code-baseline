@@ -104,7 +104,8 @@ _ps_unescape, _PS_SPACES, _ps_ungroup and _powershell_segments). Limits: a $( )
 subexpression holding a nested "..." string is scanned as if the inner quote closed
 the outer string (the context-free reading still decodes every escape in it); --%
 (stop-parsing) is not modelled, so the text after it is judged decoded as well as
-raw, and the raw readings give what the program receives there; and PowerShell
+raw, and the raw readings give what the program receives there (for cmd, the text
+after it is also read as the script cmd gets: _ps_stop_parsing_cmd_scripts); and PowerShell
 cmdlets (Remove-Item ...) are matched by the deny-list only. The context-free reading
 decodes escapes inside '...' too, so a single-quoted commit message holding `n
 followed by a blocked command at the start of the next line is blocked, the cost the
@@ -2545,6 +2546,11 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     # first word as the script and strand the arguments; _lenient_inline judges
     # every word after the -c instead, and _lenient_runner a Windows runner's words.
     segments += lenient + lenient_runs
+    # PowerShell text (the tool's payload or a pwsh script): what a `--%` hands cmd.
+    if ps_tool or ps_script:
+        for script, fed in _ps_stop_parsing_cmd_scripts(raw):
+            segments += _runner_segments(script, _depth + 1, piped or fed, False, False,
+                                         False, True)
     # The drive-letter/UNC rewrite above reads `C:\dir\x` as a path; a POSIX shell
     # reads those backslashes as it reads any other. So when the rewrite changed the
     # text, ALSO judge the text as the shell itself reads it and add those segments:
@@ -2997,26 +3003,37 @@ def _ps_unescape_everywhere(text: str, legacy: bool = False) -> str:
 
 
 def _ps_stop_parsing_cmd_scripts(raw: str):
-    """(script text, piped) for each `cmd ... --% /c <script>` line of a PowerShell
-    payload, in each reading of _cmd_texts. After the stop-parsing token PowerShell hands
-    the rest of the line, up to a | or the line's end, to the program unparsed, `;` and
-    `&` included, so cmd gets a script the PowerShell reading splits. A line holding `--%`
-    after a cmd word anywhere counts (an extra reading: it can only add blocks)."""
+    """(script text, piped) for what may follow PowerShell's stop-parsing token `--%` in
+    PowerShell text that names cmd, each in every reading of _cmd_texts. After `--%`
+    PowerShell hands the rest of the line to the program unparsed, `;` and `&` included,
+    so cmd gets a script the PowerShell reading splits. An extra reading with few
+    guesses, since it can only add blocks: backtick-newline continuations are joined and
+    _WORD_BREAKS read as spaces; the first `--%` of a line counts wherever it is (in a
+    string too), and its tail holds the rest of the line, so a later `cmd ... --% ...` is
+    a segment of that tail, whose cmd runner the ordinary readings find (one tail per
+    line keeps the work linear); the tail is taken to the line's end and to its first
+    `|` (a quoted `|` does not end it); and each is read whole and from after a /c, /k
+    or /r switch, quoted or not (the switch may also come before the `--%`, where the
+    whole tail is the script). piped: a `|` comes before the `--%` on its line."""
+    text = raw.replace("`\r\n", " ").replace("`\n", " ").translate(_AS_SPACE)
+    if "--%" not in text or "cmd" not in text.replace("`", "").lower():
+        return []
     out = []
-    for line in raw.splitlines():
+    for line in text.split("\n"):
         k = line.find("--%")
         if k < 0:
             continue
-        head = line[:k].replace("\\", "/").split()
-        if not any(_cmd_word(w.strip("'\"&;({")).lower() == "cmd" for w in head):
-            continue
-        tail = line[k + 3:].split("|", 1)[0].lower().split()
-        sw = _cmd_run_switch(tail)
-        if sw is not None:
-            j, glued = sw
-            words = ([glued] if glued else []) + tail[j + 1:]
-            out += [(t, "|" in line[:k]) for t in _cmd_texts(words)]
-    return out
+        rest = line[k + 3:]
+        for tail in dict.fromkeys((rest, rest.split("|", 1)[0])):
+            words = tail.lower().split()
+            readings = [words]
+            sw = _cmd_run_switch([w.replace('"', "") for w in words])
+            if sw is not None:
+                j, glued = sw
+                readings.append(([glued] if glued else []) + words[j + 1:])
+            for ws in readings:
+                out += [(t, "|" in line[:k]) for t in _cmd_texts(ws)]
+    return list(dict.fromkeys(out))
 
 
 def _powershell_segments(raw: str):
@@ -3072,8 +3089,6 @@ def _powershell_segments(raw: str):
             if reading != text:
                 segments += _segments(reading, shell="powershell", ps_slashes=False,
                                       lenient_on_error=True, ps_tool=True)
-    for script, piped in _ps_stop_parsing_cmd_scripts(raw):
-        segments += _runner_segments(script, 1, piped, False, False, False, True)
     return segments
 
 
