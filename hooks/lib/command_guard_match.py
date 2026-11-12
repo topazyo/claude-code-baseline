@@ -1554,9 +1554,10 @@ def _runner_rests(toks):
 
 
 # cmd's own reading of its line: , and = separate words as a space does (so does ;, which
-# the bash reading already ends a segment at), and a ' is an ordinary character (deleted
-# here, so the bash tokenizer does not read it as a quote).
-_CMD_DELIMS = str.maketrans({",": " ", "=": " ", "'": None})
+# the bash reading already ends a segment at); a ' is an ordinary character (deleted
+# here, so the bash tokenizer does not read it as a quote); and a backslash escapes
+# nothing (read as /, so `"a\"` closes its string as it does for cmd).
+_CMD_DELIMS = str.maketrans({",": " ", "=": " ", "'": None, chr(92): "/"})
 
 
 def _cmd_texts(words):
@@ -3026,7 +3027,9 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
         if k < 0:
             continue
         ks = [j for j in range(len(line)) if line.startswith("--%", j)]
-        tails = [(line[k + 3:], "|" in line[:k])]
+        # The first tail also with every " deleted: no quote a decoy leaves open, or a
+        # --% inside cmd's own string starts, can then hide a separator.
+        tails = [(line[k + 3:], "|" in line[:k]), (line[k + 3:].replace('"', ""), "|" in line[:k])]
         tails += [(line[a + 3:b], "|" in line[:a]) for a, b in zip(ks, ks[1:] + [len(line)])]
         tails += [(t.split("|", 1)[0], fed) for t, fed in tails]
         for tail, fed in dict.fromkeys(tails):
