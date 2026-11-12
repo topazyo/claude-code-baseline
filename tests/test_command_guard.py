@@ -37,7 +37,7 @@ FP_FLOOR = 520
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1292
+BLOCK_FLOOR = 1308
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3326,9 +3326,21 @@ _SUB_WORD_ROWS = [
     ("a #' comment after ((...))", "(( 1 ))#'" + _SUB_NL + 'echo "$({E})" # ' + "'"),
     ("process substitution in ${...}", "echo ${x:-<({E})}"),
 ]
+# A heredoc word's `$(...)` / `${...}` span skips quotes and stays on its line.
+_SUB_SPAN_ROWS = [
+    ("a heredoc word with a quoted paren in $(...)",
+     'cat <<a$(: "(")' + _SUB_NL + 'x "$({E})"'),
+    ("a heredoc word with a quoted paren, then echo",
+     'cat <<a$(: "(")' + _SUB_NL + 'echo "$({E})"'),
+    ("a heredoc word with a single-quoted paren", "cat <<a$(: '(')" + _SUB_NL + 'x "$({E})"'),
+    ("a heredoc word with an escaped paren",
+     "cat <<a$(: " + _SUB_BS + "()" + _SUB_NL + 'x "$({E})"'),
+    ("a heredoc word with a quoted brace in ${...}",
+     'cat <<a${x:-"{"}' + _SUB_NL + 'x "$({E})"'),
+]
 for _sub_tag, _sub_pay in (("eval", _SUB_E), ("pwsh", _SUB_P)):
     _SUB_ROWS += [(f"{label} ({_sub_tag})", cmd.replace("{E}", _sub_pay))
-                  for label, cmd in _SUB_CASE_ROWS + _SUB_WORD_ROWS]
+                  for label, cmd in _SUB_CASE_ROWS + _SUB_WORD_ROWS + _SUB_SPAN_ROWS]
     _SUB_CONTROLS |= {f"{label} ({_sub_tag})" for label, _ in _SUB_WORD_ROWS
                       if "$[" not in label and "in a substitution" not in label}
 # A pipe goes on past a line break, blank lines and a comment line.
@@ -3399,7 +3411,19 @@ for _sub_tag, _sub_pay in (("cmd", "cmd /c cmd /c cmd /c " + _SUB_B),
                            ("pwsh", "pwsh -c 'pwsh -c ''" + _SUB_B + "'''")):
     _SUB_PS_ROWS += [(f"{label} ({_sub_tag})", cmd.replace("{P}", _sub_pay))
                      for label, cmd in _SUB_PS_WORD_ROWS]
-    if _sub_tag == "pwsh":       # main blocks these through its quote-blind reading
+    if _sub_tag == "pwsh":
+        # `--%` ends at `&&` and at a lone CR too (the cmd payload blocks on main).
+        _SUB_PS_ROWS += [
+            (f"{label} ({tag})", cmd.replace("{P}", pay))
+            for tag, pay in (("wsl", "wsl wsl " + _SUB_B), (_sub_tag, _sub_pay))
+            for label, cmd in (
+                ("--% ends at &&", "Write-Output --% it's && Write-Output \"$({P})\" # '"),
+                ("--% on git ends at &&", "git --% log it's && Write-Output \"$({P})\" # '"),
+                ("--% ends at a lone CR",
+                 "Write-Output --% it's" + chr(13) + "Write-Output \"$({P})\" # '"),
+            )
+        ]
+        # main blocks these through its quote-blind reading
         _SUB_CONTROLS |= {f"{label} ({_sub_tag})" for label, _ in _SUB_PS_WORD_ROWS
                           if "#'" in label}
 PS_CASES += [(f"subst{' control' if label in _SUB_CONTROLS else ''}: {label}", cmd, B, ())
@@ -3584,6 +3608,8 @@ STRUCT_CASES += [
      lambda: m._bash_substitutions('case a in @(a|b)) c "$(d)";; esac')[0], [("d", False)]),
     ("subst: a | between patterns is no pipe",
      lambda: m._bash_substitutions('case $y in a|b) c "$(d)";; esac')[0], [("d", False)]),
+    # Pins the precedence, in a shape where the strict reading's fed (False) is right; no
+    # shape is known where it is False and bash feeds the body.
     ("subst: the strict reading's fed wins for the same body",
      lambda: m._bash_bodies('case $y in a|b) c "$(d)";; esac'), ([("d", False)], None)),
     # Heredoc delimiters, read with their quoting.
@@ -3602,6 +3628,17 @@ STRUCT_CASES += [
      lambda: m._heredoc_word("a$(b c) x", 0), ("a$(b c)", False, 7)),
     ("subst: a heredoc word keeps backticks whole",
      lambda: m._heredoc_word("`b c`x y", 0), ("`b c`x", False, 6)),
+    ("subst: a heredoc word's span skips a quoted paren",
+     lambda: m._heredoc_word('a$(: "(")' + _SUB_NL + "rest", 0), ('a$(: "(")', False, 9)),
+    ("subst: a heredoc word's span skips a single-quoted paren",
+     lambda: m._heredoc_word("a$(: '(')" + _SUB_NL, 0), ("a$(: '(')", False, 9)),
+    ("subst: a heredoc word's span skips an escaped paren",
+     lambda: m._heredoc_word("a$(: " + _SUB_BS + "()" + _SUB_NL, 0),
+     ("a$(: " + _SUB_BS + "()", False, 8)),
+    ("subst: a heredoc word's span stops at a line break",
+     lambda: m._heredoc_word('a$(: "' + _SUB_NL + 'x")', 0), ('a$(: "', False, 6)),
+    ("subst: the lines after an unbalanced heredoc word are read",
+     lambda: m._bash_substitutions('cat <<a$(: "(")' + _SUB_NL + 'x "$(y)"')[0], [("y", False)]),
     ("subst: a heredoc ends at a delimiter holding a substitution",
      lambda: m._bash_substitutions("cat <<a$(b c)" + _SUB_NL + "$(x)" + _SUB_NL + "a$(b c)"
                                    + _SUB_NL + "$(y)")[0], [("x", False), ("y", False)]),
@@ -3647,6 +3684,10 @@ STRUCT_CASES += [
      lambda: m._ps_subexpressions("git --% it's" + _SUB_NL + "$(a) '"), ["a"]),
     ("subst: PowerShell --% ends at a pipe",
      lambda: m._ps_subexpressions("git --% $(a) | $(b)"), ["b"]),
+    ("subst: PowerShell --% ends at &&",
+     lambda: m._ps_subexpressions("git --% it's && $(a) '"), ["a"]),
+    ("subst: PowerShell --% ends at a lone CR",
+     lambda: m._ps_subexpressions("git --% it's" + chr(13) + "$(a) '"), ["a"]),
     ("subst: PowerShell open reading reads past --%",
      lambda: m._ps_subexpressions("git --% $(a)", "open"), ["a"]),
     ("subst: PowerShell --% glued to a word is no stop-parsing",

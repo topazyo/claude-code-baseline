@@ -2436,6 +2436,39 @@ _BASH_WORD_RE = re.compile(r"[^\s;&|()<>'\"`$\\]+")
 _SCAN_READINGS = ("strict", "open", "hash", "eager")
 
 
+def _word_span_end(text: str, j: int) -> int:
+    """End (exclusive) of the `$(...)`, `${...}` or backtick span at text[j] inside a
+    heredoc word. Quotes and backslashes are skipped while counting parens or braces,
+    and the span never crosses a line break, so a wrong count costs only the rest of
+    its line: the lines after it are still read."""
+    n, tick = len(text), text[j] == "`"
+    opener = "" if tick else text[j + 1]
+    closer = "`" if tick else ")" if opener == "(" else "}"
+    k, depth = j + 1, 0
+    while k < n and text[k] != "\n":
+        ch = text[k]
+        if ch == "\\" and text[k + 1:k + 2] not in ("", "\n"):
+            k += 2
+            continue
+        if not tick and ch in "'\"":
+            e = k + 1
+            while e < n and text[e] not in (ch, "\n"):
+                escaped = ch == '"' and text[e] == "\\" and text[e + 1:e + 2] not in ("", "\n")
+                e += 2 if escaped else 1
+            if e >= n or text[e] == "\n":
+                return min(e, n)
+            k = e + 1
+            continue
+        if tick and ch == "`":
+            return k + 1
+        if not tick:
+            depth += (ch == opener) - (ch == closer)
+            if not depth:
+                return k + 1
+        k += 1
+    return k
+
+
 def _heredoc_word(text: str, j: int):
     """(delimiter, quoted, end) for the heredoc word at text[j], as bash reads it: the
     word ends at an unquoted blank or operator character, quotes and backslashes are
@@ -2466,19 +2499,9 @@ def _heredoc_word(text: str, j: int):
                 j += 1
             j += 1
         elif c == "`" or (c == "$" and text[j + 1:j + 2] in ("(", "{")):
-            k = j + 1                                  # `$(...)` `${...}` `...`: one span
-            if c == "`":
-                while k < n and text[k] != "`":
-                    k += 1
-            else:
-                opener, closer, depth = text[k], ")" if text[k] == "(" else "}", 0
-                while k < n:
-                    depth += (text[k] == opener) - (text[k] == closer)
-                    if not depth:
-                        break
-                    k += 1
-            out.append(text[j:k + 1])
-            j = k + 1
+            k = _word_span_end(text, j)                # `$(...)` `${...}` `...`: one span
+            out.append(text[j:k])
+            j = k
         else:
             out.append(c)
             j += 1
@@ -2841,7 +2864,8 @@ def _ps_subexpressions(text: str, reading: str = "strict"):
     of _PS_DQ, a here-string (`@` and any of _PS_SQ or _PS_DQ ending its line, after
     anything but a word character: `$x=@'`) at a line starting with any of the same
     kind's and `@`, ${...} is one variable, a # starting a word (or <# #>) is a
-    comment, and after a `--%` word the line is verbatim up to a `|`. Each body comes
+    comment, and after a `--%` word the line is verbatim up to a `|`, `&&` or line
+    break (CR or LF). Each body comes
     back as _bash_substitutions gives one: its direct subexpressions replaced by
     `$(:)`, so the work stays linear; an unterminated one runs to the end of the text.
     reading (see _bash_substitutions): "open" opens a here-string after any character,
@@ -2917,8 +2941,8 @@ def _ps_subexpressions(text: str, reading: str = "strict"):
             continue
         elif (c == "-" and word_start and not open_ and text.startswith("--%", i)
               and text[i + 3:i + 4] in ("", " ", "\t", "\r", "\n")):
-            j = i + 3                                  # stop-parsing: verbatim to | or NL
-            while j < n and text[j] not in "|\n":
+            j = i + 3                          # stop-parsing: verbatim to | && CR or LF
+            while j < n and text[j] not in "|\r\n" and not text.startswith("&&", j):
                 j += 1
             i = j
             continue
