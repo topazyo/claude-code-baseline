@@ -37,7 +37,7 @@ FP_FLOOR = 485
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1098
+BLOCK_FLOOR = 1106
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2865,6 +2865,12 @@ _CMD_PREFIX_ROWS = [
      + "\"')\""),
     ("git bash start & call in a substitution", "echo \"$(start 'echo a & call git push --force')\""),
     ("cmd & if then rm -rf in a substitution", "echo \"$(cmd //c 'echo a & if 1==1 rm -rf ~')\""),
+    ("cmd & call git -c a=b in a substitution",
+     "echo \"$(cmd //c 'echo a & call git -c a=b push --force')\""),
+    ("cmd & call git -c core.x=1 in a substitution",
+     "echo \"$(cmd //c 'echo a & call git -c core.x=1 push --force')\""),
+    ("cmd & call env X=1 in a substitution",
+     "echo \"$(cmd //c 'echo a & call env X=1 git push --force')\""),
     ("a pipe into cmd | call, bash in a substitution",
      "echo \"$(echo x | cmd //c 'echo a | call,bash')\""),
     ("cmd & call, pwsh -c $X in a substitution",
@@ -3053,6 +3059,15 @@ PS_CASES += [
     ("ps cmd prefix: a backslash before a quote is no escape to cmd",
      "cmd /c 'echo \"a" + _BS + "\" & call git push --force & echo \"b" + _BS + "\"'", B, ()),
     ("ps fp cmd prefix: --% then a quoted &", 'cmd --% /c echo "a & b"', A, ()),
+    ("ps cmd prefix: & call git -c a=b in a substitution",
+     "echo \"$(cmd /c 'echo a & call git -c a=b push --force')\"", B, ()),
+    ("ps cmd prefix: Get-Command cmd, --% /c call", "& (Get-Command cmd) --% /c call git push --force",
+     B, ()),
+    ("ps cmd prefix: gcm cmd, --% /c @", "& (gcm cmd) --% /c @git push --force", B, ()),
+    ("ps cmd prefix: Get-Command cmd.exe, --% /c start /b",
+     "& (Get-Command cmd.exe) --% /c start /b git push --force", B, ()),
+    ("ps cmd prefix: a decoy, then Get-Command cmd, --% /c call",
+     "echo '--% /c'; & (Get-Command cmd) --% /c call git push --force", B, ()),
     ("ps cmd prefix: & call in a substitution",
      "echo \"$(cmd /c 'echo a & call git push --force')\"", B, ()),
     ("ps fp cmd prefix: --% then a commit message with ; and call",

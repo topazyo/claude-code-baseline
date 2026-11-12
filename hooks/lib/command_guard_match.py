@@ -2493,9 +2493,10 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                             # applies to them anew.
                             delims.expanding = frozenset(
                                 i for i, w in enumerate(delims) if "$" in w)
-                            # The delimiter reading leaves the prefix words as they are,
-                            # so its variants hold those of toks itself.
-                            extra = _cmd_prefix_variants(delims)
+                            # Both: the delimiter reading also re-splits the arguments
+                            # the rules judge (`call git -c a=b push --force`), which cmd
+                            # hands a program as they are.
+                            extra = _cmd_prefix_variants(toks) + _cmd_prefix_variants(delims)
                         for seg in [toks] + extra:
                             lenient.append(seg)
                             lenient.extend(_lenient_inline(seg))
@@ -3030,16 +3031,16 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
     so cmd gets a script the PowerShell reading splits. An extra reading with few
     guesses, since it can only add blocks. A `--%` counts wherever it is (in a string
     too), and its tail is read whole as a cmd script (to the line's end: a `|` after it
-    is judged there as well, and a /c, /k or /r switch is a harmless word of it). The
+    is judged there as well), and also from after a /c, /k or /r switch in it. The
     tails read: from the line's first `--%`, also with every `"` deleted, and from each
     `--%` to the next one (the last to the line's end). The windows partition the line,
     so the work stays linear in it; a window stands alone, and with the quotes deleted
     no quote a decoy `--%` leaves open (in a string PowerShell closes with a typographic
     quote), or a `--%` inside cmd's own string starts, can glue the real script into one
     word. The other readings of the text are judged too: PowerShell's escapes decoded
-    (`` c`md ``), word breaks as spaces (see _segments), and the cmd runner, with its
-    switch, read from the words around the `--%`. piped: a `|` comes before the tail's
-    `--%` on its line."""
+    (`` c`md ``), word breaks as spaces (see _segments), and a cmd runner named by its
+    word, with its switch, read from the words around the `--%`. piped: a `|` comes
+    before the tail's `--%` on its line."""
     if "--%" not in raw or "cmd" not in raw.lower():
         return []
     out = []
@@ -3051,7 +3052,17 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
         tails = [(line[k + 3:], "|" in line[:k]), (line[k + 3:].replace('"', ""), "|" in line[:k])]
         tails += [(line[a + 3:b], "|" in line[:a]) for a, b in zip(ks, ks[1:] + [len(line)])]
         for tail, fed in dict.fromkeys(tails):
-            out += [(t, fed) for t in _cmd_texts(tail.lower().split())]
+            words = tail.lower().split()
+            readings = [words]
+            # Also from after a /c, /k or /r switch: when cmd is named by a computed
+            # call (`& (Get-Command cmd) --% /c call x`) no other reading finds the
+            # runner, and the whole tail would take the switch for the command.
+            sw = _cmd_run_switch(words)
+            if sw is not None:
+                j, glued = sw
+                readings.append(([glued] if glued else []) + words[j + 1:])
+            for ws in readings:
+                out += [(t, fed) for t in _cmd_texts(ws)]
     return list(dict.fromkeys(out))
 
 
