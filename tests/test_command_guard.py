@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 476
+FP_FLOOR = 477
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1070
+BLOCK_FLOOR = 1075
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2849,6 +2849,9 @@ _CMD_PREFIX_ROWS = [
     ("cmd call, in a backtick substitution", 'echo "`cmd //c call,git push --force`"'),
     ("pwsh script: cmd --% then ;call", "pwsh -c 'cmd --% /c ;call git push --force'"),
     ("pwsh script: cmd --% then & call", "pwsh -c 'cmd --% /c echo a & call git push --force'"),
+    ("pwsh script: --% after a decoy in typographic double quotes",
+     "pwsh -c 'Write-Output " + chr(0x201C) + '--% /c x"; cmd --% /c echo "q" & call git push'
+     ' --force & echo "' + "'"),
     ("git bash start at the depth limit",
      "bash -c \"bash -c 'start cmd /c git push --force'\""),
     ("pwsh -c cmd /c call", "pwsh -c 'cmd /c call git push --force'"),
@@ -2982,6 +2985,21 @@ PS_CASES += [
     ("ps fp cmd prefix: git log --%", "git log --% --format=%h;x", A, ()),
     ("ps cmd prefix: --% after --% before a pipe",
      "echo --% a | cmd --% /c ;call git push --force", B, ()),
+    ("ps cmd prefix: a pipe after a --% into cmd --% ;call pwsh -c -",
+     "echo --% a | cmd --% /c ;call pwsh -c -", B, ()),
+    # A decoy --% in a string PowerShell closes with a typographic quote leaves an ASCII
+    # quote open in the first tail: each --% window is also read on its own.
+    ("ps cmd prefix: --% after a decoy in typographic double quotes",
+     "Write-Output " + chr(0x201C) + '--% /c x"; cmd --% /c echo "q" & call git push --force'
+     ' & echo "', B, ()),
+    ("ps cmd prefix: --% after a decoy in typographic single quotes",
+     "Write-Output " + chr(0x2018) + '--% /c "' + chr(0x2019) + '; cmd --% /c echo "q" & call'
+     ' git push --force & echo "', B, ()),
+    ("ps cmd prefix: --% after a decoy closed by a typographic quote",
+     'Write-Output "--% /c x' + chr(0x201D) + '; cmd --% /c echo "q" & call git push --force'
+     ' & echo "', B, ()),
+    ("ps fp cmd prefix: echo --% inside a cmd --% script", "cmd --% /c echo --% a & echo b",
+     A, ()),
     ("ps fp cmd prefix: /c before --%, harmless", "cmd /c --% echo a;b", A, ()),
     ("ps cmd prefix: a pipe into --% then ;call pwsh -c -",
      "'git push --force' | cmd --% /c ;call pwsh -c -", B, ()),

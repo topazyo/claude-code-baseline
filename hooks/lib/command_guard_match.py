@@ -3008,13 +3008,15 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
     PowerShell hands the rest of the line to the program unparsed, `;` and `&` included,
     so cmd gets a script the PowerShell reading splits. An extra reading with few
     guesses, since it can only add blocks: backtick-newline continuations are joined and
-    _WORD_BREAKS read as spaces; the first `--%` of a line counts wherever it is (in a
-    string too), and its tail holds the rest of the line, so a later `cmd ... --% ...` is
-    a segment of that tail, whose cmd runner the ordinary readings find (one tail per
-    line keeps the work linear); the tail is taken to the line's end and to its first
-    `|` (a quoted `|` does not end it); and each is read whole and from after a /c, /k
-    or /r switch, quoted or not (the switch may also come before the `--%`, where the
-    whole tail is the script). piped: a `|` comes before the `--%` on its line."""
+    _WORD_BREAKS read as spaces; a `--%` counts wherever it is (in a string too). The
+    tails read: from the line's first `--%` to the line's end, and from each `--%` to the
+    next one (the last to the line's end), each also cut at its first `|` (a quoted `|`
+    does not end the stop-parsing). The windows only partition the line, so the work
+    stays linear in it; a window stands alone, so a quote a decoy `--%` leaves open (in
+    a string PowerShell closes with a typographic quote) cannot glue the real script
+    into one word. Each tail is read whole and from after a /c, /k or /r switch, quoted
+    or not (the switch may also come before the `--%`, where the whole tail is the
+    script). piped: a `|` comes before the tail's `--%` on its line."""
     text = raw.replace("`\r\n", " ").replace("`\n", " ").translate(_AS_SPACE)
     if "--%" not in text or "cmd" not in text.replace("`", "").lower():
         return []
@@ -3023,8 +3025,11 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
         k = line.find("--%")
         if k < 0:
             continue
-        rest = line[k + 3:]
-        for tail in dict.fromkeys((rest, rest.split("|", 1)[0])):
+        ks = [j for j in range(len(line)) if line.startswith("--%", j)]
+        tails = [(line[k + 3:], "|" in line[:k])]
+        tails += [(line[a + 3:b], "|" in line[:a]) for a, b in zip(ks, ks[1:] + [len(line)])]
+        tails += [(t.split("|", 1)[0], fed) for t, fed in tails]
+        for tail, fed in dict.fromkeys(tails):
             words = tail.lower().split()
             readings = [words]
             sw = _cmd_run_switch([w.replace('"', "") for w in words])
@@ -3032,7 +3037,7 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
                 j, glued = sw
                 readings.append(([glued] if glued else []) + words[j + 1:])
             for ws in readings:
-                out += [(t, "|" in line[:k]) for t in _cmd_texts(ws)]
+                out += [(t, fed) for t in _cmd_texts(ws)]
     return list(dict.fromkeys(out))
 
 
