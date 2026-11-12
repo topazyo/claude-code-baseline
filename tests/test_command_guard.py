@@ -37,7 +37,7 @@ FP_FLOOR = 520
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1318
+BLOCK_FLOOR = 1328
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3346,6 +3346,17 @@ _SUB_SPAN_ROWS = [
      "cat <<" + '"a`: "' + "'" + '"`" ; echo "$({E})" # ' + "'" + _SUB_NL + "body"),
     ("a $(...) in a quoted heredoc word before &&",
      "y=1; cat <<" + '"a$(: "' + "'" + '")" && echo "$({E})" # ' + "'"),
+    # `$'...'` inside an unquoted ${...}: a backslash escapes its quote.
+    ("$'...' in a ${...} default",
+     "echo ${x:-$'" + _SUB_BS + "''} " + '"$({E})" ' + "'}'"),
+    ("$'...' with text in a ${...} default",
+     "echo ${x:-$'a" + _SUB_BS + "''} " + '"$({E})" ' + "'}'"),
+    ("$'...' in a ${...} prefix removal",
+     "echo ${x#$'" + _SUB_BS + "''} " + '"$({E})" ' + "'}'"),
+    ("$'...' in a ${...} substitution",
+     "echo ${x/$'" + _SUB_BS + "''/} " + '"$({E})" ' + "'}'"),
+    ("$'...' in a ${...} heredoc word",
+     "cat <<${x:-$'" + _SUB_BS + "''} ; echo " + '"$({E})"'),
     ("a $(...) in a $-quoted heredoc word",
      "cat <<$" + '"a$(: "' + "'" + '")" ; echo "$({E})" # ' + "'"),
 ]
@@ -3648,6 +3659,11 @@ STRUCT_CASES += [
      ("a$(: " + _SUB_BS + "()", False, 8)),
     ("subst: a heredoc word's span stops at a line break",
      lambda: m._heredoc_word('a$(: "' + _SUB_NL + 'x")', 0), ('a$(: "', False, 6)),
+    ("subst: $'...' in an unquoted ${...}",
+     lambda: m._bash_substitutions("echo ${x:-$'" + _SUB_BS + "''} " + '"$(y)" ' + "'}'")[0],
+     [("y", False)]),
+    ("subst: a heredoc word's ${...} span reads $'...'",
+     lambda: m._word_span_end("${x:-$'" + _SUB_BS + "''} ; z", 0), 11),
     ("subst: a $(...) in a heredoc word's quoted part is whole",
      lambda: m._heredoc_word('"a$(: "' + "'" + '")" x', 0), ('a$(: "' + "'" + '")', True, 11)),
     ("subst: a heredoc word's quoted part stops at a line break",

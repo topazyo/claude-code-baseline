@@ -2452,6 +2452,14 @@ def _word_span_end(text: str, j: int) -> int:
         if ch == "\\" and text[k + 1:k + 2] not in ("", "\n"):
             k += 2
             continue
+        if not tick and ch == "$" and text[k + 1:k + 2] == "'":
+            e = k + 2                                  # `$'...'`: a backslash escapes
+            while e < n and text[e] not in ("'", "\n"):
+                e += 2 if text[e] == "\\" and text[e + 1:e + 2] not in ("", "\n") else 1
+            if e >= n or text[e] == "\n":
+                return min(e, n)
+            k = e + 1
+            continue
         if not tick and ch in "'\"":
             e = k + 1
             while e < n and text[e] not in (ch, "\n"):
@@ -2530,8 +2538,9 @@ def _bash_substitutions(text: str, reading: str = "strict"):
     a substitution or `${...}`, which the word goes on past), and a heredoc's lines are
     its body (literal for a quoted delimiter, read with its quoting: see _heredoc_word;
     for a bare one, only `\\`, `$(`, `${` and backticks count). Inside `${...}` only
-    quotes, `\\`, `$(`, `${`, backticks, braces and process substitutions count; inside
-    arithmetic (`((...))`, `$((...))`, `$[...]`) there is no comment, heredoc or reserved
+    quotes, `\\`, `$(`, `${`, backticks, braces and process substitutions count
+    (and `$'...'` quoting when the `${` is unquoted); inside arithmetic (`((...))`,
+    `$((...))`, `$[...]`) there is no comment, heredoc or reserved
     word, and a '...' only hides the end, not a substitution. A reserved word counts only
     where a command starts (after `;` `&` `|` a line break `(` `)` or one of
     _BASH_LEAD_WORDS, or a `function` name): `case` opens a case, whose `|` between
@@ -2640,6 +2649,10 @@ def _bash_substitutions(text: str, reading: str = "strict"):
             i += 1
             continue
         if kind == "${":
+            if c == "$" and text.startswith("'", i + 1) and not f["indq"]:
+                f["quote"] = "$'"                      # `${x:-$'\''}`: ANSI-C quoting
+                i += 2
+                continue
             if c == '"' or (c == "'" and not f["indq"]):
                 f["quote"] = c
             elif c in "<>" and text.startswith("(", i + 1) and not f["indq"]:
