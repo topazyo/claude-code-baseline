@@ -26,7 +26,9 @@ normalizer was defeated by ordinary shell quoting):
     scanner does not model bash comments, the fresh quoting context inside "$(...)",
     $'...' strings or heredoc bodies, and a divergence there could otherwise pass a
     real command off as part of a string; the quote-blind pass still inspects it,
-    including a `bash -c "..."` script on that line. A command whose every line
+    including a `bash -c "..."` script on that line, and a separate reading follows
+    bash's own comments, heredocs and substitution bodies (see _bash_substitutions).
+    A command whose every line
     already tokenizes on its own is evaluated exactly as before.
   * Real tokenization per line via shlex(posix=True): quotes are REMOVED and
     backslash escapes are RESOLVED, so quote-splicing (--fo"rce", r''m) and
@@ -75,17 +77,18 @@ normalizer was defeated by ordinary shell quoting):
 
 This is BEST-EFFORT, defense-in-depth -- not an evasion-proof boundary. It cannot
 see through encoding (base64), arbitrary variable indirection (only the literal
-$HOME/${HOME} home tokens are caught), or runtime aliases. Two residual limits of
-the tokenizer itself, stated here rather than claimed away elsewhere: POSIX escape
+$HOME/${HOME} home tokens are caught), or runtime aliases. A residual limit of the
+tokenizer itself, stated here rather than claimed away elsewhere: POSIX escape
 resolution consumes backslashes, so an *unquoted* Windows path is only recovered
 for drive-letter/UNC forms (see _slashify_windows_paths), and text holding one is
 judged both that way and as the shell reads it (see _segments) -- so multi-line
 text (a heredoc commit or PR body, say) with a long run of lines that each end in a
 path's backslash (about 90 such lines of a typical path) is refused as a
-continuation chain too long to inspect; and a command
-substitution inside a double-quoted ARGUMENT (`echo "$(...)"`) is not inspected --
-a quoted separator stays inside its word, as in bash (see _shell_words), so a
-`sh -c` script is judged whole but a quoted sentence is not mistaken for commands. Multi-line limits: the
+continuation chain too long to inspect. A quoted separator stays inside its word,
+as in bash (see _shell_words), so a `sh -c` script is judged whole and a quoted
+sentence is not mistaken for commands; a command substitution inside a
+double-quoted argument (`echo "$(...)"`) is judged by a reading of its own body (see
+_bash_substitutions), as is a $( ) subexpression in a PowerShell string. Multi-line limits: the
 second, quote-blind pass over a multi-line string blocks a line of it that STARTS
 with a blocked command (a commit body line "git push --force ..."), or that names
 one in backticks ("Run `npm install` first" -- right for a plain -m "...", where
@@ -1597,17 +1600,24 @@ def _runner_scripts(toks):
     for kind, words, outer in _runner_rests(toks):
         texts = _cmd_texts(words) if kind == "cmd" else [" ".join(words)]
         if kind == "ps":
-            spaced = texts[0].translate(_PS_AS_SPACE)
-            if spaced != texts[0]:
-                texts.append(spaced)
-            plain = list(texts)
-            texts += [_ps_ungroup(t) for t in plain]
-            texts += [_ps_block_statements(t) for t in plain if "{" in t or "}" in t]
-            base = list(texts)
-            texts += [_ps_unescape(t) for t in base]
-            texts += [_ps_unescape_everywhere(t) for t in base if "`" in t]
+            texts = _ps_script_texts(texts[0])
         out += [(t, kind, outer) for t in texts]
     return list(dict.fromkeys(out))
+
+
+def _ps_script_texts(text: str):
+    """The texts a pwsh/powershell script is read as (see _runner_scripts)."""
+    texts = [text]
+    spaced = text.translate(_PS_AS_SPACE)
+    if spaced != text:
+        texts.append(spaced)
+    plain = list(texts)
+    texts += [_ps_ungroup(t) for t in plain]
+    texts += [_ps_block_statements(t) for t in plain if "{" in t or "}" in t]
+    base = list(texts)
+    texts += [_ps_unescape(t) for t in base]
+    texts += [_ps_unescape_everywhere(t) for t in base if "`" in t]
+    return texts
 
 
 def _lenient_runner(toks, outer_expanded=False):
@@ -2411,12 +2421,371 @@ _PS_SPACES = "".join(map(chr, (0xA0, 0x1680, 0x180E, *range(0x2000, 0x200B),
                                0x202F, 0x205F, 0x3000)))
 _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
 
+# Characters after which a `#` starts a bash comment (it must start a word).
+_COMMENT_AFTER = set(" \t\n;&|()<>")
+# Reserved words that open (and close) a compound command: a pipe before one feeds every
+# command inside it (see _bash_substitutions).
+_BASH_OPEN_WORDS = {"{", "if", "while", "until", "for", "select", "case"}
+_BASH_CLOSE_WORDS = {"}", "fi", "done", "esac"}
+_BASH_WORD_RE = re.compile(r"[^\s;&|()<>'\"`$\\]+")
+
+
+def _bash_substitutions(text: str, permissive: bool = False):
+    """(bodies, uncommented) for bash text: (body, fed) for every command substitution
+    bash runs in it (`$(...)`, backticks, `<(...)` / `>(...)`), at every nesting level,
+    and the text with its `#` comments removed (None when it has none).
+
+    One pass that follows bash's own reading, which the quote-blind pass does not: a
+    `$(` body starts a fresh quoting context (`"$(pwsh -c 'pwsh -c ''x''')"`), a word
+    starting with `#` is a comment to the line's end (`C:\\x\\' ; ... #'`; not right after
+    a substitution or `${...}`, which the word goes on past), and a heredoc's lines are
+    its body (literal for a quoted delimiter; for a bare one, only `\\`, `$(`, `${` and
+    backticks count). Inside `${...}` only quotes, `\\`, `$(`, `${`, backticks and braces
+    count; inside arithmetic (`((...))`, `$((...))`) there is no comment or heredoc; a
+    `case` open in a `$(` body makes an unmatched `)` a pattern's end, not the body's.
+    A backtick body runs to the next unescaped backtick, with `\\$` `` \\` `` and `\\\\`
+    (and `\\"` inside "...") unescaped, as bash reads it; its own substitutions are found
+    when it is judged. Each `$(` body comes back with its direct substitutions replaced
+    by `$(:)` (a backtick one by `` `:` ``), which tokenizes as the original does: each is
+    judged on its own, so the work stays linear in the text. An unterminated body (bash
+    refuses the line) runs to the end of the text, or of the heredoc body it opened in.
+
+    fed: the substitution is expanded for a command after a `|` in its pipeline (or
+    inside such a body), whose stdin is the pipe. `;` `&` `&&` `||` and a line break end
+    the pipeline, but not inside a group, subshell or compound command the pipe feeds
+    (`x | { a; b "$(c)"; }`, `x | while ...; do ...; done`).
+
+    permissive: a reading for the decisions that hide text, so a wrong one fails toward
+    reading more: no comment is skipped (none is returned), and every heredoc body is
+    read as a bare delimiter's. Callers judge the bodies of both readings."""
+    bodies, comments = [], []
+
+    def frame(kind, start, parent, **extra):
+        f = {"kind": kind, "start": start, "quote": "", "depth": 0, "kw": 0, "cases": 0,
+             "children": [], "pipe": False, "pipe_nest": 0,
+             "fed": bool(parent) and (parent["fed"] or parent["pipe"])}
+        f.update(extra)
+        return f
+
+    def pop(end, after=None):
+        """Close the innermost frame: its body ends at end, its text at after (past its
+        `)`; end when it has none). A substitution's body is kept and the frame becomes
+        its parent's child; any other frame hands its children up."""
+        f = stack.pop()
+        if f["kind"] == "$(":
+            bodies.append((_subst_body(text, f, end), f["fed"]))
+            stack[-1]["children"].append((f["open"], end if after is None else after,
+                                          text[f["open"]:f["open"] + 2]))
+        else:
+            stack[-1]["children"].extend(f["children"])
+
+    stack, heres, pending = [frame("top", 0, None)], [], []
+    i, n, closed_at = 0, len(text), -1       # closed_at: just after a substitution's end
+    while i < n:
+        if heres and i >= stack[heres[-1]]["end"]:
+            k = heres.pop()
+            end, after = stack[k]["end"], stack[k]["after"]
+            while len(stack) > k:               # unterminated frames end with the body
+                pop(end)
+            i = after
+            continue
+        f = stack[-1]
+        kind, q, c = f["kind"], f["quote"], text[i]
+        if kind == "H" and f["literal"]:               # a quoted delimiter's body
+            i = f["end"]
+            continue
+        if q == "'":
+            if c == "'":
+                f["quote"] = ""
+            i += 1
+            continue
+        if q == "$'":
+            if c == "'":
+                f["quote"] = ""
+            i += 2 if c == "\\" else 1
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            j = i + 1
+            while j < n and text[j] != "`":
+                j += 2 if text[j] == "\\" else 1
+            esc = r"\\([$`\\\"])" if q == '"' else r"\\([$`\\])"
+            bodies.append((re.sub(esc, r"\1", text[i + 1:min(j, n)]), f["fed"] or f["pipe"]))
+            f["children"].append((i, min(j + 1, n), "`"))
+            i = closed_at = j + 1
+            continue
+        if c == "$" and text.startswith("(", i + 1):
+            stack.append(frame("$(", i + 2, f, open=i, arith=text.startswith("((", i + 1)))
+            i += 2
+            continue
+        if c == "$" and text.startswith("{", i + 1):
+            stack.append(frame("${", i + 2, f, indq=q == '"' or kind == "H"))
+            i += 2
+            continue
+        if q == '"':
+            if c == '"':
+                f["quote"] = ""
+            i += 1
+            continue
+        if kind == "H":                                # only \ $( ${ ` count in a body
+            i += 1
+            continue
+        if kind == "${":
+            if c == '"' or (c == "'" and not f["indq"]):
+                f["quote"] = c
+            elif c == "{":
+                f["depth"] += 1
+            elif c == "}":
+                if f["depth"]:
+                    f["depth"] -= 1
+                else:
+                    pop(i)
+                    closed_at = i + 1
+            i += 1
+            continue
+        arith = f.get("arith", False) or kind == "(("
+        word_start = (i == f["start"] or text[i - 1] in _COMMENT_AFTER) and i != closed_at
+        nest = f["depth"] + f["kw"]
+        if c in "'\"":
+            f["quote"] = c
+        elif c == "$" and text.startswith("'", i + 1):
+            f["quote"] = "$'"
+            i += 1
+        elif c == "#" and word_start and not arith and not permissive:
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            comments.append((i, j))
+            i = j
+            continue
+        elif c in "<>" and text.startswith("(", i + 1) and not arith:
+            stack.append(frame("$(", i + 2, f, open=i))   # process substitution
+            i += 2
+            continue
+        elif c == "(" and word_start and text.startswith("((", i) and not arith:
+            stack.append(frame("((", i + 2, f))          # an arithmetic command
+            i += 2
+            continue
+        elif c == "(":
+            f["depth"] += 1
+        elif c == ")":
+            if f["depth"]:
+                f["depth"] -= 1
+            elif kind == "$(" and f["cases"] and not arith:
+                pass                                     # a case pattern's end
+            elif kind in ("$(", "(("):
+                pop(i, i + 1)
+                if kind == "((" and text.startswith(")", i + 1):
+                    i += 1
+                closed_at = i + 1
+        elif arith:
+            pass
+        elif c == "|" and not text.startswith("||", i):  # `|` or `|&`: a pipe
+            f["pipe"], f["pipe_nest"] = True, nest
+            i += 2 if text.startswith("|&", i) else 1
+            continue
+        elif (c in ";|" or (c == "&" and text[i - 1:i] not in ("<", ">")
+                             and text[i + 1:i + 2] != ">")
+              or (c == "\n" and not pending)):         # the pipeline ends (not `>&`, `&>`)
+            if nest <= f["pipe_nest"]:
+                f["pipe"] = False
+            i += 2 if text.startswith(("&&", "||", ";;"), i) else 1
+            continue
+        elif text.startswith("<<<", i):                # a here-string: an ordinary word follows
+            i += 3
+            continue
+        elif text.startswith("<<", i):
+            j = i + 2
+            strip = text.startswith("-", j)
+            j += strip
+            while j < n and text[j] in " \t":
+                j += 1
+            k = j
+            while j < n and text[j] not in " \t\n;&|()<>":
+                j += 1
+            word = text[k:j]
+            delim = re.sub(r"[\\'\"]", "", word)
+            if delim:
+                pending.append((delim, strip, word != delim and not permissive))
+            i = j
+            continue
+        elif c == "\n" and pending:
+            j, spans = i + 1, []
+            for delim, strip, quoted in pending:
+                start = j
+                while j < n:
+                    e = text.find("\n", j)
+                    e = n if e < 0 else e
+                    line = text[j:e]
+                    if (line.lstrip("\t") if strip else line) == delim:
+                        spans.append((start, j, min(e + 1, n), quoted))
+                        j = min(e + 1, n)
+                        break
+                    j = e + 1
+                else:
+                    spans.append((start, n, n, quoted))
+            pending = []
+            for start, end, after, quoted in reversed(spans):
+                heres.append(len(stack))
+                stack.append(frame("H", start, stack[-1], end=end, after=after,
+                                   literal=quoted))
+            if nest <= f["pipe_nest"]:
+                f["pipe"] = False
+            i += 1
+            continue
+        elif word_start:
+            m = _BASH_WORD_RE.match(text, i)
+            if m and (m.end() == n or text[m.end()] in _COMMENT_AFTER):
+                w = m.group()
+                if w in _BASH_OPEN_WORDS:
+                    f["kw"] += 1
+                    f["cases"] += w == "case"
+                elif w in _BASH_CLOSE_WORDS:
+                    f["kw"] = max(f["kw"] - 1, 0)
+                    f["cases"] = max(f["cases"] - (w == "esac"), 0)
+            if m:
+                i = m.end()
+                continue
+        i += 1
+    while len(stack) > 1:                              # unterminated: to the text's end
+        pop(n)
+    uncommented = None
+    if comments:
+        out, pos = [], 0
+        for a, b in comments:
+            out.append(text[pos:a])
+            pos = b
+        uncommented = "".join(out) + text[pos:]
+    return bodies, uncommented
+
+
+def _bash_bodies(text: str):
+    """(bodies, uncommented): the substitution bodies of both readings of
+    _bash_substitutions, each once, and the strict reading's uncommented text."""
+    bodies, uncommented = _bash_substitutions(text)
+    return list(dict.fromkeys(bodies + _bash_substitutions(text, True)[0])), uncommented
+
+
+def _ps_bodies(text: str):
+    """The subexpression bodies of both readings of _ps_subexpressions, each once."""
+    return list(dict.fromkeys(_ps_subexpressions(text) + _ps_subexpressions(text, True)))
+
+
+def _subst_body(text: str, f, end: int) -> str:
+    """The body of substitution frame f, which ends at end, with each of its direct
+    substitutions replaced by one of the same kind that runs nothing (`$(:)`, `<(:)`,
+    `` `:` ``; see _bash_substitutions). ck: the child's opener."""
+    out, pos = [], f["start"]
+    for cs, ce, ck in f["children"]:
+        out += [text[pos:cs], "`:`" if ck == "`" else ck + ":)"]
+        pos = ce
+    out.append(text[pos:end])
+    return "".join(out)
+
+
+def _ps_subexpressions(text: str, permissive: bool = False):
+    """The body of every $( ) subexpression PowerShell runs in text, at every nesting
+    level: in code, in a "..." string and in an @"..."@ here-string, not in a '...' one
+    or a comment. One pass that follows PowerShell's quoting, which no reading does
+    inside a string: a doubled quote character is one literal character, a backtick
+    escapes the next character (`` `$( `` is literal text), a "..." string ends at any
+    of _PS_DQ, a here-string (`@'` or `@"` ending its line, after anything but a word
+    character: `$x=@'`) at a line starting with its closer, ${...} is one variable, and a
+    # starting a word (or <# #>) is a comment. Each body comes back as
+    _bash_substitutions gives one: its direct subexpressions replaced by `$(:)`, so the
+    work stays linear; an unterminated one runs to the end of the text. permissive: the
+    reading for the decisions that hide text (see _bash_substitutions): a here-string
+    opens after any character, and no comment is skipped."""
+    bodies = []
+    stack = [{"kind": "top", "start": 0, "quote": "", "depth": 0, "children": []}]
+    i, n = 0, len(text)
+    while i < n:
+        f = stack[-1]
+        kind, q, c = f["kind"], f["quote"], text[i]
+        if (q in ("@'", '@"') and (i == 0 or text[i - 1] == "\n")
+                and text.startswith(q[1] + "@", i)):
+            f["quote"] = ""                            # a here-string's closer
+            i += 2
+            continue
+        if q == "@'":
+            i += 1
+            continue
+        if q == "'":
+            if c in _PS_SQ:
+                if i + 1 < n and text[i + 1] in _PS_SQ:
+                    i += 2
+                    continue
+                f["quote"] = ""
+            i += 1
+            continue
+        if c == "`":
+            i += 2
+            continue
+        if c == "$" and text.startswith("(", i + 1):
+            stack.append({"kind": "$(", "start": i + 2, "open": i, "quote": "",
+                          "depth": 0, "children": []})
+            i += 2
+            continue
+        if q == '"':
+            if c in _PS_DQ:
+                if i + 1 < n and text[i + 1] in _PS_DQ:
+                    i += 2
+                    continue
+                f["quote"] = ""
+            i += 1
+            continue
+        if q == '@"':
+            i += 1
+            continue
+        word_start = i == f["start"] or text[i - 1] in " \t\r\n;|&(){}"
+        opener = permissive or i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+        if c == "@" and opener and text[i + 1:i + 2] in ("'", '"'):
+            eol = text.find("\n", i)
+            if eol != -1 and not text[i + 2:eol].strip():
+                f["quote"] = "@" + text[i + 1]
+                i = eol + 1
+                continue
+        if c in _PS_SQ:
+            f["quote"] = "'"
+        elif c in _PS_DQ:
+            f["quote"] = '"'
+        elif c == "$" and text.startswith("{", i + 1):  # ${...}: one variable
+            j = i + 2
+            while j < n and text[j] != "}":
+                j += 2 if text[j] == "`" else 1
+            i = j + 1
+            continue
+        elif c == "<" and word_start and text.startswith("<#", i) and not permissive:
+            j = text.find("#>", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        elif c == "#" and word_start and not permissive:
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        elif kind == "$(" and c == "(":
+            f["depth"] += 1
+        elif kind == "$(" and c == ")":
+            if f["depth"]:
+                f["depth"] -= 1
+            else:
+                stack.pop()
+                bodies.append(_subst_body(text, f, i))
+                stack[-1]["children"].append((f["open"], i + 1, "$("))
+        i += 1
+    while len(stack) > 1:                              # unterminated: to the text's end
+        f = stack.pop()
+        bodies.append(_subst_body(text, f, n))
+        stack[-1]["children"].append((f["open"], n, "$("))
+    return bodies
+
 
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
               piped: bool = False, lenient_on_error: bool = False,
               windows_paths: bool = True, ps_script: bool = False,
               ps_tool: bool = False, outer_expanded: bool = False,
-              heredoc: bool = False, cmd_script: bool = False):
+              heredoc: bool = False, cmd_script: bool = False, scan: bool = True):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -2431,21 +2800,28 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     heredoc: raw is the script of a command a heredoc feeds (see _heredoc_check).
     cmd_script: raw is a script a Windows runner hands to cmd; its own segments are
     marked so, and also judged with cmd's command prefixes read away (see
-    _cmd_prefix_variants).
+    _cmd_prefix_variants). scan: bash text is also read as bash reads its command
+    substitutions and comments (see _bash_substitutions); False for a reading that came
+    from one.
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
                   lenient_on_error=lenient_on_error, windows_paths=windows_paths,
                   ps_script=ps_script, ps_tool=ps_tool, outer_expanded=outer_expanded,
-                  heredoc=heredoc, cmd_script=cmd_script)
+                  heredoc=heredoc, cmd_script=cmd_script, scan=scan)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
     segments, lenient, lenient_runs, latch = [], [], [], _Latch()
     lenient_fed, orphan = [], False    # see _heredoc_check
+    fed_in = heredoc
     slashed = _slashify_windows_paths(raw) if windows_paths else raw
     text = _expand_ifs(slashed)
+    # Bash text, read as bash reads it: only where no drive-path rewrite changed it (that
+    # text gets its bash reading below, windows_paths False).
+    bash_read = (scan and shell == "bash" and not ps_script and not cmd_script
+                 and slashed == raw)
     if shell == "powershell" and ps_slashes:
         # PowerShell's escape is the backtick; a backslash is a path separator, so
         # `rm -r -Force ..\..` must not tokenize to `....`.
@@ -2524,7 +2900,29 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         for seg in segments:
             seg.cmd_script = True
         segments += [v for seg in list(segments) for v in _cmd_prefix_variants(seg)]
-    heredoc = _heredoc_check(text, segments, lenient + lenient_runs, lenient_fed,
+    # Every command substitution's body, judged as the script it is (with its own
+    # expansions; at this depth, as it runs in this shell; see _bash_substitutions). Its
+    # segments come back expanded, so they join the others after the expansion below, but
+    # the heredoc check sees them first: a here-string on a call, in a body, of a function
+    # this text defines feeds the function's commands here. A body's stdin is that of the
+    # command it is expanded for: piped after a `|` in its pipeline (see
+    # _bash_substitutions), or when this whole text is.
+    subst, uncommented = [], None
+    if bash_read and ("$(" in text or "`" in text or "#" in text):
+        bodies, uncommented = _bash_bodies(text)
+        for body, fed in bodies:
+            if body.strip() not in ("", ":"):
+                _RunnerBudget.charge(len(body))
+                subst += _segments(body, _depth, piped=piped or fed,
+                                   lenient_on_error=True, outer_expanded=outer_expanded,
+                                   heredoc=fed_in)
+    # A pwsh script's subexpressions likewise, each read as a pwsh script is.
+    if scan and ps_script and "$(" in raw:
+        for body in _ps_bodies(raw):
+            if body.strip() not in ("", ":"):
+                for t in _ps_script_texts(body):
+                    subst += _runner_segments(t, _depth, piped, True, outer_expanded, fed_in)
+    heredoc = _heredoc_check(text, segments, lenient + lenient_runs + subst, lenient_fed,
                              orphan or latch.orphan_heredoc, heredoc)
     if piped:                      # this is the inline script of a piped segment
         for seg in segments + lenient + lenient_runs:
@@ -2559,15 +2957,20 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # bash <<EOF`), or an eval's exec redirects this shell's stdin: every command
             # of this text is fed after all. Check them, and expand their scripts again
             # as fed ones.
-            heredoc = _heredoc_check(text, segments, lenient + lenient_runs, lenient_fed,
-                                     False, True)
+            heredoc = _heredoc_check(text, segments, lenient + lenient_runs + subst,
+                                     lenient_fed, False, True)
             expanded = _expand_scripts(segments, _depth, outer_expanded, True, text)[0]
         segments = expanded
     # Lenient segments skip the inline split: with the quotes deleted, the script
     # of `bash -c "rm -rf ~"` is already bare tokens. Splitting would take only its
     # first word as the script and strand the arguments; _lenient_inline judges
     # every word after the -c instead, and _lenient_runner a Windows runner's words.
-    segments += lenient + lenient_runs
+    segments += lenient + lenient_runs + subst
+    # The text without its comments (see _bash_substitutions): an added reading.
+    if uncommented is not None and uncommented.strip():
+        segments += _segments(uncommented, _depth, piped=piped, lenient_on_error=True,
+                              windows_paths=windows_paths, outer_expanded=outer_expanded,
+                              heredoc=fed_in, scan=False)
     # PowerShell text (the tool's payload or a pwsh script): what a `--%` hands cmd.
     if ps_tool or ps_script:
         for script, fed in _ps_stop_parsing_cmd_scripts(raw):
@@ -2591,7 +2994,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                               piped=piped, lenient_on_error=True, windows_paths=False,
                               ps_script=ps_script, ps_tool=ps_tool,
                               outer_expanded=outer_expanded, heredoc=heredoc,
-                              cmd_script=cmd_script)
+                              cmd_script=cmd_script, scan=scan)
     return segments
 
 
@@ -3075,6 +3478,13 @@ def _powershell_segments(raw: str):
     word it becomes. The raw readings stay, so this only adds segments. Raises as
     _segments() does."""
     segments = []
+    # Each $( ) subexpression's body, judged as a payload of its own (see
+    # _ps_subexpressions): inside a "..." string no other reading sees it as code.
+    if "$(" in raw:
+        for body in _ps_bodies(raw):
+            if body.strip() not in ("", ":"):
+                _RunnerBudget.charge(len(body))
+                segments += _powershell_segments(body)
     texts = [raw, raw.translate(_PS_AS_SPACE)]
     if "(" in raw or "{" in raw:
         texts += [_ps_ungroup(t, keep_variables=True) for t in texts]

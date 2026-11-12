@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 485
+FP_FLOOR = 509
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1106
+BLOCK_FLOOR = 1192
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2470,11 +2470,12 @@ CASES += [
     # not blank.
     ("fp cost: a later reading's script at the depth limit is refused",
      _nested([_bash_c], "env -a x eval bash -c ' '", 3), B, ()),
-    # A substitution at the limit is judged by the quote-blind pass, as before.
-    ("fp substitution with bash -c at the depth limit",
-     _nested([_bash_c], "echo \"$(bash -c 'git status')\"", 3), A, ()),
-    ("fp substitution with cmd /c at the depth limit",
-     _nested([_bash_c], "echo \"$(cmd /c dir)\"", 3), A, ()),
+    # A substitution's body runs in its own shell, at that shell's depth: at the limit, a
+    # body that still holds an inline script or a runner is a fourth level, refused.
+    ("fp cost: substitution with bash -c at the depth limit",
+     _nested([_bash_c], "echo \"$(bash -c 'git status')\"", 3), B, ()),
+    ("fp cost: substitution with cmd /c at the depth limit",
+     _nested([_bash_c], "echo \"$(cmd /c dir)\"", 3), B, ()),
     # Real two- and three-level commands: a level a runner and an inline split both read
     # is reached on more than one path, never past the limit here.
     ("fp nested wsl bash -c twice", "wsl -e bash -c \"cd /tmp && bash -c 'ls -la'\"", A, ()),
@@ -2944,10 +2945,9 @@ CASES += [
     # A pwsh script's start is Start-Process (README's limits): not read as cmd's start.
     ("known limit cmd prefix: start in a pwsh script is Start-Process",
      "pwsh -c \"start git 'push --force'\"", A, ()),
-    # The quote-blind reading of a substitution expands one runner level (one level
-    # blocks: "cmd call in a substitution").
-    ("known limit cmd prefix: two runner levels in a quote-blind substitution",
-     'echo "$(cmd //c call cmd /c call git push --force)"', A, ()),
+    # A substitution's body is judged as the script it is, every runner level included.
+    ("cmd prefix: two runner levels in a substitution",
+     'echo "$(cmd //c call cmd /c call git push --force)"', B, ()),
     # cmd separates words on , and = only to find its own command; a program gets its
     # line as it is. Reading , and = as spaces in the whole text costs this one.
     ("fp cost cmd prefix: a push option holding --force", "cmd //c git push --push-option=--force",
@@ -3161,6 +3161,275 @@ def _space_wiring_problem():
     if n_ps != 1 or len(calls) != 1:
         return f"PowerShell payload: {n_ps} call(s), Bash payload: {len(calls) - n_ps}"
     return ""
+
+
+# --- Command substitutions and comments, read as the shell reads them ---
+# A substitution's body is a script with its own quoting; inside "..." (or a PowerShell
+# "..." string) no other reading sees it as one. Each body is judged as the script it is
+# (see _bash_substitutions, _ps_subexpressions). _SUB_P is a pwsh script two levels
+# down, _SUB_E an eval; each blocks on its own.
+_SUB_B = "git push --force"
+_SUB_NL = chr(10)
+_SUB_BS = chr(92)
+_SUB_P = "pwsh -c 'pwsh -c ''" + _SUB_B + "'''"
+_SUB_E = "eval " + _SUB_B
+_SUB_DRIVE = "echo C:" + _SUB_BS + "x" + _SUB_BS + "' ; "
+_SUB_ROWS = [
+    ("pwsh two levels in a quoted substitution", 'echo "$(' + _SUB_P + ')"'),
+    ("rm in pwsh two levels", "echo \"$(pwsh -c 'pwsh -c ''rm -rf ~''')\""),
+    ("pwsh block in a quoted substitution", "echo \"$(pwsh -c 'if (1) {" + _SUB_B + "}')\""),
+    ("pwsh block comment in a quoted substitution",
+     "echo \"$(pwsh -c '<#x#>" + _SUB_B + "')\""),
+    ("cmd three levels in a quoted substitution",
+     'echo "$(cmd //c cmd /c cmd /c ' + _SUB_B + ')"'),
+    ("wsl twice in a quoted substitution", 'echo "$(wsl wsl ' + _SUB_B + ')"'),
+    ("pwsh two levels in quoted backticks", 'echo "`' + _SUB_P + '`"'),
+    ("assignment of a quoted substitution", 'x="$(' + _SUB_P + ')"'),
+    ("eval in a quoted substitution", 'echo "$(' + _SUB_E + ')"'),
+    ("quoted eval in a quoted substitution", "echo \"$(eval '" + _SUB_B + "')\""),
+    ("sudo eval in a quoted substitution", 'echo "$(sudo ' + _SUB_E + ')"'),
+    ("su -c in a quoted substitution", "echo \"$(su -c '" + _SUB_B + "')\""),
+    ("bash -c eval in a quoted substitution", "echo \"$(bash -c '" + _SUB_E + "')\""),
+    ("eval in quoted backticks", 'echo "`' + _SUB_E + '`"'),
+    ("alias in a quoted substitution", "echo \"$(alias p='" + _SUB_B + "'; p)\""),
+    ("backticks inside a quoted substitution", 'echo "$(echo `' + _SUB_E + '`)"'),
+    ("quoted substitution inside an unquoted one", 'echo $(echo "$(' + _SUB_E + ')")'),
+    ("nested quoted substitutions", 'echo "$(echo "$(' + _SUB_P + ')")"'),
+    ("escaped backticks nested in backticks",
+     "echo `echo " + _SUB_BS + "`" + _SUB_E + _SUB_BS + "``"),
+    ("unterminated quoted substitution", 'echo "$(' + _SUB_E),
+    ("pwsh here-string in a quoted substitution",
+     "echo \"$(pwsh <<<'& {" + _SUB_B + "}')\""),
+    ("pwsh -c - here-string in a quoted substitution",
+     "echo \"$(pwsh -c - <<<'& {" + _SUB_B + "}')\""),
+    ("plain pwsh here-string in a quoted substitution",
+     "echo \"$(pwsh <<<'" + _SUB_B + "')\""),
+    ("here-string on a defined function in a quoted substitution",
+     "f() { pwsh; }; echo \"$(f <<<'& {" + _SUB_B + "}')\""),
+    ("a bare heredoc's quoted substitution",
+     "cat <<EOF" + _SUB_NL + '"$(' + _SUB_P + ')"' + _SUB_NL + "EOF"),
+    ("process substitution", "cat <(" + _SUB_E + ")"),
+    # A substitution after a pipe is expanded for a command whose stdin is the pipe.
+    ("pwsh in a substitution after a pipe", "echo '" + _SUB_B + "' | cat \"$(pwsh)\""),
+    ("bash in a substitution after a pipe", "echo '" + _SUB_B + "' | cat \"$(bash)\""),
+    ("pwsh in backticks after |&", "echo '" + _SUB_B + "' |& cat \"`pwsh`\""),
+    ("pwsh after a pipe past 2>&1", "echo '" + _SUB_B + "' | cat 2>&1 \"$(pwsh)\""),
+    ("pwsh nested after a pipe", "echo '" + _SUB_B + "' | cat \"$(echo \"$(pwsh)\")\""),
+    ("pwsh in a group a pipe feeds", "echo '" + _SUB_B + "' | { true; cat \"$(pwsh)\"; }"),
+    ("pwsh in a subshell a pipe feeds", "echo '" + _SUB_B + "' | ( true; cat \"$(pwsh)\" )"),
+    ("pwsh in a multi-line group a pipe feeds",
+     "echo '" + _SUB_B + "' | {" + _SUB_NL + "cat \"$(pwsh)\"" + _SUB_NL + "}"),
+    ("pwsh in a loop a pipe feeds",
+     "echo '" + _SUB_B + "' | while read l; do echo \"$(pwsh)\"; done"),
+    ("pwsh in an if a pipe feeds",
+     "echo '" + _SUB_B + "' | if true; then cat \"$(pwsh)\"; fi"),
+    ("pwsh after ${...} holding ; past a pipe",
+     "echo '" + _SUB_B + "' | cat ${x//;/} \"$(pwsh)\""),
+    ("pwsh after ${...} holding & past a pipe",
+     "echo '" + _SUB_B + "' | cat ${x//&/} \"$(pwsh)\""),
+    # Comments: `#` starts one only at a word's start, and runs to the line's end.
+    ("eval behind a drive path and a #' comment", _SUB_DRIVE + "eval '" + _SUB_B + "' #'"),
+    ("bare eval behind a drive path and a #' comment", _SUB_DRIVE + _SUB_E + " #'"),
+    ("bash -c eval behind a drive path and a #' comment",
+     _SUB_DRIVE + "bash -c '" + _SUB_E + "' #'"),
+    ("cmd twice behind a drive path and a #' comment",
+     _SUB_DRIVE + "cmd /c 'cmd /c " + _SUB_B + "' #'"),
+    ("wsl twice behind a drive path and a #' comment", _SUB_DRIVE + "wsl wsl " + _SUB_B + " #'"),
+    ("su -c behind a drive path and a #' comment", _SUB_DRIVE + "su -c '" + _SUB_B + "' #'"),
+    ("a comment hiding a continuation", "echo x # " + _SUB_BS + _SUB_NL + _SUB_E),
+    ("a #' comment line before eval", "echo #'" + _SUB_NL + _SUB_E + _SUB_NL + "'"),
+    ("a #' comment line before pwsh", "echo #'" + _SUB_NL + _SUB_P + _SUB_NL + "'"),
+    ("case pattern in a quoted substitution", 'echo "$(case a in a) ' + _SUB_E + ';; esac)"'),
+    ("case pattern with pwsh in a quoted substitution",
+     'echo "$(case a in a) ' + _SUB_P + ';; esac)"'),
+    ("case pattern in parens in a quoted substitution",
+     'echo "$(case a in (a) ' + _SUB_E + ';; esac)"'),
+]
+# A word goes on past a substitution's end, so a `#` there starts no comment; inside
+# ${...} and arithmetic, `#` and `<<` are not a comment or a heredoc.
+for _sub_tag, _sub_pay in (("pwsh", 'echo "$(' + _SUB_P + ')"'), ("eval", 'echo "$(' + _SUB_E + ')"')):
+    _SUB_ROWS += [
+        (f"{_sub_tag} after $(...)#", "echo $(true)# " + _sub_pay),
+        (f"{_sub_tag} after $((...))#", "echo $((1))# " + _sub_pay),
+        (f"{_sub_tag} after backticks#", "echo `true`# " + _sub_pay),
+        (f"{_sub_tag} after ${{x}}#", "echo ${x}# " + _sub_pay),
+        (f"{_sub_tag} after <(...)#", "cat <(true)# " + _sub_pay),
+        (f"{_sub_tag} after # inside ${{...}}", "echo ${x// #/} " + _sub_pay),
+        (f"{_sub_tag} after a default holding #", "echo ${x:- #} " + _sub_pay),
+        (f"{_sub_tag} after << inside ${{...}}", "echo ${x#<<'EOF'}" + _SUB_NL + _sub_pay),
+        (f"{_sub_tag} after << in arithmetic", "(( y = 1 <<'2' ))" + _SUB_NL + _sub_pay),
+        (f"{_sub_tag} after << in $((...))", "y=$(( 1 <<'2' ))" + _SUB_NL + _sub_pay),
+    ]
+CASES += [(f"subst: {label}", cmd, B, ()) for label, cmd in _SUB_ROWS]
+
+_SUB_PS_ROWS = [
+    ("cmd three levels in a subexpression",
+     'Write-Output "$(cmd /c cmd /c cmd /c ' + _SUB_B + ')"'),
+    ("pwsh two levels in a subexpression",
+     "Write-Output \"$(pwsh -c 'pwsh -c ''" + _SUB_B + "''')\""),
+    ("bash -c eval in a subexpression", "Write-Output \"$(bash -c '" + _SUB_E + "')\""),
+    ("wsl twice in a subexpression", 'Write-Output "$(wsl wsl ' + _SUB_B + ')"'),
+    ("a subexpression after a doubled quote",
+     'Write-Output "x""$(cmd /c cmd /c cmd /c ' + _SUB_B + ')"'),
+    ("a subexpression after a here-string assigned",
+     "$x=@'" + _SUB_NL + "it's" + _SUB_NL + "'@" + _SUB_NL
+     + 'Write-Output "$(cmd /c cmd /c cmd /c ' + _SUB_B + ')"'),
+    ("a subexpression after a here-string in an array",
+     "$x=,@'" + _SUB_NL + "it's" + _SUB_NL + "'@" + _SUB_NL
+     + 'Write-Output "$(cmd /c cmd /c cmd /c ' + _SUB_B + ')"'),
+    ("a subexpression after a cast here-string",
+     "$x=[string]@'" + _SUB_NL + "it's" + _SUB_NL + "'@" + _SUB_NL
+     + 'Write-Output "$(cmd /c cmd /c cmd /c ' + _SUB_B + ')"'),
+    ("a subexpression in an expandable here-string after one assigned",
+     "$x=@\"" + _SUB_NL + "it's" + _SUB_NL + "\"@" + _SUB_NL
+     + 'Write-Output "$(cmd /c cmd /c cmd /c ' + _SUB_B + ')"'),
+]
+PS_CASES += [(f"subst: {label}", cmd, B, ()) for label, cmd in _SUB_PS_ROWS]
+CASES += [
+    # A pwsh script reached from the Bash tool: its subexpressions likewise.
+    ("subst: a pwsh script's subexpression",
+     "pwsh -c 'Write-Output \"$(cmd /c cmd /c cmd /c " + _SUB_B + ")\"'", B, ()),
+    ("subst: a pwsh script's subexpression with wsl",
+     "pwsh -c 'Write-Output \"$(wsl wsl " + _SUB_B + ")\"'", B, ()),
+    ("subst: a pwsh script's subexpression with pwsh",
+     "pwsh -c 'Write-Output \"$(pwsh -c ''pwsh -c \"\"" + _SUB_B + "\"\"'')\"'", B, ()),
+]
+
+_SUB_FP_ROWS = [
+    ("a quoted substitution", 'echo "$(git rev-parse HEAD)"'),
+    ("eval of a harmless command", 'echo "$(eval echo hi)"'),
+    ("su -c of a harmless command", "echo \"$(su -c 'id')\""),
+    ("a pwsh substitution assigned", "x=\"$(pwsh -c 'Get-Date')\"; echo \"$x\""),
+    ("the commit-message heredoc idiom",
+     'git commit -m "$(cat <<' + "'EOF'" + _SUB_NL + "fix (a): don't eval # things" + _SUB_NL
+     + "rm is mentioned here" + _SUB_NL + "EOF" + _SUB_NL + ')"'),
+    ("a PR body heredoc",
+     'gh pr create --title t --body "$(cat <<' + "'EOF'" + _SUB_NL + "## Summary" + _SUB_NL
+     + "- it's fine (really)" + _SUB_NL + "EOF" + _SUB_NL + ')"'),
+    ("a bare-delimiter PR body with a substitution",
+     'gh pr create --body "$(cat <<EOF' + _SUB_NL + "head $(git rev-parse HEAD)" + _SUB_NL
+     + "EOF" + _SUB_NL + ')"'),
+    ("a drive path and a #' comment", _SUB_DRIVE + "echo hi #'"),
+    ("a loop over a substitution with a comment",
+     'for f in $(ls); do echo "$f"; done # comment'),
+    ("a substitution in a loop a pipe feeds",
+     'git ls-files | while read f; do echo "$(basename "$f")"; done'),
+    ("a substitution in sed after a pipe", 'ls | sed "s/a/$(echo b)/"'),
+    ("a substitution as a script after a pipe", 'ls | python -c "$(cat x)"'),
+    ("a substitution before a pipe", 'cat "$(git rev-parse --show-toplevel)/x" | grep y'),
+    ("a substitution after a finished pipe", 'x | y; cat "$(bash --version)"'),
+    ("a substitution after a finished group", 'x | { a; }; cat "$(bash --version)"'),
+    ("a substitution after a finished loop",
+     'x | while read l; do :; done; cat "$(bash --version)"'),
+    ("case in a substitution", "x=$(case $y in a) echo 1;; *) echo 2;; esac)"),
+    ("arithmetic and parameter expansions", "y=$(( 1 << 2 )); echo ${#x} ${x#pre} ${x// /_}"),
+]
+CASES += [(f"fp subst: {label}", cmd, A, ()) for label, cmd in _SUB_FP_ROWS]
+_SUB_PS_FP_ROWS = [
+    ("a subexpression", 'Write-Output "Today is $(Get-Date)"'),
+    ("a member subexpression", '$n = "$($items.Count) items"; Write-Output $n'),
+    ("a commit message with a subexpression", 'git commit -m "fix: $(Get-Date -Format o)"'),
+    ("an apostrophe and a subexpression", "Write-Output \"it's $(1 + 2)\""),
+    ("a single-quoted subexpression is text",
+     "Write-Output '$(cmd /c cmd /c cmd /c " + _SUB_B + ")'"),
+    ("a here-string commit message",
+     "$m=@'" + _SUB_NL + "fix: don't $(do) it" + _SUB_NL + "'@" + _SUB_NL + "git commit -m $m"),
+]
+PS_CASES += [(f"fp subst: {label}", cmd, A, ()) for label, cmd in _SUB_PS_FP_ROWS]
+CASES += [("fp subst: a pwsh script's subexpression",
+           "pwsh -c 'Write-Output \"$(Get-Date)\"'", A, ())]
+CASES += [
+    ("fp subst: process substitutions in a substitution",
+     'echo "n=$(diff <(sort a) <(sort b) | wc -l)"', A, ()),
+    ("fp subst: process substitutions in a substitution, compared",
+     'echo "m=$(cmp -s <(tail -n 1 a) <(printf x) && echo same || echo DIFF)"', A, ()),
+    # Accepted cost: a quoted heredoc is literal, but its body is also read as a bare
+    # one's (the permissive reading), so a substitution written in it is judged.
+    ("fp cost: subst: a blocked command in a substitution in a quoted heredoc",
+     "python - <<'EOF'" + _SUB_NL + "tests = ['echo \"$(git push --force)\"']" + _SUB_NL
+     + "EOF", B, ()),
+]
+
+
+def _sub_open_frames_in_heredoc(unit):
+    """4 KB: a bare heredoc whose body opens a substitution per unit, none closed."""
+    nl = chr(10)
+    return ("cat <<EOF" + nl + unit * 4000)[:4096 - 12] + nl + "EOF" + nl + "echo hi"
+
+
+def _sub_fit(make):
+    """make(k) for the largest k whose text is at most 4096 characters."""
+    k = 1
+    while len(make(k + 1)) <= 4096:
+        k += 1
+    return make(k)
+
+
+STRUCT_CASES += [
+    # The scanners' readings, on fixed inputs.
+    ("subst: nested bodies, each with its child replaced",
+     lambda: m._bash_substitutions('echo "$(a "$(b)")"'),
+     ([("b", False), ('a "$(:)"', False)], None)),
+    ("subst: a backtick body is unescaped",
+     lambda: m._bash_substitutions("echo `a " + _SUB_BS + "`b" + _SUB_BS + "``")[0],
+     [("a `b`", False)]),
+    ("subst: an unterminated body runs to the end",
+     lambda: m._bash_substitutions('echo "$(a b')[0], [("a b", False)]),
+    ("subst: a comment is removed",
+     lambda: m._bash_substitutions("echo a # x'" + _SUB_NL + "b"), ([], "echo a " + _SUB_NL + "b")),
+    ("subst: no comment right after a substitution",
+     lambda: m._bash_substitutions("echo $(a)#x")[1], None),
+    ("subst: no comment inside ${...}", lambda: m._bash_substitutions("echo ${x// #/}")[1], None),
+    ("subst: a quoted heredoc is literal",
+     lambda: m._bash_substitutions("cat <<'E'" + _SUB_NL + "$(x)" + _SUB_NL + "E")[0], []),
+    ("subst: a bare heredoc runs its substitutions",
+     lambda: m._bash_substitutions("cat <<E" + _SUB_NL + "$(x)" + _SUB_NL + "E")[0],
+     [("x", False)]),
+    ("subst: <<- strips the delimiter's tabs",
+     lambda: m._bash_substitutions("cat <<-E" + _SUB_NL + "$(x)" + _SUB_NL + "\tE"
+                                   + _SUB_NL + "$(y)")[0], [("x", False), ("y", False)]),
+    ("subst: the permissive reading reads a quoted heredoc",
+     lambda: m._bash_substitutions("cat <<'E'" + _SUB_NL + "$(x)" + _SUB_NL + "E", True)[0],
+     [("x", False)]),
+    ("subst: a here-string is no heredoc",
+     lambda: m._bash_substitutions("cat <<<'x'" + _SUB_NL + "$(y)")[0], [("y", False)]),
+    ("subst: a case pattern does not end the body",
+     lambda: m._bash_substitutions("$(case a in a) z;; esac)")[0],
+     [("case a in a) z;; esac", False)]),
+    ("subst: after a pipe the body is fed",
+     lambda: m._bash_substitutions('x | y "$(z)"')[0], [("z", True)]),
+    ("subst: before a pipe it is not",
+     lambda: m._bash_substitutions('y "$(z)" | x')[0], [("z", False)]),
+    ("subst: a pipe feeds a group to its end",
+     lambda: m._bash_substitutions('x | { a; b "$(z)"; }; c "$(w)"')[0],
+     [("z", True), ("w", False)]),
+    ("subst: a pipe's pipeline ends at ;",
+     lambda: m._bash_substitutions('x | y; b "$(z)"')[0], [("z", False)]),
+    ("subst: PowerShell subexpressions in code and strings, not in '...'",
+     lambda: m._ps_subexpressions("Write-Output \"$(a)\" '$(b)' $(c)"), ["a", "c"]),
+    ("subst: PowerShell escaped and doubled-quote subexpressions",
+     lambda: m._ps_subexpressions('Write-Output "`$(a)" "x""$(b)"'), ["b"]),
+    ("subst: PowerShell here-string after =",
+     lambda: m._ps_subexpressions("$x=@'" + _SUB_NL + "it's $(a)" + _SUB_NL + "'@"
+                                  + _SUB_NL + '"$(b)"'), ["b"]),
+    ("subst: PowerShell block comment skipped",
+     lambda: m._ps_subexpressions("<# $(a) #> $(b)"), ["b"]),
+    ("subst: PowerShell permissive reading reads a block comment",
+     lambda: m._ps_subexpressions("<# $(a) #> $(b)", True), ["a", "b"]),
+    # Work stays linear in the text: open frames inside a heredoc hand their bodies up
+    # (each child becomes a 4-character `$(:)`, so the bodies stay within 3x the text).
+    ("subst: bodies of open frames in a heredoc stay linear",
+     lambda: sum(len(b) for b, _ in m._bash_substitutions(
+         _sub_open_frames_in_heredoc("$(: "))[0]) <= 3 * 4096, True),
+    ("timing: 4 KB of open substitutions in a heredoc",
+     lambda: _timing("bash", _sub_open_frames_in_heredoc("$(: ")) < 3.0, True),
+    ("timing: 4 KB of nested quoted substitutions",
+     lambda: _timing("bash", _sub_fit(lambda k: "echo " + '"$(echo ' * k + "x" + ')"' * k))
+     < 3.0, True),
+    ("timing: 4 KB of nested PowerShell subexpressions",
+     lambda: _timing("powershell", _sub_fit(
+         lambda k: "Write-Output " + '"$(Write-Output ' * k + "x" + ')"' * k)) < 3.0, True),
+]
 
 
 # Optional pytest entry point. This file is named test_*.py, so `pytest tests/`
