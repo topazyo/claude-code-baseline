@@ -2473,10 +2473,23 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                 first, first_run = len(lenient), len(lenient_runs)
                 for words in _lenient_words(line):
                     line_latch = _Latch()      # one per call, as before; read back below
-                    for toks in _words_to_segments(words, latch=line_latch):
+                    segs = list(_words_to_segments(words, latch=line_latch))
+                    for toks in segs:
                         toks.ps_tool, toks.cmd_script = ps_tool, cmd_script
-                        for seg in [toks] + (_cmd_prefix_variants(toks)
-                                             if cmd_script else []):
+                    # Quote-blind words split a cmd runner's script at its & | && || as
+                    # if they were the shell's: when the line holds a cmd runner (or Git
+                    # Bash's start), each of its segments may be one of that script's
+                    # commands, so each also gets cmd's prefix readings, plain and with
+                    # cmd's delimiters (`echo "$(cmd //c 'echo a & call,x')"`).
+                    cmd_line = cmd_script or any(
+                        kind == "cmd" for t in segs for kind, _, _ in _runner_rests(t))
+                    for toks in segs:
+                        extra = []
+                        if cmd_line:
+                            delims = _new_seg(" ".join(toks).translate(_CMD_DELIMS).split(),
+                                              getattr(toks, "piped", False))
+                            extra = _cmd_prefix_variants(toks) + _cmd_prefix_variants(delims)
+                        for seg in [toks] + extra:
                             lenient.append(seg)
                             lenient.extend(_lenient_inline(seg))
                             lenient_runs.extend(_lenient_runner(seg, outer_expanded))

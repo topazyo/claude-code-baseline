@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 482
+FP_FLOOR = 485
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1084
+BLOCK_FLOOR = 1096
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2848,6 +2848,23 @@ _CMD_PREFIX_ROWS = [
     ("cmd call= rm -rf in a substitution", 'echo "$(cmd //c call=rm -rf ~)"'),
     ("cmd call, in a backtick substitution", 'echo "`cmd //c call,git push --force`"'),
     ("pwsh script: cmd --% then ;call", "pwsh -c 'cmd --% /c ;call git push --force'"),
+    # In a quote-blind substitution a cmd script's & | && || split it as the shell's would:
+    # each segment of a line holding a cmd runner also gets cmd's prefix readings.
+    ("cmd & call in a substitution", "echo \"$(cmd //c 'echo a & call git push --force')\""),
+    ("cmd && @ in a substitution", "echo \"$(cmd //c 'echo a && @git push --force')\""),
+    ("cmd | call in a substitution", "echo \"$(cmd //c 'echo a | call git push --force')\""),
+    ("cmd &call glued in a substitution", "echo \"$(cmd //c 'echo a&call git push --force')\""),
+    ("cmd & call, in a substitution", "echo \"$(cmd //c 'echo a & call,git push --force')\""),
+    ("cmd || if in a substitution", "echo \"$(cmd //c 'echo a || if 1==1 git push --force')\""),
+    ("cmd & if then @ in a substitution",
+     "echo \"$(cmd //c 'echo a & if a==b @git push --force')\""),
+    ("cmd escaped & call in a substitution",
+     'echo "$(cmd //c echo a ' + _BS + '& call git push --force)"'),
+    ("cmd backslash-quote & call in a substitution",
+     "echo \"$(cmd //c 'echo \"a" + _BS + "\" & call git push --force & echo \"b" + _BS
+     + "\"')\""),
+    ("git bash start & call in a substitution", "echo \"$(start 'echo a & call git push --force')\""),
+    ("cmd & if then rm -rf in a substitution", "echo \"$(cmd //c 'echo a & if 1==1 rm -rf ~')\""),
     # cmd has no backslash escape: `"a\"` closes its string, so the & after it separates.
     ("cmd backslash-quote, then rm -rf",
      "cmd //c 'echo \"a" + _BS + "\" & rm -rf ~ & echo \"b" + _BS + "\"'"),
@@ -2906,6 +2923,10 @@ _CMD_PREFIX_FP_ROWS = [
      "cmd //c '\"C:" + _BS + "Program Files" + _BS + "x" + _BS + "x.exe\" --help'"),
     ("cmd backslash-quote, then a harmless command",
      "cmd //c 'echo \"a" + _BS + "\" & echo b'"),
+    ("cmd & call a batch file in a substitution", "echo \"$(cmd //c 'echo a & call build.bat')\""),
+    ("cmd & echo with an = in a substitution", "echo \"$(cmd //c 'echo a=b & echo c')\""),
+    ("a substitution, then echo naming call",
+     'echo "$(git status)" && echo call git push --force'),
 ]
 CASES += [(f"cmd prefix: {label}", cmd, B, ()) for label, cmd in _CMD_PREFIX_ROWS]
 CASES += [(f"fp cmd prefix: {label}", cmd, A, ()) for label, cmd in _CMD_PREFIX_FP_ROWS]
@@ -3028,6 +3049,8 @@ PS_CASES += [
     ("ps cmd prefix: a backslash before a quote is no escape to cmd",
      "cmd /c 'echo \"a" + _BS + "\" & call git push --force & echo \"b" + _BS + "\"'", B, ()),
     ("ps fp cmd prefix: --% then a quoted &", 'cmd --% /c echo "a & b"', A, ()),
+    ("ps cmd prefix: & call in a substitution",
+     "echo \"$(cmd /c 'echo a & call git push --force')\"", B, ()),
     ("ps fp cmd prefix: --% then a commit message with ; and call",
      'cmd --% /c git commit -m "fix; call it done"', A, ()),
     ("ps fp cost cmd prefix: --% then a blocked command quoted for echo",
