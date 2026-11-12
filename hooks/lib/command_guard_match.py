@@ -2440,7 +2440,9 @@ def _word_span_end(text: str, j: int) -> int:
     """End (exclusive) of the `$(...)`, `${...}` or backtick span at text[j] inside a
     heredoc word. Quotes and backslashes are skipped while counting parens or braces,
     and the span never crosses a line break, so a wrong count costs only the rest of
-    its line: the lines after it are still read."""
+    its line: the lines after it are still read. A `case` inside the span is not
+    modelled (its pattern's `)` ends the span): the scanner's delimiter then matches no
+    line and its heredoc runs on to the end of the text, which over-reads."""
     n, tick = len(text), text[j] == "`"
     opener = "" if tick else text[j + 1]
     closer = "`" if tick else ")" if opener == "(" else "}"
@@ -2474,7 +2476,10 @@ def _heredoc_word(text: str, j: int):
     word ends at an unquoted blank or operator character, quotes and backslashes are
     removed (`E\\ O`, `'E O'`, `"E\\"F"`; `$'...'` decoded), and any of them makes the
     body literal; `$(...)`, `${...}` and backticks are kept whole, blanks and all
-    (`<<a$(b c)`). An empty quoted word (`<<''`) ends at an empty line."""
+    (`<<a$(b c)`, and inside "..." too: `<<"a$(: "'")"`). A quoted part stops at a line
+    break (bash's delimiter would then span lines and match none, so its heredoc runs
+    to the end of the text, as the scanner's does). An empty quoted word (`<<''`) ends
+    at an empty line."""
     n, out, quoted = len(text), [], False
     while j < n and text[j] not in " \t\n;&|()<>":
         c = text[j]
@@ -2488,7 +2493,13 @@ def _heredoc_word(text: str, j: int):
                 j += 1
                 c = text[j]
             j += 1
-            while j < n and text[j] != c:
+            while j < n and text[j] not in (c, "\n"):     # a quoted part stays on its line
+                if c == '"' and (text[j] == "`" or (text[j] == "$"
+                                                    and text[j + 1:j + 2] in ("(", "{"))):
+                    k = _word_span_end(text, j)        # a substitution in "...": whole
+                    out.append(text[j:k])
+                    j = k
+                    continue
                 if text[j] == "\\" and j + 1 < n and ansi:
                     s, j = _ansi_escape(text, j)
                     out.append(s)
@@ -2497,7 +2508,7 @@ def _heredoc_word(text: str, j: int):
                     j += 1
                 out.append(text[j])
                 j += 1
-            j += 1
+            j += text[j:j + 1] == c                    # its closing quote, if on the line
         elif c == "`" or (c == "$" and text[j + 1:j + 2] in ("(", "{")):
             k = _word_span_end(text, j)                # `$(...)` `${...}` `...`: one span
             out.append(text[j:k])
@@ -2542,11 +2553,11 @@ def _bash_substitutions(text: str, reading: str = "strict"):
     reading: callers judge the bodies of every reading (see _bash_bodies). "strict" is
     bash's. Three of its decisions are also read the other way: where a comment starts
     ("open" skips none, so none is returned; "hash" starts one at every `#` outside a
-    word's quotes and arithmetic), whether a heredoc is literal ("open" reads every body
-    as a bare delimiter's), and where a case opens ("open" reads no `case`, so any
-    unmatched `)` ends a body; "eager" opens one at any word `case`, where a command
-    starts or not). The rest (a case pattern's parens, a heredoc's delimiter,
-    arithmetic, the pipe) follow bash alone."""
+    word's quotes and arithmetic), how a heredoc is read ("open" reads every body as a
+    bare delimiter's, and its delimiter word as code too), and where a case opens
+    ("open" reads no `case`, so any unmatched `)` ends a body; "eager" opens one at any
+    word `case`, where a command starts or not). The rest (a case pattern's parens,
+    where a delimiter line is, arithmetic, the pipe) follow bash alone."""
     bodies, comments = [], []
     open_, hash_, eager = (reading == r for r in _SCAN_READINGS[1:])
 
@@ -2756,7 +2767,7 @@ def _bash_substitutions(text: str, reading: str = "strict"):
             if delim or quoted:
                 pending.append((delim, strip, quoted and not open_))
             f["cmd"] = False
-            i = j
+            i = i + 2 + strip if open_ else j          # open: the word is read as code too
             continue
         elif c == "\n" and pending:
             j, spans = i + 1, []

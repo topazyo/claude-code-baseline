@@ -37,7 +37,7 @@ FP_FLOOR = 520
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1308
+BLOCK_FLOOR = 1318
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3337,6 +3337,17 @@ _SUB_SPAN_ROWS = [
      "cat <<a$(: " + _SUB_BS + "()" + _SUB_NL + 'x "$({E})"'),
     ("a heredoc word with a quoted brace in ${...}",
      'cat <<a${x:-"{"}' + _SUB_NL + 'x "$({E})"'),
+    # Inside a "..." part of the word too; a quoted part stays on its line.
+    ("a $(...) in a quoted heredoc word, then a body",
+     "cat <<" + '"a$(: "' + "'" + '")" ; echo "$({E})" # ' + "'" + _SUB_NL + "body"),
+    ("a $(...) in a quoted heredoc word",
+     "cat <<" + '"a$(: "' + "'" + '")" ; echo "$({E})" # ' + "'"),
+    ("backticks in a quoted heredoc word",
+     "cat <<" + '"a`: "' + "'" + '"`" ; echo "$({E})" # ' + "'" + _SUB_NL + "body"),
+    ("a $(...) in a quoted heredoc word before &&",
+     "y=1; cat <<" + '"a$(: "' + "'" + '")" && echo "$({E})" # ' + "'"),
+    ("a $(...) in a $-quoted heredoc word",
+     "cat <<$" + '"a$(: "' + "'" + '")" ; echo "$({E})" # ' + "'"),
 ]
 for _sub_tag, _sub_pay in (("eval", _SUB_E), ("pwsh", _SUB_P)):
     _SUB_ROWS += [(f"{label} ({_sub_tag})", cmd.replace("{E}", _sub_pay))
@@ -3637,6 +3648,14 @@ STRUCT_CASES += [
      ("a$(: " + _SUB_BS + "()", False, 8)),
     ("subst: a heredoc word's span stops at a line break",
      lambda: m._heredoc_word('a$(: "' + _SUB_NL + 'x")', 0), ('a$(: "', False, 6)),
+    ("subst: a $(...) in a heredoc word's quoted part is whole",
+     lambda: m._heredoc_word('"a$(: "' + "'" + '")" x', 0), ('a$(: "' + "'" + '")', True, 11)),
+    ("subst: a heredoc word's quoted part stops at a line break",
+     lambda: m._heredoc_word("'a" + _SUB_NL + "b'", 0), ("a", True, 2)),
+    ("subst: the strict reading skips a heredoc word",
+     lambda: m._bash_substitutions('cat <<"a$(b)"' + _SUB_NL + "E")[0], []),
+    ("subst: the open reading reads a heredoc word as code",
+     lambda: m._bash_substitutions('cat <<"a$(b)"' + _SUB_NL + "E", "open")[0], [("b", False)]),
     ("subst: the lines after an unbalanced heredoc word are read",
      lambda: m._bash_substitutions('cat <<a$(: "(")' + _SUB_NL + 'x "$(y)"')[0], [("y", False)]),
     ("subst: a heredoc ends at a delimiter holding a substitution",
