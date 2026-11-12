@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 518
+FP_FLOOR = 520
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1276
+BLOCK_FLOOR = 1292
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3289,6 +3289,14 @@ _SUB_CASE_ROWS = [
     ("case on lines",
      'echo "$(case a in' + _SUB_NL + "a) :" + _SUB_NL + "esac" + _SUB_NL + '{E})"'),
     ("nested case", 'echo "$(case a in a) case b in b) :;; esac;; esac; {E})"'),
+    # An extglob group's `)` (and `|`) belong to the pattern.
+    ("an @(...) pattern", "shopt -s extglob" + _SUB_NL + 'echo "$(case a in @(a|b)) {E};; esac)"'),
+    ("a +(...) pattern", "shopt -s extglob" + _SUB_NL + 'echo "$(case a in +(a)) {E};; esac)"'),
+    ("a !(...) pattern", "shopt -s extglob" + _SUB_NL + 'echo "$(case a in !(b)) {E};; esac)"'),
+    ("an @(...) pattern before the arm",
+     "shopt -s extglob" + _SUB_NL + 'echo "$(case a in @(z)) :;; a) {E};; esac)"'),
+    ("an @(...) pattern in a function",
+     "shopt -s extglob" + _SUB_NL + 'f() { echo "$(case a in @(a|b)) {E};; esac)"; }; f'),
 ]
 # A heredoc's delimiter is read with its quoting (`E\ O`, `''`, `$'...'`, `"E\"F"`);
 # inside arithmetic a '...' hides no substitution; `((...))` ends a word.
@@ -3380,6 +3388,12 @@ _SUB_PS_WORD_ROWS = [
      "$x=[int]#'" + _SUB_NL + "1" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
     ("a #' after a comma", "$x=1,#'" + _SUB_NL + "2" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
     ("a #' after )", "Write-Output (1)#'" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+    # After `--%` the line is verbatim: its quotes open nothing.
+    ("a quote after --% on a cmdlet",
+     "Write-Output --% it's" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+    ("a quote after --% on Get-Date",
+     "Get-Date --% it's" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
+    ("a quote after --% on git", "git --% it's" + _SUB_NL + 'Write-Output "$({P})" # ' + "'"),
 ]
 for _sub_tag, _sub_pay in (("cmd", "cmd /c cmd /c cmd /c " + _SUB_B),
                            ("pwsh", "pwsh -c 'pwsh -c ''" + _SUB_B + "'''")):
@@ -3435,6 +3449,9 @@ _SUB_FP_ROWS = [
     ("a pipe across a line break", "ls |" + _SUB_NL + "grep x"),
     ("$[...] arithmetic", "echo $[ 3 ]"),
     ("a process substitution in a default", "echo ${x:-<(sort a)}"),
+    ("an extglob case pattern",
+     "shopt -s extglob" + _SUB_NL
+     + 'for f in *; do case "$f" in @(*.py|*.sh)) echo "$f";; esac; done'),
 ]
 CASES += [(f"fp subst: {label}", cmd, A, ()) for label, cmd in _SUB_FP_ROWS]
 _SUB_PS_FP_ROWS = [
@@ -3447,6 +3464,7 @@ _SUB_PS_FP_ROWS = [
     ("a here-string commit message",
      "$m=@'" + _SUB_NL + "fix: don't $(do) it" + _SUB_NL + "'@" + _SUB_NL + "git commit -m $m"),
     ("a # inside a bareword", "Write-Output a#b"),
+    ("a stop-parsing git log", "git --% log -1 --format=%H"),
     ("a typographic here-string", "$m=@" + chr(0x201C) + _SUB_NL + "x $(Get-Date)" + _SUB_NL
      + chr(0x201D) + "@" + _SUB_NL + "Write-Output $m"),
 ]
@@ -3559,6 +3577,11 @@ STRUCT_CASES += [
     ("subst: the open reading opens no case",
      lambda: m._bash_substitutions("$(case a in a) b;; esac)", "open")[0],
      [("case a in a", False)]),
+    ("subst: an extglob group's ) ends no pattern",
+     lambda: m._bash_substitutions('echo "$(case a in @(a|b)) b;; esac)"')[0],
+     [("case a in @(a|b)) b;; esac", False)]),
+    ("subst: an extglob group's | is no pipe",
+     lambda: m._bash_substitutions('case a in @(a|b)) c "$(d)";; esac')[0], [("d", False)]),
     ("subst: a | between patterns is no pipe",
      lambda: m._bash_substitutions('case $y in a|b) c "$(d)";; esac')[0], [("d", False)]),
     ("subst: the strict reading's fed wins for the same body",
@@ -3575,6 +3598,13 @@ STRUCT_CASES += [
     ("subst: empty quoted heredoc word", lambda: m._heredoc_word("''", 0), ("", True, 2)),
     ("subst: bare heredoc word", lambda: m._heredoc_word("EOF;", 0), ("EOF", False, 3)),
     ("subst: partly quoted heredoc word", lambda: m._heredoc_word("E'O'F x", 0), ("EOF", True, 5)),
+    ("subst: a heredoc word keeps a substitution whole",
+     lambda: m._heredoc_word("a$(b c) x", 0), ("a$(b c)", False, 7)),
+    ("subst: a heredoc word keeps backticks whole",
+     lambda: m._heredoc_word("`b c`x y", 0), ("`b c`x", False, 6)),
+    ("subst: a heredoc ends at a delimiter holding a substitution",
+     lambda: m._bash_substitutions("cat <<a$(b c)" + _SUB_NL + "$(x)" + _SUB_NL + "a$(b c)"
+                                   + _SUB_NL + "$(y)")[0], [("x", False), ("y", False)]),
     ("subst: a heredoc ends at its whole delimiter",
      lambda: m._bash_substitutions("cat <<E" + _SUB_BS + " O" + _SUB_NL + "E" + _SUB_NL + "$(a)"
                                    + _SUB_NL + "E O" + _SUB_NL + "$(b)")[0], [("b", False)]),
@@ -3613,6 +3643,14 @@ STRUCT_CASES += [
                                   + "@" + _SUB_NL + "$(b)"), ["b"]),
     ("subst: PowerShell strict reading: no comment after a number",
      lambda: m._ps_subexpressions("$x=1#'" + _SUB_NL + "$(a) '"), []),
+    ("subst: PowerShell --% makes the line verbatim",
+     lambda: m._ps_subexpressions("git --% it's" + _SUB_NL + "$(a) '"), ["a"]),
+    ("subst: PowerShell --% ends at a pipe",
+     lambda: m._ps_subexpressions("git --% $(a) | $(b)"), ["b"]),
+    ("subst: PowerShell open reading reads past --%",
+     lambda: m._ps_subexpressions("git --% $(a)", "open"), ["a"]),
+    ("subst: PowerShell --% glued to a word is no stop-parsing",
+     lambda: m._ps_subexpressions("git a--% $(a)"), ["a"]),
     ("subst: PowerShell hash reading starts one at every #",
      lambda: m._ps_subexpressions("$x=1#'" + _SUB_NL + "$(a) '", "hash"), ["a"]),
     # Work stays linear in the text: open frames inside a heredoc hand their bodies up
