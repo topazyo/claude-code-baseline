@@ -545,10 +545,11 @@ def _wrapper_assignment(base: str, t: str, consume=True) -> bool:
     always: upstream sudo runs one led by `/` or `=` as the command, sudo-rs takes one only
     when its NAME is alphanumeric or `_`, and Windows sudo.exe takes none. An operand
     without a path separator is skipped in every reading: read as the command it keeps its
-    `=`, so it names no program a rule knows. One holding a separator may be a path to the program, so it is skipped only in
-    the wide reading and read as the command in the others; one led by `/` is the command
-    under every sudo. For sudo the wide reading takes the same option values as the table
-    (no _WRAPPER_VALUE_*_WIDE entry): one added there would need a reading of its own."""
+    `=`, so it names no program a rule knows. One holding a separator may be a path to the
+    program, so it is skipped only in the wide reading and read as the command in the
+    others; one led by `/` is the command under every sudo. For sudo the wide reading takes
+    the same option values as the table (no _WRAPPER_VALUE_*_WIDE entry): one added there
+    would need a reading of its own."""
     if base not in _WRAPPER_ASSIGNS or "=" not in t or t.startswith("-"):
         return False
     if base == "env":
