@@ -965,6 +965,15 @@ def _reasons_for(toks):
             r = "shell reading its commands from a pipe (uninspectable)"
             if r not in out:
                 out.append(r)
+        # A cmd script's command word that cmd's variable expansion decides (`call %x%`,
+        # `!x!`, `%COMSPEC% /c ...`): the program is not in the payload. Fail closed. Read
+        # at cmd's own command position, not the bash finders' (which take the condition
+        # of `if %a% neq 0 exit` for the command).
+        if (getattr(seg, "cmd_script", False) and seg
+                and _cmd_expansion_word(seg[_cmd_command_index(seg)])):
+            r = "uninspectable command word (cmd variable expansion in command position)"
+            if r not in out:
+                out.append(r)
         # Judge the command word under both readings of wrapper options (see
         # _WRAPPER_VALUE_SHORTS): a rule that fires on either one blocks.
         seen, rest = set(), []
@@ -1524,10 +1533,29 @@ def _runner_rests(toks):
             outer = any(e > i for e in getattr(toks, "expanding", ()))
         found = len(out)
         if base == "cmd":
-            sw = _cmd_run_switch(args)
-            if sw is not None:
-                j, glued = sw
-                out.append(("cmd", ([glued] if glued else []) + args[j + 1:]))
+            # Git Bash (and pwsh in its Standard mode) hands cmd an empty argument as `""`
+            # (`cmd //c if "" equ "" x`), a word to it; Windows PowerShell, and pwsh's Windows
+            # mode for cmd.exe, drop it. Both are read: these words with it, and the cmd text
+            # re-tokenized without it. (A trailing one lands after a here-string's `-c`
+            # words: only their order differs.)
+            empties = getattr(toks, "empties", ())
+            if empties:
+                args = [w for k in range(i + 1, len(toks) + 1)
+                        for w in [""] * empties.count(k) + list(toks[k:k + 1])]
+            # cmd also takes , = ; and Unicode spaces before its switches (`cmd ,/c x`,
+            # `cmd <U+3000>/c x`, which bash keeps in one word): its words are also read
+            # as cmd reads them (_CMD_DELIMS).
+            # In PowerShell text a `--%` word after the switch is PowerShell's, not cmd's
+            # (the rest of the line is read by _ps_stop_parsing_cmd_scripts); one glued to
+            # the switch (`/c--%`) is cmd's.
+            ps = getattr(toks, "ps_tool", False) or getattr(toks, "ps_script", False)
+            for words in (args, " ".join(args).translate(_CMD_DELIMS).replace(";", " ").split()):
+                sw = _cmd_run_switch(words)
+                if sw is not None:
+                    j, glued = sw
+                    rest = ([glued] if glued else []) + words[j + 1:]
+                    out.append(("cmd", rest[1:] if ps and not glued and rest[:1] == ["--%"]
+                                else rest))
         elif base in _PS_RUNNERS:
             kind, j = _ps_decisive_switch(args)
             if kind == "command":
@@ -1556,25 +1584,23 @@ def _runner_rests(toks):
     return uniq
 
 
-# cmd's own reading of its line: , and = separate words as a space does (so does ;, which
-# the bash reading already ends a segment at); a ' is an ordinary character (deleted
-# here, so the bash tokenizer does not read it as a quote); and a backslash escapes
-# nothing (read as /, so `"a\"` closes its string as it does for cmd).
-_CMD_DELIMS = str.maketrans({",": " ", "=": " ", "'": None, chr(92): "/"})
-
-
 def _cmd_texts(words):
     """The texts a cmd script of these words is read as: joined with spaces; also with
     each word after the first that is empty or holds a space quoted, as the command line
     cmd gets quotes it (Git Bash and PowerShell build it so), which keeps `start "a
     title" /b x` a one-word title (not the first word: a quoted script, `cmd /c "echo
-    $x"`, is unquoted by /c); each of those with its ^ escapes removed; and each of all
-    those with cmd's , = and ' read as cmd reads them (_CMD_DELIMS: `call,git ...`,
-    `echo ' & x & '`)."""
+    $x"`, is unquoted by /c); each of those with an empty "" or '' kept as a word (an `if`
+    operand: `if "" equ "" x`); each of all those with its ^ escapes removed; and each of all
+    those with cmd's , = ' and Unicode spaces read as cmd reads them (_CMD_DELIMS:
+    `call,git ...`, `echo ' & x & '`, `call<NBSP>git ...`)."""
     texts = [" ".join(words)]
     if any(not w or any(c.isspace() for c in w) for w in words[1:]):
         texts.append(" ".join(words[:1] + ['"' + w + '"' if not w or any(
             c.isspace() for c in w) else w for w in words[1:]]))
+    # An empty "" or '' is a word to cmd (an `if` operand: `if "" equ "" x`), where the
+    # bash reading leaves no word at all: also read with each one a word of its own.
+    texts += [t.replace('""', '"_"').replace("''", "_") for t in texts
+              if '""' in t or "''" in t]
     texts += [t.replace("^", "") for t in texts]
     return texts + [t.translate(_CMD_DELIMS) for t in texts]
 
@@ -1629,7 +1655,7 @@ def _lenient_runner(toks, outer_expanded=False):
         variants = [words]
         if kind == "cmd":
             variants.append([w.replace("^", "") for w in words])
-            # cmd's , = and ' (see _CMD_DELIMS), as _runner_scripts reads them.
+            # cmd's , = ' and Unicode spaces (see _CMD_DELIMS), as _runner_scripts reads them.
             variants += [" ".join(v).translate(_CMD_DELIMS).split() for v in list(variants)]
         for v in variants:
             seg = _new_seg(v, getattr(toks, "piped", False))
@@ -2029,10 +2055,14 @@ class _Seg(list):
     herestr_fed: a `<<<` here-string is; heredoc_wide: one of them is on a group or
     compound command that ends here, so it feeds every command in it (see
     _heredoc_check). cmd_script: the segment is part of a script handed to cmd (see
-    _cmd_prefix_variants); scripts nested inside it are not.
+    _cmd_prefix_variants); scripts nested inside it are not. empties: the indexes before
+    which the shell's words held an empty word (`""`, `''`), which the segment drops: Git
+    Bash hands a program each one as an argument, and cmd reads it as a word (see
+    _runner_rests).
     """
     heredoc = heredoc_wide = herestr_fed = False
     cmd_script = False
+    empties = ()
     piped = False
     redirs = ()
     ps_script = False
@@ -2113,6 +2143,7 @@ def _seg_suffix(seg, i, first):
     out.__dict__.update(vars(seg))
     out.redirs = list(getattr(seg, "redirs", ()))
     out.expanding = _suffix_expanding(seg, out)
+    out.empties = tuple(e - i for e in getattr(seg, "empties", ()) if e > i)
     return out
 
 
@@ -2157,6 +2188,35 @@ def _cmd_prefix_variants(seg):
             _RunnerBudget.charge(sum(len(w) + 1 for w in copy))
             out.append(copy)
     return out
+
+
+def _cmd_expansion_word(word: str) -> bool:
+    r"""Does a cmd variable expansion decide which program this command word names? cmd
+    expands `%x%` (`%x:~0,3%`, `%COMSPEC%`) as text before it parses the line, `!x!` when
+    delayed expansion is on (`/v:on`, or the registry's DelayedExpansion, which the
+    command does not show) and a for-variable (`%i`, `%~i`) in its loop's body: the
+    program is the value, which is not in the payload. Anywhere in the word: a value
+    holding a space or a quote moves the word's end (`"%x%\node.exe"`, `%x%/node.exe`
+    run the program x names), so even a literal last path component names nothing. (In
+    PowerShell text, `cmd /c --% ...` hands cmd no `--%` word: see _runner_rests.) Not a
+    URL `start` opens (`https://x/?q=a%20b`): an expansion there names no other program,
+    short of one whose value adds an `&` (cmd `%VAR%` indirection, in README's limits)."""
+    return ("%" in word or "!" in word) and not _URL_SCHEME_RE.match(word)
+
+
+# Only these: a one-letter scheme is a drive (`c://%x%`), and others may name a program.
+_URL_SCHEME_RE = re.compile(r"https?://")
+
+
+def _cmd_command_index(seg) -> int:
+    """The index of cmd's command word in a segment of a cmd script: the first word, past
+    cmd's `do` and `else`. A command behind `@`, `call`, `start` or an `if` condition is
+    the first word of a copy _cmd_prefix_variants makes. `if` is not stepped over as the
+    bash finders step over it: the word after it is the condition."""
+    i = 0
+    while i < len(seg) - 1 and seg[i] in ("do", "else"):
+        i += 1
+    return i
 
 
 def _ps_command_mode(cur, quoted):
@@ -2231,12 +2291,13 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
     call_next = arg_next = foreach_next = False   # see ps_call and ps_foreach on _Seg
     quoted, quoted_value = set(), set()
     exp = set()                            # see expanding on _Seg
+    empties = []                           # see empties on _Seg
     expanding = getattr(words, "expanding", None)   # None: quote-blind words
     latch = _Latch() if latch is None else latch
 
     def close(next_piped, fed=False, op=None, glued_op=False, real_op=False):
         nonlocal cur, redirs, herestr, piped, pending, call_next, arg_next, foreach_next
-        nonlocal quoted, quoted_value, exp, here_exp, heredoc_here
+        nonlocal quoted, quoted_value, exp, here_exp, heredoc_here, empties
         toks = cur + [w for target in herestr for w in ("-c", target)]
         # Each word's value: `$x=.` and `$x=sudo` hold a `.` and a `sudo`.
         values = [w.rsplit("=", 1)[-1] for w in cur]
@@ -2268,6 +2329,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             seg.ps_call = held or held_arg or bool(latch) or method
             seg.ps_foreach = foreach_next
             seg.ps_quoted, seg.ps_quoted_value = frozenset(quoted), frozenset(quoted_value)
+            seg.empties = tuple(empties)
             # A here-string target follows its `-c` at the end of toks (see above).
             seg.expanding = frozenset(exp) | {len(cur) + 2 * j + 1
                                               for j, e in enumerate(here_exp) if e}
@@ -2298,6 +2360,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
         here_exp, heredoc_here = [], False
         quoted, quoted_value = set(), set()
         exp = set()
+        empties = []
 
     for k, word in enumerate(words):
         is_op = isinstance(word, _Op)
@@ -2310,6 +2373,8 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
         prev_op = None                     # glued: the op touches cur[-1]'s word
         for piece in pieces:
             if not piece:
+                if not (is_op or split_words or pending):
+                    empties.append(len(cur))       # an empty word ("", ''): see empties
                 continue
             if is_op or (split_words and _SEP_ONLY_RE.match(piece)):
                 for op in _OP_RE.findall(piece):
@@ -2410,7 +2475,8 @@ _AS_IN_WORD = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\x01"))
 # which Windows PowerShell 5.1 can run on, classify characters with Unicode 5.0.
 # A PowerShell payload holding any of them is also judged with each one a space (see
 # _powershell_segments); bash reads them as part of a word, so a Bash payload is not,
-# but a pwsh/powershell script inside it is (see _runner_scripts and _lenient_words).
+# but a pwsh/powershell script inside it is (see _runner_scripts and _lenient_words),
+# and so is a cmd script (see _CMD_DELIMS).
 # The mapping covers the whole text, quoted strings and inline bash -c scripts too:
 # a quoted string stays one word, and the extra splitting there only adds segments.
 # The readings that keep one inside its word stay, so a command word glued by one to
@@ -2420,6 +2486,15 @@ _AS_IN_WORD = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\x01"))
 _PS_SPACES = "".join(map(chr, (0xA0, 0x1680, 0x180E, *range(0x2000, 0x200B),
                                0x202F, 0x205F, 0x3000)))
 _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
+
+# cmd's own reading of its line: , and = separate words as a space does (so does ;, which
+# the bash reading already ends a segment at), and so does every one of _PS_SPACES (cmd
+# separates words on all Unicode whitespace, U+180E included; tab, VT, FF, NEL, U+2028
+# and U+2029 are bash's or _WORD_BREAKS' already); a ' is an ordinary character (deleted
+# here, so the bash tokenizer does not read it as a quote); and a backslash escapes
+# nothing (read as /, so `"a\"` closes its string as it does for cmd).
+_CMD_DELIMS = str.maketrans({",": " ", "=": " ", "'": None, chr(92): "/",
+                             **dict.fromkeys(_PS_SPACES, " ")})
 
 # Characters after which a `#` starts a bash comment (it must start a word).
 _COMMENT_AFTER = set(" \t\n;&|()<>")
@@ -3071,6 +3146,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                             delims = _Seg(" ".join(toks).translate(_CMD_DELIMS).split())
                             delims.__dict__.update(vars(toks))
                             delims.redirs = list(getattr(toks, "redirs", ()))
+                            delims.empties = ()
                             # Re-split words: the quote-blind rule (any $ word expands)
                             # applies to them anew.
                             delims.expanding = frozenset(
@@ -3780,7 +3856,7 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
                tuple(getattr(toks, "redirs", ())), getattr(toks, "ps_script", False),
                getattr(toks, "ps_tool", False), getattr(toks, "ps_call", False),
                getattr(toks, "ps_foreach", False), getattr(toks, "xargs_fed", False),
-               getattr(toks, "ps_outer", False))
+               getattr(toks, "ps_outer", False), getattr(toks, "cmd_script", False))
         if key not in seen:
             seen.add(key)
             unique.append(toks)

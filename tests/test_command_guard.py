@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 521
+FP_FLOOR = 562
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1330
+BLOCK_FLOOR = 1435
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -1957,7 +1957,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 33
+REASON_FLOOR = 34
 
 
 def _str_value(node):
@@ -3100,6 +3100,287 @@ STRUCT_CASES += [
      lambda u=unit: bool(m.evaluate("cmd //c " + u * (3990 // len(u)) + "git push --force")),
      True)
     for unit in ("if a ", "call ", "start t /b ", "start /d x ", "@")
+]
+
+# cmd's variable expansion decides the command word: `%x%` is expanded as text before cmd
+# parses the line (and again by `call`, and by a nested cmd), `!x!` under delayed expansion
+# (`/v`, or the registry's DelayedExpansion), a for-variable in its loop's body. The program
+# that runs is the value, which is not in the payload: refused, as a `$` command word is.
+# Read at cmd's own command position (after `@`, `call`, `start`, an `if` condition, `do`
+# and `else`), never at an `if` condition's first word.
+_CMD_EXPANSION_REASON = "uninspectable command word (cmd variable expansion in command position)"
+_CMD_EXPANSION_ROWS = [
+    ("set then call %x%", 'cmd //c "set x=git push --force& call %x%"'),
+    ("set then call %x%, rm", 'cmd //c "set x=rm -rf ~& call %x%"'),
+    ("set then && call %x%", 'cmd //c "set x=git push --force&& call %x%"'),
+    ("/v:on !x!", 'cmd //v:on //c "set x=git push --force& !x!"'),
+    ("/v !x!", 'cmd //v //c "set x=git push --force& !x!"'),
+    ("/v:on call !x!", 'cmd //v:on //c "set x=git push --force& call !x!"'),
+    ("a nested cmd /c %x%", 'cmd //c "set x=git push --force& cmd /c %x%"'),
+    ("a nested cmd /v:on /c !x!", 'cmd //c "set x=git push --force& cmd /v:on /c !x!"'),
+    ("if then call %x%", 'cmd //c "set x=git push --force& if 1==1 call %x%"'),
+    ("start then a nested cmd /c %x%",
+     'cmd //c "set x=git push --force& start /b /wait cmd /c %x%"'),
+    ("call @%x%", 'cmd //c "set x=git push --force& call @%x%"'),
+    ("%x% inside the word", 'cmd //c "set x=gi& call %x%t push --force"'),
+    ("!x! inside the word", 'cmd //v:on //c "set x=i& g!x!t push --force"'),
+    ("two expansions", 'cmd //c "set a=git pu& set b=sh --force& cmd /c %a%%b%"'),
+    ("for /f variable", "cmd //c 'for /f \"delims=\" %i in (\"git push --force\") do %i'"),
+    ("for variable with ~", "cmd //c 'for %i in (\"git push --force\") do %~i'"),
+    ("for variable in a group", "cmd //c 'for %i in (\"git push --force\") do (%~i)'"),
+    ("for %%i", "cmd //c 'for %%i in (\"git push --force\") do %%~i'"),
+    ("else %x%", 'cmd //c "set x=git push --force& if 1==2 (echo) else %x%"'),
+    ("else call %x%", 'cmd //c "set x=git push --force& if 1==2 (echo) else call %x%"'),
+    ("%COMSPEC% /c", 'cmd //c "%COMSPEC% /c git push --force"'),
+    ("call %COMSPEC% /c", 'cmd //c "call %COMSPEC% /c git push --force"'),
+    ("%comspec% lower case", 'cmd //c "%comspec% /c rm -rf ~"'),
+    ("an expansion after a drive", 'cmd //c "C:' + _BS + '%x% /c git push --force"'),
+    ("an expansion then a separator", "cmd //c '%x%" + _BS + "'"),
+    ("an expansion with .exe", 'cmd //c "%x%.exe /c git push --force"'),
+    ("a substring expansion", 'cmd //c "%x:~0,3% /c git push --force"'),
+    ("a replacing expansion", 'cmd //c "%x:a=b% /c git push --force"'),
+    ("a redirect before %x%", 'cmd //c ">nul %x%"'),
+    ("a pipe into %x%", 'cmd //c "echo a | %x%"'),
+    ("the script one quoted word", "cmd //c '%x%'"),
+    ("carets in the expansion", 'cmd //c "^%x^%"'),
+    ("the outer shell sets x", "x='git push --force' cmd //c %x%"),
+    ("the outer shell exports x", "export x='rm -rf ~'; cmd //c %x%"),
+    ("call %x% in a substitution", 'echo "$(cmd //c call %x%)"'),
+    ("call %x% in backticks", 'echo "`cmd //c call %x%`"'),
+    ("& %x% in a substitution", "echo \"$(cmd //c 'echo a & %x%')\""),
+    ("git bash start %x%", "start %x%"),
+    ("pwsh -c cmd /c %x%", "pwsh -c 'cmd /c %x%'"),
+    ("wsl cmd.exe /c %x%", "wsl cmd.exe /c %x%"),
+    ("& call %x% in a substitution", "echo \"$(cmd //c 'echo a & call %x%')\""),
+    # A value holding a space or a quote moves the end of the word: a literal name after the
+    # expansion is no name.
+    ("a quoted expansion before a literal name",
+     "cmd //c 'set x=\"git push --force \"& call \"%x%" + _BS + "node.exe\"'"),
+    ("an expansion before / and a literal name",
+     "cmd //c 'set x=git push --force & call %x%/node.exe'"),
+    ("an expansion under %ProgramFiles%, harmless name",
+     "cmd //c 'set x=git push --force & call %x%" + _BS + "nodejs" + _BS + "node.exe'"),
+    # A drive is no URL: `C://%x%` names the program the expansion picks.
+    ("an expansion after a drive and //",
+     "cmd //c 'set x=Windows/system32/cmd.exe& call C://%x% /c git push --force'"),
+    ("an expansion after a drive and //, alone", "cmd //c 'C://%x% /c git push --force'"),
+    ("a delayed expansion after a drive and //", "cmd //v:on //c 'c://!x!'"),
+    ("start of a file: URL holding an expansion", "cmd //c 'start file:///%x%'"),
+    # An empty quoted if operand is a word to cmd; the bash reading leaves none.
+    ("if with empty operands, then %x%", "cmd //c 'if \"\"==\"\" %x%'"),
+]
+# cmd separates words on every Unicode whitespace character (U+180E too), around its own
+# switches as well; bash keeps them inside a word.
+_CMD_SPACE_ROWS = [
+    ("NBSP after &", 'cmd //c "echo a &' + _NBSP + 'git push --force"'),
+    ("NBSP after call", 'cmd //c "call' + _NBSP + 'git push --force"'),
+    ("U+3000 after call", 'cmd //c "call' + chr(0x3000) + 'rm -rf ~"'),
+    ("NBSP in an if", 'cmd //c "if' + _NBSP + '1==1' + _NBSP + 'git push --force"'),
+    ("a leading NBSP", 'cmd //c "' + _NBSP + 'git push --force"'),
+    ("NBSP after @", 'cmd //c "@' + _NBSP + 'git push --force"'),
+    ("NBSP glued to /c", "cmd //c" + _NBSP + "git push --force"),
+    ("NBSP between switches", "cmd //v:on" + _NBSP + "//c git push --force"),
+    ("U+180E after call", 'cmd //c "call' + chr(0x180E) + 'git push --force"'),
+    ("U+2007 after &", 'cmd //c "echo a &' + chr(0x2007) + 'git push --force"'),
+    ("U+3000 in a substitution", 'echo "$(cmd //c call' + chr(0x3000) + 'git push --force)"'),
+    ("U+180E in a substitution", 'echo "$(cmd //c call' + chr(0x180E) + 'git push --force)"'),
+    # Before cmd's first switch too, with , = and ; (cmd also skips a word that is no switch).
+    ("U+3000 before /c", "cmd " + chr(0x3000) + "/c git push --force"),
+    ("NBSP before //c", "cmd " + _NBSP + "//c git push --force"),
+    ("U+3000 before /c, quoted", 'cmd "' + chr(0x3000) + '/c" rm -rf ~'),
+    (", before /c", "cmd ,/c git push --force"),
+    ("= before /c", "cmd =/c git push --force"),
+    ("; before /c, quoted", "cmd ';/c' git push --force"),
+    (", after /q", "cmd /q,/c git push --force"),
+]
+# Most Unicode spaces are also split by the str.split() of the switch and quote-blind
+# readings; U+180E (no space to Python) is split by _CMD_DELIMS alone.
+_CMD_EXPANSION_FP_ROWS = [
+    ("if with empty operands, harmless", "cmd //c 'if \"\"==\"\" echo ok'"),
+    ("start of a URL holding percent escapes", "cmd //c start https://example.com/a%20b"),
+    ("git bash start of a URL holding percent escapes", "start https://example.com/a%20b%2Fc"),
+    ("an expansion as an argument", 'cmd //c "dir /x %LOCALAPPDATA%' + _BS + 'Temp"'),
+    ("echo %PATH%", 'cmd //c "echo %PATH%"'),
+    ("cd /d %USERPROFILE%", 'cmd //c "cd /d %USERPROFILE% && dir"'),
+    ("echo with a !", 'cmd //c "echo hi!"'),
+    ("for echoes its variable", "cmd //c 'for %i in (a b) do echo %i'"),
+    ("set then call echo %x%", 'cmd //c "set x=1& call echo %x%"'),
+    ("if %errorlevel% neq 0", 'cmd //c "if %errorlevel% neq 0 exit /b 1"'),
+    ("if a quoted expansion ==", "cmd //c 'if \"%a%\"==\"b\" echo ok'"),
+    ("git log with an expansion", 'cmd //c "git log %x%"'),
+    ("echo with an NBSP", 'cmd //c "echo a' + _NBSP + 'b"'),
+    ("bash: echo %x%", "echo %x%"),
+    ("bash: a negation, then cmd", "! grep -q x f && cmd //c ver"),
+    ("an expansion as an argument, after cd", 'cd build && cmd //c "dir %TEMP%"'),
+    ("a junk word before /c, harmless", "cmd x /c echo hi"),
+    ("set then echo, the same line", 'cmd //c "set X=1& echo %X%"'),
+    # An assignment inside a quoted script of another program is not the shell's.
+    ("node code with an assignment, then cmd echoes a variable",
+     "node -e '\nconst fs=require(\"fs\");\nfor(const k of [1]){ let v=k; }\n'\n"
+     "cmd.exe /c \"echo %USERNAME%\""),
+    ("set -e, then cmd echoes a variable", "set -e; cmd //c 'echo %USERNAME%'"),
+]
+# An expansion outside cmd's command word whose value the command itself sets (the outer
+# shell's assignment, export, $env:): the value may hold an & that adds a command. README
+# lists `$VAR` and cmd `%VAR%` indirection among the limits.
+_CMD_ENV_LIMIT_ROWS = [
+    ("a prefix assignment", "y='a & git push --force' cmd //c 'echo %y%'"),
+    ("export", "export y='a & rm -rf ~'; cmd //c 'echo %y%'"),
+    ("an exported variable assigned again", "PATH='a & git push --force'; cmd //c 'echo %PATH%'"),
+    ("two variables", "a='x & git pu' b='sh --force' cmd //c 'echo %a%%b%'"),
+    ("the bash twin, $y", "y='a & git push --force'; cmd //c \"echo $y\""),
+]
+CASES += [(f"cmd expansion: {label}", cmd, B, ()) for label, cmd in _CMD_EXPANSION_ROWS]
+CASES += [(f"cmd space: {label}", cmd, B, ()) for label, cmd in _CMD_SPACE_ROWS]
+CASES += [
+    # An empty quoted if operand (cmd runs these).
+    ("cmd prefix: if with empty operands, equ",
+     "cmd //c 'if \"\" equ \"\" git push --force'", B, ()),
+    ("cmd prefix: if not with an empty operand", "cmd //c 'if not \"\"==\"x\" git push --force'",
+     B, ()),
+    # An empty argument reaches cmd as "" (Git Bash quotes it so).
+    ("cmd prefix: if with empty arguments, equ", 'cmd //c if "" equ "" git push --force', B, ()),
+    ("cmd prefix: if with empty single-quoted arguments", "cmd //c if '' equ '' rm -rf ~", B, ()),
+    ("cmd expansion: if with empty arguments, then %x%", 'cmd //c if "" equ "" %x%', B, ()),
+    ("fp cmd prefix: an empty argument to echo", 'cmd //c echo "" x', A, ()),
+    ("fp cmd prefix: an empty argument before cmd", 'x "" cmd //c if "" equ "" echo ok', A, ()),
+    ("fp: an empty commit message", 'git commit -m "" --allow-empty-message', A, ()),
+    ("cmd prefix: if not with an empty operand, spaced",
+     "cmd //c 'if not \"\" == \"x\" rm -rf ~'", B, ()),
+]
+CASES += [(f"fp cmd expansion: {label}", cmd, A, ()) for label, cmd in _CMD_EXPANSION_FP_ROWS]
+CASES += [(f"known limit cmd expansion: {label}", cmd, A, ()) for label, cmd in _CMD_ENV_LIMIT_ROWS]
+CASES += [
+    # No table of if conditions: `if not defined equ %x%` runs %x%, so a word after `==` or
+    # `equ` may be the command. An expansion in the right operand of a spaced condition costs
+    # this one.
+    ("fp cost cmd expansion: an if whose right operand is an expansion",
+     'cmd //c "if %a% == %b% echo ok"', B, ()),
+    ("fp cost cmd expansion: %COMSPEC% running a harmless command", 'cmd //c "%COMSPEC% /c echo hi"',
+     B, ()),
+    ("fp cost cmd expansion: start of an expanded URL", "cmd //c 'start \"\" %URL%'", B, ()),
+    # cmd's , and = split an unquoted URL's query, and start's title reading then takes
+    # its tail for the command.
+    ("fp cost cmd expansion: start of a URL with a percent escape after an =",
+     "start https://example.com/?q=a%20b", B, ()),
+    # The quote-blind reading of a line with a substitution cannot see quotes, so it cannot
+    # tell whether bash kept the backslashes of a path (unquoted, bash removes them and cmd
+    # gets an expansion-decided word).
+    ("fp cost cmd expansion: a program under an expanded directory, quoted, in a substitution",
+     "echo \"$(cmd //c '%ProgramFiles%" + _BS + "nodejs" + _BS + "node.exe -v')\"", B, ()),
+    # Any expansion in cmd's command word, a literal name after it included.
+    ("fp cost cmd expansion: a program under %ProgramFiles%",
+     'cmd //c "%ProgramFiles%' + _BS + 'nodejs' + _BS + 'node.exe -v"', B, ()),
+    ("fp cost cmd expansion: a quoted program under %ProgramFiles%",
+     "cmd //c '\"%ProgramFiles%" + _BS + "Git" + _BS + "cmd" + _BS + "git.exe\" status'", B, ()),
+    ("fp cost cmd expansion: cmd.exe under %SystemRoot%, harmless",
+     'cmd //c "%SystemRoot%' + _BS + 'system32' + _BS + 'cmd.exe /c echo hi"', B, ()),
+    # The if walk reads every condition length, so an expansion in the argument after a
+    # two-word condition is read as a command too.
+    ("fp cost cmd expansion: if exist, then an expanded argument",
+     'cmd //c "if exist %TEMP%' + _BS + 'x del %TEMP%' + _BS + 'x"', B, ()),
+    ("fp cost cmd expansion: if not exist, then mkdir an expanded directory",
+     'cmd //c "if not exist %D% mkdir %D%"', B, ()),
+    ("fp cost cmd expansion: if defined, then echo the variable",
+     'cmd //c "if defined JAVA_HOME echo %JAVA_HOME%"', B, ()),
+    ("fp cmd expansion: an assignment, then an expansion as an argument",
+     "x=1 cmd //c 'echo %x%'", A, ()),
+    ("fp cmd expansion: MSYS_NO_PATHCONV, then dir %TEMP%",
+     "MSYS_NO_PATHCONV=1 cmd //c 'dir %TEMP%'", A, ()),
+    # PowerShell's --% is not cmd's in the Bash tool: cmd pairs its % with the next one.
+    ("cmd expansion: --% first in a Bash tool cmd script", "cmd //c '--% call %x%'", B, ()),
+    ("cmd expansion: --% first in a Bash tool cmd script, then echo", "cmd //c --% echo a%", B, ()),
+    # cmd's own set, then a nested cmd (or call) that expands the variable as text.
+    ("known limit cmd expansion: set, then a nested cmd expands it in an argument",
+     "cmd //c 'set a=x ^& git pu& set b=sh --force& cmd /c echo %a%%b%'", A, ()),
+]
+PS_CASES += [
+    ("ps cmd expansion: set then call %x%", 'cmd /c "set x=git push --force& call %x%"', B, ()),
+    ("ps cmd expansion: /v:on !x!", 'cmd /v:on /c "set x=git push --force& !x!"', B, ()),
+    ("ps cmd expansion: a nested cmd /c %x%", 'cmd /c "set x=rm -rf ~& cmd /c %x%"', B, ()),
+    ("ps cmd expansion: for variable", "cmd /c 'for %i in (\"git push --force\") do %~i'", B, ()),
+    ("ps cmd expansion: %COMSPEC% /c", 'cmd /c "%COMSPEC% /c git push --force"', B, ()),
+    ("ps cmd expansion: $env: sets x", "$env:x='git push --force'; cmd /c %x%", B, ()),
+    ("ps cmd expansion: $env: sets x, quoted script", "$env:x='git push --force'; cmd /c '%x%'",
+     B, ()),
+    ("ps cmd expansion: --% then ;call %x%", "cmd --% /c ;call %x%", B, ()),
+    ("ps cmd expansion: --% then & %x%", "cmd --% /c echo a & %x%", B, ()),
+    ("ps cmd expansion: pwsh -c cmd /c %x%", "pwsh -c 'cmd /c %x%'", B, ()),
+    ("ps cmd expansion: a quoted expansion before a literal name",
+     "cmd /c 'set x=\"git push --force \"& call \"%x%" + _BS + "node.exe\"'", B, ()),
+    ("ps cmd expansion: & call %x% in a substitution",
+     "echo \"$(cmd /c 'echo a & call %x%')\"", B, ()),
+    ("ps known limit cmd expansion: $env: sets an argument's variable",
+     "$env:y='a & git push --force'; cmd /c 'echo %y%'", A, ()),
+    ("ps known limit cmd expansion: --% expands it for any program",
+     "$env:a='push --force'; git --% %a%", A, ()),
+    ("ps cmd space: , before /c", "cmd ,/c git push --force", B, ()),
+    ("ps fp cmd expansion: an expansion as an argument",
+     'cmd /c "dir /x %LOCALAPPDATA%' + _BS + 'Temp"', A, ()),
+    ("ps fp cmd expansion: an unrelated variable, then dir", "$x = 1; cmd /c 'dir %TEMP%'", A, ()),
+    ("ps fp cmd expansion: $env: read, then dir",
+     "$d = Join-Path $env:TEMP 'x'; cmd /c 'dir %TEMP%'", A, ()),
+    ("ps fp cmd expansion: if %errorlevel% neq 0", 'cmd /c "if %errorlevel% neq 0 exit /b 1"',
+     A, ()),
+    ("ps fp cmd expansion: % is ForEach-Object", "1..3 | % { $_ }", A, ()),
+    ("ps cmd expansion: an expansion after a drive and //",
+     "$env:x='Windows" + _BS + "system32" + _BS + "cmd.exe'; cmd /c 'C://%x% /c git push --force'",
+     B, ()),
+    ("ps cmd prefix: if with empty arguments, equ (pwsh Standard mode passes them)",
+     'cmd /c if "" equ "" git push --force', B, ()),
+    ("ps cmd prefix: if with empty operands, equ", "cmd /c 'if \"\" equ \"\" git push --force'",
+     B, ()),
+    ("ps cmd expansion: if with empty single-quote operands", 'cmd /c "if \'\'==\'\' %x%"', B, ()),
+    # A --% glued to cmd's switch is cmd's (PowerShell's own is a word of its own).
+    ("ps cmd expansion: --% glued to /c", "cmd /c--% echo a%", B, ()),
+    ("ps fp cmd expansion: a quoted --% is PowerShell's", "cmd /c '--%' echo a;b", A, ()),
+    ("ps fp cmd expansion: an escaped --% is PowerShell's", "cmd /c `--% echo a;b", A, ()),
+    ("ps fp cmd expansion: start of a URL holding percent escapes",
+     "cmd /c 'start \"\" \"https://example.com/?q=a%20b\"'", A, ()),
+]
+MUST_BLOCK += [
+    ("cmd expansion: call %x%", 'cmd //c "set x=git push --force& call %x%"', "bash", (),
+     _CMD_EXPANSION_REASON),
+    ("cmd expansion: %COMSPEC% /c, PowerShell", 'cmd /c "%COMSPEC% /c git push --force"',
+     "powershell", (), _CMD_EXPANSION_REASON),
+]
+
+
+def _cmd_seg(words):
+    seg = m._new_seg(words, False)
+    seg.cmd_script = True
+    return seg
+
+
+STRUCT_CASES += [
+    ("cmd expansion: a word holding % or ! anywhere is an expansion",
+     lambda: [m._cmd_expansion_word(w) for w in
+              ("%x%", "!x!", "%~i", "ec%z%o", "%x%/node.exe", "c:/%x%", "git", "node.exe",
+               "c:/program files/x.exe", "--%", "https://x/?q=a%20b",
+               "http://x/%20", "c://%x%", "file:///%x%", "ftp://%x%")],
+     [True, True, True, True, True, True, False, False, False, True, False, False, True, True,
+      True]),
+    ("cmd expansion: cmd's command word is past do and else, not past if",
+     lambda: [m._cmd_command_index(s) for s in
+              (["do", "else", "%x%"], ["do", "x"], ["if", "%a%", "neq", "0", "exit"], ["do"],
+               ["x"])],
+     [2, 1, 0, 0, 0]),
+    ("cmd expansion: no bash finder's index decides it (an if condition stays allowed)",
+     lambda: m._reasons_for(_cmd_seg(["if", "%errorlevel%", "neq", "0", "exit"])), []),
+    ("cmd expansion: a command word that is an expansion, judged by _reasons_for",
+     lambda: m._reasons_for(_cmd_seg(["do", "%i"])), [_CMD_EXPANSION_REASON]),
+    ("cmd expansion: the same words outside a cmd script are not judged so",
+     lambda: _CMD_EXPANSION_REASON in m._reasons_for(m._new_seg(["%x%"], False)), False),
+    ("cmd prefix: a segment records where its empty words stood",
+     lambda: [list(getattr(seg, "empties", ())) for seg in
+              m._words_to_segments(m._shell_words('cmd //c if "" equ "" x; a "" ""'), False)],
+     [[3, 4], [1, 1]]),
+    ("cmd prefix: a suffix copy shifts them",
+     lambda: list(m._seg_suffix(m._words_to_segments(
+         m._shell_words('cmd //c if "" equ "" x'), False)[0], 2, None).empties),
+     [1, 2]),
+    ("cmd space: cmd's delimiter reading splits on every PowerShell space",
+     lambda: all(("a" + c + "b").translate(m._CMD_DELIMS) == "a b" for c in m._PS_SPACES), True),
 ]
 
 
