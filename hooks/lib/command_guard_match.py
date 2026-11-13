@@ -190,6 +190,10 @@ _READINGS = (True, False, _WIDE)
 # Wrappers whose leading positionals are arguments, not the command: timeout
 # DURATION, chroot NEWROOT, flock LOCKFILE.
 _WRAPPER_LEADING_POSITIONALS = {"timeout": 1, "chroot": 1, "flock": 1}
+# Wrappers that read NAME=VALUE operands before their command, with any NAME (see
+# _wrapper_assignment): env takes every operand holding `=`, after `--` too; sudo takes one
+# not led by `/`, interleaved with its options, up to `--`.
+_WRAPPER_ASSIGNS = {"env", "sudo"}
 # Commands whose -c / --command value is a shell script: `su -c "..."`,
 # `script -c "..."`, `flock -c "..."`, `runuser -c "..."`.
 _DASH_C_RUNNERS = {"su", "runuser", "script", "flock"}
@@ -531,6 +535,28 @@ def _collapse_parents(t: str) -> str:
     return "/".join(out) or ("/" if t.startswith("/") else ".")
 
 
+def _wrapper_assignment(base: str, t: str, consume=True) -> bool:
+    """t is a NAME=VALUE operand that wrapper base reads before its command. The NAME can
+    be anything (`a-b=1`, `'a b=1'`, `=1`): the callers' VAR=val skip is bash's own prefix
+    assignment, identifier-only, so it would take such an operand for the command word.
+
+    env (GNU, BSD, busybox) reads every such operand as an assignment. sudo does not
+    always: sudo-rs takes one only when its NAME is alphanumeric, and Windows sudo.exe
+    never, running it as the command. An operand without a path separator is skipped in
+    every reading: read as the command it keeps its `=`, so it names no program a rule
+    knows. One holding a separator may be a path to the program, so it is skipped only in
+    the wide reading and read as the command in the others; one led by `/` is the command
+    under every sudo. For sudo the wide reading takes the same option values as the table
+    (no _WRAPPER_VALUE_*_WIDE entry): one added there would need a reading of its own."""
+    if base not in _WRAPPER_ASSIGNS or "=" not in t or t.startswith("-"):
+        return False
+    if base == "env":
+        return True
+    if "/" not in t and "\\" not in t:
+        return True
+    return consume == _WIDE and not t.startswith("/")
+
+
 def _skip_wrapper_args(base: str, toks, i: int, consume: bool = True) -> int:
     """Index after a wrapper's options (and their values) and leading positionals.
 
@@ -544,10 +570,18 @@ def _skip_wrapper_args(base: str, toks, i: int, consume: bool = True) -> int:
         shorts += _WRAPPER_VALUE_SHORTS_WIDE.get(base, "")
         longs = set(longs) | _WRAPPER_VALUE_LONGS_WIDE.get(base, set())
     n = len(toks)
-    while i < n and toks[i].startswith("-") and toks[i] != "-":
+    while i < n:
         t = toks[i]
+        if _wrapper_assignment(base, t, consume):
+            i += 1
+            continue
+        if not t.startswith("-") or (t == "-" and base != "env"):
+            break                                    # env: a lone `-` is -i
         i += 1
         if t == "--":
+            if base == "env":                        # env reads assignments after -- too
+                while i < n and "=" in toks[i]:
+                    i += 1
             break
         if t.startswith("--"):
             if "=" not in t and t in longs:
