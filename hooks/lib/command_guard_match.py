@@ -1534,9 +1534,10 @@ def _runner_rests(toks):
         found = len(out)
         if base == "cmd":
             # Git Bash (and pwsh in its Standard mode) hands cmd an empty argument as `""`
-            # (`cmd //c if "" equ "" x`), a word to it; Windows PowerShell drops it. Both are
-            # read: these words with it, and the cmd text re-tokenized without it. (A trailing
-            # one lands after a here-string's `-c` words: only their order differs.)
+            # (`cmd //c if "" equ "" x`), a word to it; Windows PowerShell, and pwsh's Windows
+            # mode for cmd.exe, drop it. Both are read: these words with it, and the cmd text
+            # re-tokenized without it. (A trailing one lands after a here-string's `-c`
+            # words: only their order differs.)
             empties = getattr(toks, "empties", ())
             if empties:
                 args = [w for k in range(i + 1, len(toks) + 1)
