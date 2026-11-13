@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 635
+FP_FLOOR = 653
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1658
+BLOCK_FLOOR = 1691
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3912,7 +3912,8 @@ CASES += [
 
 # Follow-up 8o: what a pwsh script's statement runs after an assignment, a dot, a
 # hashtable key, a type or a return/throw/exit (and the tool's own typed and flow
-# statements).
+# statements). Some rows also block on main: they pin that the new readings add
+# to the existing ones and never replace them.
 PS_CASES += [
     ('ps statement tail: cmd after an assignment',
      "pwsh -c '$x = cmd /c git push --force'", B, ()),
@@ -4132,14 +4133,62 @@ PS_CASES += [
      'return $x, $y = cmd /c git push --force', B, ()),
     ('ps statement tail: tool: return a typed assignment',
      'return [int]$x = cmd /c git push --force', B, ()),
-    ('ps statement tail: tool: return an assignment of an expanded command',
+    ('ps statement tail: tool: return an assignment, a variable in command position',
      'return $x = $env:COMSPEC /c git push --force', B, ()),
-    ('ps statement tail: tool: throw an assignment of an expanded command',
+    ('ps statement tail: tool: throw an assignment, a variable in command position',
      'throw $x = $env:COMSPEC /c git push --force', B, ()),
     ('ps statement tail: a piped script returning a shell',
      "'x' | pwsh -c 'return bash'", B, ()),
     ('ps statement tail: a piped script assigning a shell to a typed variable',
      "'x' | pwsh -c '[int] $x = bash'", B, ()),
+    ('ps statement tail: tool: a typed variable, = glued to the value',
+     '[int] $x =cmd /c git push --force', B, ()),
+    ('ps statement tail: tool: two typed variables',
+     '[int] $a, [int] $b = git push --force', B, ()),
+    ('ps statement tail: tool: a typed list with a spaced comma',
+     '[int] $a , $b = git push --force', B, ()),
+    ('ps statement tail: tool: return a list with a spaced comma',
+     'return $a , $b = git push --force', B, ()),
+    ('ps statement tail: tool: a type after a glued =',
+     '$x=[string] $y = git push --force', B, ()),
+    ('ps statement tail: tool: a type after a glued chain',
+     '$x=$y=[int] $z = git push --force', B, ()),
+    ('ps statement tail: tool: a type split into many words',
+     '[a[b, c, d, e, f, g, h, i, j, k]] $a = git push --force', B, ()),
+    ('ps statement tail: return a typed variable, = glued, in a script',
+     "pwsh -c 'return [int] $x =cmd /c git push --force'", B, ()),
+    ('ps statement tail: a hashtable value that returns cmd, in a script',
+     "pwsh -c '@{ a = return cmd /c git push --force }'", B, ()),
+    ('ps statement tail: an assigned hashtable value that returns cmd, in a script',
+     "pwsh -c '$h = @{ a = return cmd /c git push --force }'", B, ()),
+    ('ps statement tail: a hashtable value that exits with cmd, in a script',
+     "pwsh -c '@{ a = exit cmd /c git push --force }'", B, ()),
+    ('ps statement tail: a hashtable value that throws cmd, in a script',
+     "pwsh -c '@{ a = throw cmd /c git push --force }'", B, ()),
+    ('ps statement tail: a hashtable value returning an assignment, in a script',
+     "pwsh -c '@{ a = return $x = cmd /c git push --force }'", B, ()),
+    ('ps statement tail: a second hashtable value that returns cmd, in a script',
+     "pwsh -c '@{ a = 1; b = return cmd /c git push --force }'", B, ()),
+    ('ps statement tail: an ordered hashtable value that returns cmd, in a script',
+     "pwsh -c '[ordered]@{ a = return cmd /c git push --force }'", B, ()),
+    ('ps statement tail: tool: assign what return runs',
+     '$x = return cmd /c git push --force', B, ()),
+    ('ps statement tail: tool: a spaced typed list assigned what return runs',
+     '[int] $a , $b = return cmd /c git push --force', B, ()),
+    ('ps statement tail: a spaced typed list assigned what return runs, in a script',
+     "pwsh -c '[int] $a , $b = return cmd /c git push --force'", B, ()),
+    ('fp tool ps statement tail: a spaced typed list assigned a returned variable',
+     '[int] $a , $b = return $y', A, ()),
+    ('ps statement tail: assign what return runs, in a script',
+     "pwsh -c '$x = return cmd /c git push --force'", B, ()),
+    ('ps statement tail: assign what exit runs, in a script',
+     "pwsh -c '$x = exit cmd /c git push --force'", B, ()),
+    ('ps statement tail: assign to a typed variable what return runs, in a script',
+     "pwsh -c '[int] $x = return cmd /c git push --force'", B, ()),
+    ("fp ps statement tail: a command's argument holding = and a subexpression",
+     'pwsh -c \'Write-Host "x = git push --force $(Get-Date)"\'', A, ()),
+    ('fp tool ps statement tail: assign a returned variable',
+     '$x = return $y', A, ()),
     ('ps statement tail: tool: exit',
      'exit git push --force', B, ()),
     ('ps statement tail: tool: throw',
@@ -4196,6 +4245,28 @@ PS_CASES += [
      'pwsh -c \'$msg = "cmd /c git push --force $(Get-Date)"\'', B, ()),
     ('fp cost ps statement tail: an odd quote after the runner',
      'pwsh -c \'$x = cmd /c git push --force "\'', B, ()),
+    ('fp cost ps statement tail: throw a message naming a blocked command, with a subexpression',
+     'throw "git push --force failed: $($_.Exception.Message)"', B, ()),
+    ('fp tool ps statement tail: void a method call',
+     '[void] $list.Add(1)', A, ()),
+    ('fp tool ps statement tail: a typed string naming a blocked command',
+     "[string] $x = 'git push --force'", A, ()),
+    ('fp tool ps statement tail: a typed string, = glued',
+     "[string] $x ='git push --force'", A, ()),
+    ('fp tool ps statement tail: two typed variables from values',
+     '[int] $a, [int] $b = 1, 2', A, ()),
+    ('fp tool ps statement tail: a typed value, = glued',
+     '[int] $x =5', A, ()),
+    ('fp tool ps statement tail: a static method call',
+     "[Console]::WriteLine('x')", A, ()),
+    ('fp tool ps statement tail: a type after a glued =, no value',
+     '$x=[string] $y', A, ()),
+    ('fp tool ps statement tail: return a comparison',
+     'return $x -eq 1', A, ()),
+    ('fp tool ps statement tail: a typed count',
+     '[int] $n = $a.Count', A, ()),
+    ('fp ps statement tail: a typed list with a spaced comma, from values',
+     "pwsh -c '[int] $a , $b = 1, 2'", A, ()),
     ('fp ps statement tail: a harmless command',
      "pwsh -c '$x = git status'", A, ()),
     ('fp ps statement tail: a harmless cmd',
@@ -4346,6 +4417,38 @@ CASES += [
      "powershell -NoProfile -Command '[string] $out = git push --force'", B, ()),
     ('ps script statement tail: return cmd',
      "pwsh -c 'return cmd /c git push --force'", B, ()),
+    ('ps script statement tail: a typed variable, = glued',
+     "pwsh -c '[int] $a =cmd /c git push --force'", B, ()),
+    ('ps script statement tail: return a variable, = glued',
+     "pwsh -c 'return $a =cmd /c git push --force'", B, ()),
+    ('ps script statement tail: two typed variables',
+     "pwsh -c '[int] $a, [int] $b = cmd /c git push --force'", B, ()),
+    ('ps script statement tail: a typed list with a spaced comma',
+     "pwsh -c '[int] $a , $b = cmd /c git push --force'", B, ()),
+    ('ps script statement tail: a list with a typed second variable',
+     "pwsh -c '$a, [int] $b = cmd /c git push --force'", B, ()),
+    ('ps script statement tail: a type split into many words',
+     "pwsh -c '[a[b, c, d, e, f, g, h, i, j, k]] $a = git push --force'", B, ()),
+    ('ps script statement tail: a hashtable value that returns cmd',
+     "pwsh -c '@{ a = return cmd /c git push --force }'", B, ()),
+    ('ps script statement tail: assign what return runs',
+     "pwsh -c '$x = return cmd /c git push --force'", B, ()),
+    ('ps script statement tail: two typed variables assigned what return runs',
+     "pwsh -c '[int] $a, [int] $b = return cmd /c git push --force'", B, ()),
+    ("fp ps script statement tail: a command's argument holding = and a subexpression",
+     'pwsh -c \'Write-Host "x = git push --force $(Get-Date)"\'', A, ()),
+    ('ps script statement tail: an expanded value of a typed assignment',
+     'pwsh -c "[string] \\$x = $CMD"', B, ()),
+    ('ps script statement tail: an expanded value of an assignment after return',
+     'pwsh -c "return \\$x = $CMD"', B, ()),
+    ('fp ps script statement tail: a list with a typed second variable, from values',
+     "pwsh -c '$a, [int] $b = 1, 2'", A, ()),
+    ('fp ps script statement tail: exit $LASTEXITCODE after a script',
+     'pwsh -NoProfile -Command "& ./build.ps1; exit $LASTEXITCODE"', A, ()),
+    ('fp ps script statement tail: npm test, then exit $LASTEXITCODE',
+     'powershell -Command "npm test; exit $LASTEXITCODE"', A, ()),
+    ('fp ps script statement tail: throw $_ in a double-quoted script',
+     'pwsh -c "try { Get-Date } catch { throw \\$_ }"', A, ()),
     ('ps script statement tail: a piped script returning a shell',
      "echo x | pwsh -c 'return bash'", B, ()),
     ('fp cost ps script statement tail: a hashtable value bash expands',
@@ -4367,6 +4470,14 @@ CASES += [
     ('fp ps script statement tail: return a variable, a substitution on the line',
      'pwsh -Command "Get-Date; return \\$r"; echo "$(date)"', A, ()),
 ]
+
+
+def _elapsed(fn):
+    """Seconds fn() takes."""
+    import time
+    t0 = time.perf_counter()
+    fn()
+    return time.perf_counter() - t0
 
 
 def _assigned_nested_pwsh_payload(lead="$a = "):
@@ -4396,6 +4507,15 @@ STRUCT_CASES += [
      < m._MAX_RUNNER_CHARS // 2, True),
     ("runner budget: a 4 KB three-level nested pwsh script after return is not refused",
      lambda: m.evaluate(_assigned_nested_pwsh_payload("return "), shell="powershell"), []),
+    # Empty type brackets before a word that is no type: the type pattern stays linear (a
+    # repeated group in it tried every split: about 1 s at 26 pairs, x4 per 2 more pairs).
+    # The pattern alone is timed, so a busy machine cannot make the row flake.
+    ("timing: the type pattern on 30 empty bracket pairs before a $",
+     lambda: _elapsed(lambda: m._PS_TYPE_WORD_RE.fullmatch("[]" * 30 + "$")) < 1.0, True),
+    ("type pattern: 30 empty bracket pairs before a $ are no type",
+     lambda: m._PS_TYPE_WORD_RE.fullmatch("[]" * 30 + "$") is None, True),
+    ("timing: 4 KB of empty type brackets before a variable (PowerShell)",
+     lambda: _timing("powershell", "$x = " + "[]" * 2000 + "$ y") < 3.0, True),
 ]
 
 

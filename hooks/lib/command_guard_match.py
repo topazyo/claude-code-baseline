@@ -289,8 +289,12 @@ _PS_STATEMENT_PREFIX = {"-not", "do", "else"}
 # Statements whose operand is a pipeline: the words after one run (see _ps_statement_tail).
 _PS_FLOW_PIPELINE = {"return", "throw", "exit"}
 # A word of type literals (`[string]`, `[string[]]`, `[int][string]`), perhaps after the
-# `]` an attribute's parentheses leave (`[ValidateNotNull()]` splits at them).
-_PS_TYPE_WORD_RE = re.compile(r"\]?(?:\[[\w.\[\],`]*\])*")
+# `]` an attribute's parentheses leave (`[ValidateNotNull()]` splits at them). The class
+# holds the brackets, so one group spans several literals; a repeated group would make a
+# failing match try every split (exponential in the brackets).
+_PS_TYPE_WORD_RE = re.compile(r"\]?(?:\[[\w.\[\],`]*\])?")
+# An assignment operator at the start of a word: `=`, `+=`, `??=`, glued or alone.
+_PS_ASSIGN_LEAD_RE = re.compile(r"(?:[-+*/%]|\?\?)?=")
 # A `(` after one of these, at the start of a statement, opens the keyword's own header.
 _PS_HEADER_KEYWORDS = {"if", "elseif", "while", "until", "switch", "foreach", "for", "param"}
 # Words a brace block's statement can follow once the braces are read away.
@@ -1039,11 +1043,11 @@ def _ps_statement_start(toks):
 
 def _ps_statement_tail(toks, script=False):
     """For an ordinary statement of a PowerShell tool payload whose first word is a
-    variable (`$x = 1`, `if ($LASTEXITCODE -ne 0)`, `foreach ($f in $l)`), the words it
-    goes on to run, as a list (empty when nothing is left to judge); None for any other
-    segment. The tool's payload has no outer shell, so the variable is no expansion.
-    Not after a call operator (`& $x`, `. ($x)`), not a method call (`$x.Run(...)`, or one
-    as a later word), not fed by a pipe, and not `$x <word>`.
+    variable (`$x = 1`, `if ($LASTEXITCODE -ne 0)`, `foreach ($f in $l)`), or a flow or
+    type word (below), the words it goes on to run, as a list (empty when nothing is left
+    to judge); None for any other segment. The tool's payload has no outer shell, so the
+    variable is no expansion. Not after a call operator (`& $x`, `. ($x)`), not a method
+    call (`$x.Run(...)`, or one as a later word), not fed by a pipe, and not `$x <word>`.
 
     The words are what follows an `=`, an operator or a foreach header's `in` (its
     collection is a pipeline), past a chain `$a = $b = cmd`, with a glued `$x=value` read
@@ -1054,35 +1058,50 @@ def _ps_statement_tail(toks, script=False):
     with a `$` word or a comma is an expression (`return $a, $b`, `exit $LASTEXITCODE`),
     unless it is walked as an assignment. Type literals and attributes may stand before a
     target (`[string] $x = cmd`, `[ValidateNotNull()] $x = cmd`, where the attribute's
-    parentheses leave a `]`), and after an `=` (`$x = [string] $y = cmd`). After a flow or
-    type word, or in a script, any `$` word is a target, and so is a list of them.
+    parentheses leave a `]`), and after an `=` (`$x = [string] $y = cmd`, `$x=[string] $y
+    = cmd`). After a flow or type word, a word that opens with `[`, or in a script, any `$`
+    word is a target, and so is a list of them; and when that walk stops short of a
+    command in a statement led by a `$` or `[` word, a flow word or a type run, it resumes
+    once after the first assignment operator (see _ps_assignment_operator): `[int] $a,
+    [int] $b = cmd`, `[int] $x =cmd`, `return $a , $b = cmd`. A flow word after an `=` is
+    read as at the start (`$x = return cmd`). In a script an outer shell expanded
+    (ps_outer), a variable left alone as an assignment's value is the tail, which
+    _rules_at refuses there (`\\$x = $CMD` is refused already).
 
     script: also read a statement of a script a runner hands to pwsh/powershell
     (ps_script), piped or not, for words to judge in addition (see _ps_statement_tails).
     That reading only adds segments: _rules_at still judges the script's statement
     itself as before (it calls this without script). Its early return needs a `$` first
-    word, which the type and flow words are not, and the list walk is only open after
-    them: so for the tool's own `$a, $b = ...`, this is None as before."""
+    word, which the type and flow words and a `[` word without one are not, and the list
+    walk is only open after them: so for the tool's own `$a, $b = ...`, this is None as
+    before."""
     if script and getattr(toks, "ps_script", False):
         if toks.ps_call:
             return None
     elif not getattr(toks, "ps_tool", False) or toks.ps_call or toks.piped:
         return None
     start = _ps_statement_start(toks)
-    i, walked, value_of_glue, loose, flow = start, False, False, script, False
-    nxt = toks[i + 1] if i + 1 < len(toks) else ""
-    if (toks[i].lower() in _PS_FLOW_PIPELINE and nxt and nxt not in _PS_ASSIGN
-            and not nxt.startswith("=")):
+    i, walked, value_of_glue, flow, rescued = start, False, False, False, False
+    loose = script or (toks[i][:1] == "[" and "$" not in toks[i])
+    # A statement a resume may read: led by a `$` or `[` word, a flow word or a type run,
+    # not a command's arguments (`Write-Host x = y`) nor a hashtable entry (`a = return
+    # cmd`, which _ps_statement_tails reads as one).
+    led = "$" in toks[i] or toks[i][:1] == "["
+    if _ps_flow_word(toks, i):
         # Not a hashtable key so named (`@{ return = cmd }`): see _ps_statement_tails.
-        i, walked, loose, flow = i + 1, True, True, True
+        i, walked, loose, flow, led = i + 1, True, True, True, True
     k = _ps_type_words_end(toks, i)
     if k > i:
-        i, loose = k, True
+        i, loose, led = k, True, True
     word = toks[i]
     while True:
         glued = _PS_GLUED_ASSIGN_RE.fullmatch(word)
         if glued:
             walked, word, value_of_glue, flow = True, glued[3], True, False
+            if word and _PS_TYPE_WORD_RE.fullmatch(word) and i + 1 < len(toks):
+                i = _ps_type_words_end(toks, i + 1)      # `$x=[string] $y = cmd`
+                word, value_of_glue, loose = toks[i], False, True
+                continue
             if word:
                 continue
             i += 1                     # `$x= 1`: the value is the next word
@@ -1102,7 +1121,8 @@ def _ps_statement_tail(toks, script=False):
         if step is None and _PS_VAR_WORD_RE.fullmatch(word):
             nxt = toks[i + 1].lower() if i + 1 < len(toks) else None
             if nxt is None:
-                return []
+                outer = walked and not flow and script and getattr(toks, "ps_outer", False)
+                return [word] if outer else []
             if nxt in _PS_TOOL_EXPR_NEXT or (nxt == "in" and toks.ps_foreach):
                 step = i + 2
         if step is not None:
@@ -1111,8 +1131,28 @@ def _ps_statement_tail(toks, script=False):
                 return []
             i = _ps_type_words_end(toks, step)   # `$x = [string] $y = cmd`
             loose = loose or i > step
+            if _ps_flow_word(toks, i):            # `$x = return cmd`
+                i, flow, loose = i + 1, True, True
             word = toks[i]
             continue
+        stuck = not walked or (flow and ("$" in word or word.startswith(",")))
+        if stuck and loose and led and not rescued:
+            # The walk did not reach a command: resume it after the first assignment
+            # operator, if there is one (see _ps_assignment_operator).
+            found = _ps_assignment_operator(toks, i)
+            if found is not None:
+                k, rest = found
+                walked, flow, rescued = True, False, True
+                if rest:
+                    i, word, value_of_glue = k, rest, True
+                    continue
+                if k + 1 >= len(toks):
+                    return []
+                i = _ps_type_words_end(toks, k + 1)
+                if _ps_flow_word(toks, i):
+                    i, flow = i + 1, True
+                word, value_of_glue = toks[i], False
+                continue
         if not walked:
             return None
         if flow and ("$" in word or word.startswith(",")):
@@ -1120,6 +1160,24 @@ def _ps_statement_tail(toks, script=False):
         if i in (toks.ps_quoted_value if value_of_glue else toks.ps_quoted):
             return []
         return [word] + list(toks[i + 1:])
+
+
+def _ps_flow_word(toks, i):
+    """toks[i] is `return`, `throw` or `exit` with an operand (not an assignment operator,
+    which would make it a hashtable key so named)."""
+    nxt = toks[i + 1] if i + 1 < len(toks) else ""
+    return (toks[i].lower() in _PS_FLOW_PIPELINE and bool(nxt) and nxt not in _PS_ASSIGN
+            and not nxt.startswith("="))
+
+
+def _ps_assignment_operator(toks, i):
+    """The first assignment operator from toks[i] on, as a word (`=`, `+=`) or leading one
+    (`=cmd`): (its index, the rest of its word), or None (see _ps_statement_tail)."""
+    for k in range(i, len(toks)):
+        op = _PS_ASSIGN_LEAD_RE.match(toks[k])
+        if op:
+            return k, toks[k][op.end():]
+    return None
 
 
 def _ps_type_words_end(toks, i):
@@ -1131,7 +1189,7 @@ def _ps_type_words_end(toks, i):
     while k + 1 < len(toks):
         word, j = toks[k], k
         while (word[:1] in "[]" and word.count("[") > word.count("]")
-               and j + 2 < len(toks) and j - k < 8):
+               and j + 2 < len(toks) and j - k < 7):
             j += 1
             word += toks[j]
         if not (word and _PS_TYPE_WORD_RE.fullmatch(word)):
