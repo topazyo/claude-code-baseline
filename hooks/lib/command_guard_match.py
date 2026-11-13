@@ -286,6 +286,11 @@ _PS_VALUE_PREFIX_RE = re.compile(
     "[{!]*(?:(?:" + _PS_VAR + r"(?:[-+*/%]|\?\?)?=)+|\w*=)", re.I | re.S)
 # Words that may stand before a statement's variable (_effective_cmd_index skips them).
 _PS_STATEMENT_PREFIX = {"-not", "do", "else"}
+# Statements whose operand is a pipeline: the words after one run (see _ps_statement_tail).
+_PS_FLOW_PIPELINE = {"return", "throw", "exit"}
+# A word of type literals (`[string]`, `[string[]]`, `[int][string]`), perhaps after the
+# `]` an attribute's parentheses leave (`[ValidateNotNull()]` splits at them).
+_PS_TYPE_WORD_RE = re.compile(r"\]?(?:\[[\w.\[\],`]*\])*")
 # A `(` after one of these, at the start of a statement, opens the keyword's own header.
 _PS_HEADER_KEYWORDS = {"if", "elseif", "while", "until", "switch", "foreach", "for", "param"}
 # Words a brace block's statement can follow once the braces are read away.
@@ -1032,7 +1037,7 @@ def _ps_statement_start(toks):
     return 1 if len(toks) > 1 and toks[0].lower() in _PS_STATEMENT_PREFIX else 0
 
 
-def _ps_statement_tail(toks):
+def _ps_statement_tail(toks, script=False):
     """For an ordinary statement of a PowerShell tool payload whose first word is a
     variable (`$x = 1`, `if ($LASTEXITCODE -ne 0)`, `foreach ($f in $l)`), the words it
     goes on to run, as a list (empty when nothing is left to judge); None for any other
@@ -1042,15 +1047,42 @@ def _ps_statement_tail(toks):
 
     The words are what follows an `=`, an operator or a foreach header's `in` (its
     collection is a pipeline), past a chain `$a = $b = cmd`, with a glued `$x=value` read
-    as the same three words. A value that opens with a quote is a string, not a command."""
-    if not getattr(toks, "ps_tool", False) or toks.ps_call or toks.piped:
+    as the same three words. A value that opens with a quote is a string, not a command.
+
+    `return`, `throw` and `exit` take a pipeline: the words after one run (`return git
+    push`), unless an `=` follows (a hashtable key so named), and an operand that opens
+    with a `$` word or a comma is an expression (`return $a, $b`, `exit $LASTEXITCODE`),
+    unless it is walked as an assignment. Type literals and attributes may stand before a
+    target (`[string] $x = cmd`, `[ValidateNotNull()] $x = cmd`, where the attribute's
+    parentheses leave a `]`), and after an `=` (`$x = [string] $y = cmd`). After a flow or
+    type word, or in a script, any `$` word is a target, and so is a list of them.
+
+    script: also read a statement of a script a runner hands to pwsh/powershell
+    (ps_script), piped or not, for words to judge in addition (see _ps_statement_tails).
+    That reading only adds segments: _rules_at still judges the script's statement
+    itself as before (it calls this without script). Its early return needs a `$` first
+    word, which the type and flow words are not, and the list walk is only open after
+    them: so for the tool's own `$a, $b = ...`, this is None as before."""
+    if script and getattr(toks, "ps_script", False):
+        if toks.ps_call:
+            return None
+    elif not getattr(toks, "ps_tool", False) or toks.ps_call or toks.piped:
         return None
     start = _ps_statement_start(toks)
-    i, word, walked, value_of_glue = start, toks[start], False, False
+    i, walked, value_of_glue, loose, flow = start, False, False, script, False
+    nxt = toks[i + 1] if i + 1 < len(toks) else ""
+    if (toks[i].lower() in _PS_FLOW_PIPELINE and nxt and nxt not in _PS_ASSIGN
+            and not nxt.startswith("=")):
+        # Not a hashtable key so named (`@{ return = cmd }`): see _ps_statement_tails.
+        i, walked, loose, flow = i + 1, True, True, True
+    k = _ps_type_words_end(toks, i)
+    if k > i:
+        i, loose = k, True
+    word = toks[i]
     while True:
         glued = _PS_GLUED_ASSIGN_RE.fullmatch(word)
         if glued:
-            walked, word, value_of_glue = True, glued[3], True
+            walked, word, value_of_glue, flow = True, glued[3], True, False
             if word:
                 continue
             i += 1                     # `$x= 1`: the value is the next word
@@ -1058,22 +1090,54 @@ def _ps_statement_tail(toks):
                 return []
             word, value_of_glue = toks[i], False
             continue
-        if _PS_VAR_WORD_RE.fullmatch(word):
+        step = None
+        if loose and "$" in word and not _PS_VAR_WORD_RE.fullmatch(word):
+            # Other assignment targets, as _rules_at reads a script's (a typed `[int]$x`,
+            # `$x,$y`), and a list of them (`$a, $b = cmd`).
+            j = i
+            while toks[j].endswith(",") and j + 1 < len(toks) and "$" in toks[j + 1]:
+                j += 1
+            if j + 1 < len(toks) and toks[j + 1] in _PS_ASSIGN:
+                step = j + 2
+        if step is None and _PS_VAR_WORD_RE.fullmatch(word):
             nxt = toks[i + 1].lower() if i + 1 < len(toks) else None
             if nxt is None:
                 return []
             if nxt in _PS_TOOL_EXPR_NEXT or (nxt == "in" and toks.ps_foreach):
-                walked, value_of_glue = True, False
-                i += 2
-                if i >= len(toks):
-                    return []
-                word = toks[i]
-                continue
+                step = i + 2
+        if step is not None:
+            walked, value_of_glue, flow = True, False, False
+            if step >= len(toks):
+                return []
+            i = _ps_type_words_end(toks, step)   # `$x = [string] $y = cmd`
+            loose = loose or i > step
+            word = toks[i]
+            continue
         if not walked:
             return None
+        if flow and ("$" in word or word.startswith(",")):
+            return []          # `return $a, $b`, `return ,$x`, `exit $LASTEXITCODE`: a value
         if i in (toks.ps_quoted_value if value_of_glue else toks.ps_quoted):
             return []
         return [word] + list(toks[i + 1:])
+
+
+def _ps_type_words_end(toks, i):
+    """The index past a run of type-literal words from toks[i] (see _PS_TYPE_WORD_RE), a
+    literal a space split (`[Dictionary[string, int]]`) read as one, up to 8 words (so the
+    walk stays linear); i when there is none. Never the last word's index plus one: a
+    target must follow."""
+    k = i
+    while k + 1 < len(toks):
+        word, j = toks[k], k
+        while (word[:1] in "[]" and word.count("[") > word.count("]")
+               and j + 2 < len(toks) and j - k < 8):
+            j += 1
+            word += toks[j]
+        if not (word and _PS_TYPE_WORD_RE.fullmatch(word)):
+            break
+        k = j + 1
+    return k
 
 
 def _ps_hash_value(toks):
@@ -1095,17 +1159,23 @@ def _ps_hash_value(toks):
     return None
 
 
-def _ps_tail_segment(words, called=False, piped=False, expanding=frozenset()):
+def _ps_tail_segment(words, called=False, piped=False, expanding=frozenset(), src=None):
     """words as a segment of the tool's payload. `. cmd` dot-invokes cmd, so the words
     are judged without the dot, and `. $y` is a call of $y, not an ordinary statement.
     A leading number goes too: in `$x=2>&1 rm -rf /` the 2 was a redirect's.
     called, piped: the source segment's ps_call and pipe, for words taken from one that
     is not an ordinary statement (`'x' | . bash` feeds bash). expanding: the indexes of
-    the words that hold a `$` the shell expands (see expanding on _Seg)."""
+    the words that hold a `$` the shell expands (see expanding on _Seg). src: a segment
+    of a runner's pwsh script the words come from: the new segment is one of that
+    script's (ps_script, with its ps_outer and pipe), not of the tool's payload."""
     dot = words[0] == "." and len(words) > 1
     drop = dot or (words[0].isdigit() and len(words) > 1)
-    seg = _new_seg(words[1:] if drop else words, piped)
-    seg.ps_tool, seg.ps_call = True, called or (dot and "$" in words[1])
+    seg = _new_seg(words[1:] if drop else words, piped or getattr(src, "piped", False))
+    seg.ps_call = called or (dot and "$" in words[1])
+    if src is None:
+        seg.ps_tool = True
+    else:
+        seg.ps_script, seg.ps_outer = True, src.ps_outer
     seg.expanding = frozenset(e - drop for e in expanding if e >= drop)
     return seg
 
@@ -1116,29 +1186,42 @@ def _suffix_expanding(src, words):
     return frozenset(e - k for e in getattr(src, "expanding", ()) if e >= k)
 
 
-def _ps_statement_tails(segments):
+def _ps_statement_tails(segments, script=False):
     """What the ordinary statements of a PowerShell tool payload go on to run, as segments
     of their own, so the caller tokenizes inline scripts in them and judges them like any
     other segment: see _ps_statement_tail and _ps_hash_value. `$x = $(cmd)`: the body is
-    its own segment. Each input yields at most two segments, so this stays linear."""
+    its own segment. Each input yields at most three segments, so this stays linear.
+
+    A statement that opens with a flow or type word gets the dot and hashtable readings
+    too: those words also name a hashtable key (`@{ return = cmd }`), so their reading
+    adds to the others and never replaces them.
+
+    script: the segments are a runner's pwsh script's (ps_script), read the same way, so a
+    runner after an `=` (`pwsh -c '$x = cmd /c ...'`) is expanded like one the script
+    starts. _rules_at judges an assignment's right-hand side there by the rules only, and
+    nested runners are expanded only from segments, so these are added for that."""
     out = []
     for toks in segments:
-        if not getattr(toks, "ps_tool", False):
+        if not getattr(toks, "ps_script" if script else "ps_tool", False):
             continue
-        tail = _ps_statement_tail(toks)
-        if tail is None:
+        own = toks if script else None
+        tail = _ps_statement_tail(toks, script)
+        tails = [] if tail is None else [(tail, toks)]
+        start = _ps_statement_start(toks)
+        if (tail is None or toks[start].lower() in _PS_FLOW_PIPELINE
+                or _ps_type_words_end(toks, start) > start):
             value = (list(toks[1:]) if toks[0] == "." and len(toks) > 1 and "$" not in toks[1]
                      else _ps_hash_value(toks))   # `. cmd args`: cmd is the command
-            if not value or value == ["$"]:
-                continue
-            seg = _ps_tail_segment(value, toks.ps_call, toks.piped, _suffix_expanding(toks, value))
-            # `@{ a = $y = cmd }`: one more step
-            out.append(seg)
-            tail, src = _ps_statement_tail(seg), seg
-        else:
-            src = toks
-        if tail and tail != ["$"]:
-            out.append(_ps_tail_segment(tail, expanding=_suffix_expanding(src, tail)))
+            if value and value != ["$"]:
+                seg = _ps_tail_segment(value, toks.ps_call, toks.piped,
+                                       _suffix_expanding(toks, value), own)
+                # `@{ a = $y = cmd }`: one more step
+                out.append(seg)
+                tails.append((_ps_statement_tail(seg, script), seg))
+        for tail, src in tails:
+            if tail and tail != ["$"]:
+                out.append(_ps_tail_segment(tail, expanding=_suffix_expanding(src, tail),
+                                            src=src if script else None))
     return out
 
 
@@ -1183,6 +1266,14 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
             rhs = _new_seg(toks[idx + 2:], getattr(toks, "piped", False))
             rhs.ps_script = True
             rest.append(rhs)
+        elif toks[idx].endswith(",") and rest is not None:
+            # `$a, $b = cmd`: a list target; the command after its `=` (the script's tail
+            # segments also read it, see _ps_statement_tails; this is the backstop).
+            k = next((k for k in range(idx + 1, len(toks)) if toks[k] in _PS_ASSIGN), None)
+            if k is not None and k + 1 < len(toks):
+                rhs = _new_seg(toks[k + 1:], getattr(toks, "piped", False))
+                rhs.ps_script = True
+                rest.append(rhs)
         return out
 
     if cmd == "rm":
@@ -3250,7 +3341,11 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         for seg in segments + lenient:
             if isinstance(seg, _Seg):
                 seg.ps_script, seg.ps_outer = True, outer_expanded
-    if ps_tool:                    # not _lenient_inline's segments: those are bash text
+        # What its statements run after an `=` (or a dot, or in a hashtable): segments of
+        # their own, so the expansion below reaches a runner there.
+        segments += _ps_statement_tails(
+            segments + [s for s in lenient if isinstance(s, _Seg)], script=True)
+    if ps_tool:                   # not _lenient_inline's segments: those are bash text
         for seg in segments:
             seg.ps_tool = True
         segments += _ps_statement_tails(
