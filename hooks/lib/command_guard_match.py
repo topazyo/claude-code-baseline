@@ -192,7 +192,8 @@ _READINGS = (True, False, _WIDE)
 _WRAPPER_LEADING_POSITIONALS = {"timeout": 1, "chroot": 1, "flock": 1}
 # Wrappers that read NAME=VALUE operands before their command, with any NAME (see
 # _wrapper_assignment): env takes every operand holding `=`, after `--` too; sudo takes one
-# not led by `/`, interleaved with its options, up to `--`.
+# not led by `/` or `=` (sudo-rs: one whose NAME is alphanumeric or `_`), interleaved with
+# its options, up to `--`.
 _WRAPPER_ASSIGNS = {"env", "sudo"}
 # Commands whose -c / --command value is a shell script: `su -c "..."`,
 # `script -c "..."`, `flock -c "..."`, `runuser -c "..."`.
@@ -541,10 +542,10 @@ def _wrapper_assignment(base: str, t: str, consume=True) -> bool:
     assignment, identifier-only, so it would take such an operand for the command word.
 
     env (GNU, BSD, busybox) reads every such operand as an assignment. sudo does not
-    always: sudo-rs takes one only when its NAME is alphanumeric, and Windows sudo.exe
-    never, running it as the command. An operand without a path separator is skipped in
-    every reading: read as the command it keeps its `=`, so it names no program a rule
-    knows. One holding a separator may be a path to the program, so it is skipped only in
+    always: upstream sudo runs one led by `/` or `=` as the command, sudo-rs takes one only
+    when its NAME is alphanumeric or `_`, and Windows sudo.exe takes none. An operand
+    without a path separator is skipped in every reading: read as the command it keeps its
+    `=`, so it names no program a rule knows. One holding a separator may be a path to the program, so it is skipped only in
     the wide reading and read as the command in the others; one led by `/` is the command
     under every sudo. For sudo the wide reading takes the same option values as the table
     (no _WRAPPER_VALUE_*_WIDE entry): one added there would need a reading of its own."""

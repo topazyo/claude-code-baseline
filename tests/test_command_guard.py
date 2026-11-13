@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 573
+FP_FLOOR = 575
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1492
+BLOCK_FLOOR = 1493
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -960,6 +960,7 @@ CASES = [
     ("env: an operand with a digit name", "env 1=1 git push --force", B, ()),
     ("env: an operand with a dot in its name", "env a.b=1 git push --force", B, ()),
     ("env: an operand with a slash in its name", "env a/b=1 rm -rf /", B, ()),
+    ("env: an operand led by / holding =", "env /a=b git push --force", B, ()),
     ("env: an upper-case operand with a dash", "env 'A-B=1' git push --force", B, ()),
     ("env: several operands of any name", "env 'x y=1' 'p-q=2' =3 git push --force", B, ()),
     ("env -i then an operand of any name", "env -i 'a b=1' git push --force", B, ()),
@@ -1018,6 +1019,8 @@ CASES = [
     ("fp env: an operand with an empty name, then printenv", "env =1 printenv", A, ()),
     ("fp env: a value with a space, then git status", "env 'GIT_X=a b' git status", A, ()),
     ("fp env FOO==bar then a command", "env FOO==bar ls", A, ()),
+    ("fp env: a path-shaped operand holding = is an assignment", "env ./x=y/git push --force",
+     A, ()),
     ("fp env -i HOME=$HOME bash -l", "env -i HOME=$HOME bash -l", A, ()),
     ("fp sudo: an operand of any name, then a command", "sudo 'a-b=1' ls", A, ()),
     ("fp sudo -E VAR=x make install", "sudo -E VAR=x make install", A, ()),
@@ -1025,6 +1028,8 @@ CASES = [
     ("fp sudo runs an absolute path holding =, with arguments", "sudo /a=b git push --force",
      A, ()),
     ("fp nohup runs a word holding =", "nohup 'a b=1' ls", A, ()),
+    ("fp nohup runs a word holding =, with arguments", "nohup 'a b=1' git push --force",
+     A, ()),
 ]
 
 # PowerShell payloads (tool_name "PowerShell"): evaluated with shell="powershell",
