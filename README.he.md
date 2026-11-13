@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=0627c668db4d7b33 -->
+<!-- he-sync: what-this-does-not-protect-against sha256=71cac3fa81158ccb -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -57,7 +57,7 @@
   `cd .claude && sed -i s/block/warn/ baseline.config.json`, או
   `sed -i … "$CFG"`, לא מכילה את הנתיב המילולי, ולכן לא נתפסת.
 - **ה-command-guard הוא רשימה שחורה (blocklist), לא רשימת היתרים.** הוא מזהה *שמות* של פקודות.
-  base64 או קידוד אחר, הפניה דרך `$VAR`, כינויים (aliases) שמוגדרים בזמן ריצה, וכל קובץ
+  base64 או קידוד אחר, הפניה דרך `$VAR` או דרך `%VAR%` של cmd, כינויים (aliases) שמוגדרים בזמן ריצה, וכל קובץ
   הרצה שפשוט לא נמצא ברשימה — כל אלה עוברים בלי בדיקה. אותו דבר נכון להגדרות git שנקבעו
   מחוץ לפקודה (`git config`, משתני `GIT_CONFIG_*`), למחיקה של ענף מרוחק בכל שם שאינו
   `main`, `master` או `HEAD` (את זה עוצרת רק הגנת ענפים (branch protection) בצד השרת,
