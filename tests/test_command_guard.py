@@ -3289,7 +3289,7 @@ CASES += [
      "MSYS_NO_PATHCONV=1 cmd //c 'dir %TEMP%'", A, ()),
     # PowerShell's --% is not cmd's in the Bash tool: cmd pairs its % with the next one.
     ("cmd expansion: --% first in a Bash tool cmd script", "cmd //c '--% call %x%'", B, ()),
-    ("cmd expansion: --% first in a Bash tool cmd script, then echo", "cmd //c '--% echo a%'", B, ()),
+    ("cmd expansion: --% first in a Bash tool cmd script, then echo", "cmd //c --% echo a%", B, ()),
     # cmd's own set, then a nested cmd (or call) that expands the variable as text.
     ("known limit cmd expansion: set, then a nested cmd expands it in an argument",
      "cmd //c 'set a=x ^& git pu& set b=sh --force& cmd /c echo %a%%b%'", A, ()),
