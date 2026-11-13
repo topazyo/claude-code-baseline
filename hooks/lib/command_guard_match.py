@@ -1533,6 +1533,11 @@ def _runner_rests(toks):
             outer = any(e > i for e in getattr(toks, "expanding", ()))
         found = len(out)
         if base == "cmd":
+            # An empty argument reaches cmd as `""` (`cmd //c if "" equ "" x`), a word to it.
+            empties = getattr(toks, "empties", ())
+            if empties:
+                args = [w for k in range(i + 1, len(toks) + 1)
+                        for w in [""] * empties.count(k) + list(toks[k:k + 1])]
             # cmd also takes , = ; and Unicode spaces before its switches (`cmd ,/c x`,
             # `cmd <U+3000>/c x`, which bash keeps in one word): its words are also read
             # as cmd reads them (_CMD_DELIMS).
@@ -2046,10 +2051,13 @@ class _Seg(list):
     herestr_fed: a `<<<` here-string is; heredoc_wide: one of them is on a group or
     compound command that ends here, so it feeds every command in it (see
     _heredoc_check). cmd_script: the segment is part of a script handed to cmd (see
-    _cmd_prefix_variants); scripts nested inside it are not.
+    _cmd_prefix_variants); scripts nested inside it are not. empties: the indexes before
+    which the shell's words held an empty word (`""`, `''`), which the segment drops: a
+    program gets each one as an argument, and cmd reads it as a word (see _runner_rests).
     """
     heredoc = heredoc_wide = herestr_fed = False
     cmd_script = False
+    empties = ()
     piped = False
     redirs = ()
     ps_script = False
@@ -2130,6 +2138,7 @@ def _seg_suffix(seg, i, first):
     out.__dict__.update(vars(seg))
     out.redirs = list(getattr(seg, "redirs", ()))
     out.expanding = _suffix_expanding(seg, out)
+    out.empties = tuple(e - i for e in getattr(seg, "empties", ()) if e > i)
     return out
 
 
@@ -2190,7 +2199,8 @@ def _cmd_expansion_word(word: str) -> bool:
     return ("%" in word or "!" in word) and not _URL_SCHEME_RE.match(word)
 
 
-_URL_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*://")
+# Only these: a one-letter scheme is a drive (`c://%x%`), and others may name a program.
+_URL_SCHEME_RE = re.compile(r"https?://")
 
 
 def _cmd_command_index(seg) -> int:
@@ -2276,12 +2286,13 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
     call_next = arg_next = foreach_next = False   # see ps_call and ps_foreach on _Seg
     quoted, quoted_value = set(), set()
     exp = set()                            # see expanding on _Seg
+    empties = []                           # see empties on _Seg
     expanding = getattr(words, "expanding", None)   # None: quote-blind words
     latch = _Latch() if latch is None else latch
 
     def close(next_piped, fed=False, op=None, glued_op=False, real_op=False):
         nonlocal cur, redirs, herestr, piped, pending, call_next, arg_next, foreach_next
-        nonlocal quoted, quoted_value, exp, here_exp, heredoc_here
+        nonlocal quoted, quoted_value, exp, here_exp, heredoc_here, empties
         toks = cur + [w for target in herestr for w in ("-c", target)]
         # Each word's value: `$x=.` and `$x=sudo` hold a `.` and a `sudo`.
         values = [w.rsplit("=", 1)[-1] for w in cur]
@@ -2313,6 +2324,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             seg.ps_call = held or held_arg or bool(latch) or method
             seg.ps_foreach = foreach_next
             seg.ps_quoted, seg.ps_quoted_value = frozenset(quoted), frozenset(quoted_value)
+            seg.empties = tuple(empties)
             # A here-string target follows its `-c` at the end of toks (see above).
             seg.expanding = frozenset(exp) | {len(cur) + 2 * j + 1
                                               for j, e in enumerate(here_exp) if e}
@@ -2343,6 +2355,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
         here_exp, heredoc_here = [], False
         quoted, quoted_value = set(), set()
         exp = set()
+        empties = []
 
     for k, word in enumerate(words):
         is_op = isinstance(word, _Op)
@@ -2355,6 +2368,8 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
         prev_op = None                     # glued: the op touches cur[-1]'s word
         for piece in pieces:
             if not piece:
+                if not (is_op or split_words or pending):
+                    empties.append(len(cur))       # an empty word ("", ''): see empties
                 continue
             if is_op or (split_words and _SEP_ONLY_RE.match(piece)):
                 for op in _OP_RE.findall(piece):
@@ -3126,6 +3141,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                             delims = _Seg(" ".join(toks).translate(_CMD_DELIMS).split())
                             delims.__dict__.update(vars(toks))
                             delims.redirs = list(getattr(toks, "redirs", ()))
+                            delims.empties = ()
                             # Re-split words: the quote-blind rule (any $ word expands)
                             # applies to them anew.
                             delims.expanding = frozenset(

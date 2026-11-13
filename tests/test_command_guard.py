@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 559
+FP_FLOOR = 562
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1425
+BLOCK_FLOOR = 1434
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3160,6 +3160,12 @@ _CMD_EXPANSION_ROWS = [
      "cmd //c 'set x=git push --force & call %x%/node.exe'"),
     ("an expansion under %ProgramFiles%, harmless name",
      "cmd //c 'set x=git push --force & call %x%" + _BS + "nodejs" + _BS + "node.exe'"),
+    # A drive is no URL: `C://%x%` names the program the expansion picks.
+    ("an expansion after a drive and //",
+     "cmd //c 'set x=Windows/system32/cmd.exe& call C://%x% /c git push --force'"),
+    ("an expansion after a drive and //, alone", "cmd //c 'C://%x% /c git push --force'"),
+    ("a delayed expansion after a drive and //", "cmd //v:on //c 'c://!x!'"),
+    ("start of a file: URL holding an expansion", "cmd //c 'start file:///%x%'"),
     # An empty quoted if operand is a word to cmd; the bash reading leaves none.
     ("if with empty operands, then %x%", "cmd //c 'if \"\"==\"\" %x%'"),
 ]
@@ -3232,6 +3238,13 @@ CASES += [
      "cmd //c 'if \"\" equ \"\" git push --force'", B, ()),
     ("cmd prefix: if not with an empty operand", "cmd //c 'if not \"\"==\"x\" git push --force'",
      B, ()),
+    # An empty argument reaches cmd as "" (Git Bash quotes it so).
+    ("cmd prefix: if with empty arguments, equ", 'cmd //c if "" equ "" git push --force', B, ()),
+    ("cmd prefix: if with empty single-quoted arguments", "cmd //c if '' equ '' rm -rf ~", B, ()),
+    ("cmd expansion: if with empty arguments, then %x%", 'cmd //c if "" equ "" %x%', B, ()),
+    ("fp cmd prefix: an empty argument to echo", 'cmd //c echo "" x', A, ()),
+    ("fp cmd prefix: an empty argument before cmd", 'x "" cmd //c if "" equ "" echo ok', A, ()),
+    ("fp: an empty commit message", 'git commit -m "" --allow-empty-message', A, ()),
     ("cmd prefix: if not with an empty operand, spaced",
      "cmd //c 'if not \"\" == \"x\" rm -rf ~'", B, ()),
 ]
@@ -3309,6 +3322,10 @@ PS_CASES += [
     ("ps fp cmd expansion: if %errorlevel% neq 0", 'cmd /c "if %errorlevel% neq 0 exit /b 1"',
      A, ()),
     ("ps fp cmd expansion: % is ForEach-Object", "1..3 | % { $_ }", A, ()),
+    ("ps cmd expansion: an expansion after a drive and //",
+     "$env:x='Windows" + _BS + "system32" + _BS + "cmd.exe'; cmd /c 'C://%x% /c git push --force'",
+     B, ()),
+    ("ps cmd prefix: if with empty arguments, equ", 'cmd /c if "" equ "" git push --force', B, ()),
     ("ps cmd prefix: if with empty operands, equ", "cmd /c 'if \"\" equ \"\" git push --force'",
      B, ()),
     ("ps cmd expansion: if with empty single-quote operands", 'cmd /c "if \'\'==\'\' %x%"', B, ()),
@@ -3337,8 +3354,10 @@ STRUCT_CASES += [
     ("cmd expansion: a word holding % or ! anywhere is an expansion",
      lambda: [m._cmd_expansion_word(w) for w in
               ("%x%", "!x!", "%~i", "ec%z%o", "%x%/node.exe", "c:/%x%", "git", "node.exe",
-               "c:/program files/x.exe", "--%", "https://x/?q=a%20b")],
-     [True, True, True, True, True, True, False, False, False, True, False]),
+               "c:/program files/x.exe", "--%", "https://x/?q=a%20b",
+               "http://x/%20", "c://%x%", "file:///%x%", "ftp://%x%")],
+     [True, True, True, True, True, True, False, False, False, True, False, False, True, True,
+      True]),
     ("cmd expansion: cmd's command word is past do and else, not past if",
      lambda: [m._cmd_command_index(s) for s in
               (["do", "else", "%x%"], ["do", "x"], ["if", "%a%", "neq", "0", "exit"], ["do"],
@@ -3350,6 +3369,14 @@ STRUCT_CASES += [
      lambda: m._reasons_for(_cmd_seg(["do", "%i"])), [_CMD_EXPANSION_REASON]),
     ("cmd expansion: the same words outside a cmd script are not judged so",
      lambda: _CMD_EXPANSION_REASON in m._reasons_for(m._new_seg(["%x%"], False)), False),
+    ("cmd prefix: a segment records where its empty words stood",
+     lambda: [list(getattr(seg, "empties", ())) for seg in
+              m._words_to_segments(m._shell_words('cmd //c if "" equ "" x; a "" ""'), False)],
+     [[3, 4], [1, 1]]),
+    ("cmd prefix: a suffix copy shifts them",
+     lambda: list(m._seg_suffix(m._words_to_segments(
+         m._shell_words('cmd //c if "" equ "" x'), False)[0], 2, None).empties),
+     [1, 2]),
     ("cmd space: cmd's delimiter reading splits on every PowerShell space",
      lambda: all(("a" + c + "b").translate(m._CMD_DELIMS) == "a b" for c in m._PS_SPACES), True),
 ]
