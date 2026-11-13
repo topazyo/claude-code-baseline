@@ -1536,15 +1536,17 @@ def _runner_rests(toks):
             # cmd also takes , = ; and Unicode spaces before its switches (`cmd ,/c x`,
             # `cmd <U+3000>/c x`, which bash keeps in one word): its words are also read
             # as cmd reads them (_CMD_DELIMS).
-            # In PowerShell text a `--%` after the switch is PowerShell's, never cmd's (the
-            # rest of the line is read by _ps_stop_parsing_cmd_scripts).
+            # In PowerShell text a `--%` word after the switch is PowerShell's, not cmd's
+            # (the rest of the line is read by _ps_stop_parsing_cmd_scripts); one glued to
+            # the switch (`/c--%`) is cmd's.
             ps = getattr(toks, "ps_tool", False) or getattr(toks, "ps_script", False)
             for words in (args, " ".join(args).translate(_CMD_DELIMS).replace(";", " ").split()):
                 sw = _cmd_run_switch(words)
                 if sw is not None:
                     j, glued = sw
                     rest = ([glued] if glued else []) + words[j + 1:]
-                    out.append(("cmd", rest[1:] if ps and rest[:1] == ["--%"] else rest))
+                    out.append(("cmd", rest[1:] if ps and not glued and rest[:1] == ["--%"]
+                                else rest))
         elif base in _PS_RUNNERS:
             kind, j = _ps_decisive_switch(args)
             if kind == "command":
@@ -1578,13 +1580,18 @@ def _cmd_texts(words):
     each word after the first that is empty or holds a space quoted, as the command line
     cmd gets quotes it (Git Bash and PowerShell build it so), which keeps `start "a
     title" /b x` a one-word title (not the first word: a quoted script, `cmd /c "echo
-    $x"`, is unquoted by /c); each of those with its ^ escapes removed; and each of all
+    $x"`, is unquoted by /c); each of those with an empty "" or '' kept as a word (an `if`
+    operand: `if "" equ "" x`); each of all those with its ^ escapes removed; and each of all
     those with cmd's , = ' and Unicode spaces read as cmd reads them (_CMD_DELIMS:
     `call,git ...`, `echo ' & x & '`, `call<NBSP>git ...`)."""
     texts = [" ".join(words)]
     if any(not w or any(c.isspace() for c in w) for w in words[1:]):
         texts.append(" ".join(words[:1] + ['"' + w + '"' if not w or any(
             c.isspace() for c in w) else w for w in words[1:]]))
+    # An empty "" or '' is a word to cmd (an `if` operand: `if "" equ "" x`), where the
+    # bash reading leaves no word at all: also read with each one a word of its own.
+    texts += [t.replace('""', '"_"').replace("''", "_") for t in texts
+              if '""' in t or "''" in t]
     texts += [t.replace("^", "") for t in texts]
     return texts + [t.translate(_CMD_DELIMS) for t in texts]
 
@@ -2177,8 +2184,13 @@ def _cmd_expansion_word(word: str) -> bool:
     program is the value, which is not in the payload. Anywhere in the word: a value
     holding a space or a quote moves the word's end (`"%x%\node.exe"`, `%x%/node.exe`
     run the program x names), so even a literal last path component names nothing. (In
-    PowerShell text, `cmd /c --% ...` hands cmd no `--%`: see _runner_rests.)"""
-    return "%" in word or "!" in word
+    PowerShell text, `cmd /c --% ...` hands cmd no `--%` word: see _runner_rests.) Not a
+    URL `start` opens (`https://x/?q=a%20b`): an expansion there names no other program,
+    short of one whose value adds an `&` (cmd `%VAR%` indirection, in README's limits)."""
+    return ("%" in word or "!" in word) and not _URL_SCHEME_RE.match(word)
+
+
+_URL_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*://")
 
 
 def _cmd_command_index(seg) -> int:

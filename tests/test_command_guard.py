@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 553
+FP_FLOOR = 559
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1417
+BLOCK_FLOOR = 1425
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3160,6 +3160,8 @@ _CMD_EXPANSION_ROWS = [
      "cmd //c 'set x=git push --force & call %x%/node.exe'"),
     ("an expansion under %ProgramFiles%, harmless name",
      "cmd //c 'set x=git push --force & call %x%" + _BS + "nodejs" + _BS + "node.exe'"),
+    # An empty quoted if operand is a word to cmd; the bash reading leaves none.
+    ("if with empty operands, then %x%", "cmd //c 'if \"\"==\"\" %x%'"),
 ]
 # cmd separates words on every Unicode whitespace character (U+180E too), around its own
 # switches as well; bash keeps them inside a word.
@@ -3185,7 +3187,12 @@ _CMD_SPACE_ROWS = [
     ("; before /c, quoted", "cmd ';/c' git push --force"),
     (", after /q", "cmd /q,/c git push --force"),
 ]
+# Most Unicode spaces are also split by the str.split() of the switch and quote-blind
+# readings; U+180E (no space to Python) is split by _CMD_DELIMS alone.
 _CMD_EXPANSION_FP_ROWS = [
+    ("if with empty operands, harmless", "cmd //c 'if \"\"==\"\" echo ok'"),
+    ("start of a URL holding percent escapes", "cmd //c start https://example.com/a%20b"),
+    ("git bash start of a URL holding percent escapes", "start https://example.com/a%20b%2Fc"),
     ("an expansion as an argument", 'cmd //c "dir /x %LOCALAPPDATA%' + _BS + 'Temp"'),
     ("echo %PATH%", 'cmd //c "echo %PATH%"'),
     ("cd /d %USERPROFILE%", 'cmd //c "cd /d %USERPROFILE% && dir"'),
@@ -3219,6 +3226,15 @@ _CMD_ENV_LIMIT_ROWS = [
 ]
 CASES += [(f"cmd expansion: {label}", cmd, B, ()) for label, cmd in _CMD_EXPANSION_ROWS]
 CASES += [(f"cmd space: {label}", cmd, B, ()) for label, cmd in _CMD_SPACE_ROWS]
+CASES += [
+    # An empty quoted if operand (cmd runs these).
+    ("cmd prefix: if with empty operands, equ",
+     "cmd //c 'if \"\" equ \"\" git push --force'", B, ()),
+    ("cmd prefix: if not with an empty operand", "cmd //c 'if not \"\"==\"x\" git push --force'",
+     B, ()),
+    ("cmd prefix: if not with an empty operand, spaced",
+     "cmd //c 'if not \"\" == \"x\" rm -rf ~'", B, ()),
+]
 CASES += [(f"fp cmd expansion: {label}", cmd, A, ()) for label, cmd in _CMD_EXPANSION_FP_ROWS]
 CASES += [(f"known limit cmd expansion: {label}", cmd, A, ()) for label, cmd in _CMD_ENV_LIMIT_ROWS]
 CASES += [
@@ -3230,6 +3246,10 @@ CASES += [
     ("fp cost cmd expansion: %COMSPEC% running a harmless command", 'cmd //c "%COMSPEC% /c echo hi"',
      B, ()),
     ("fp cost cmd expansion: start of an expanded URL", "cmd //c 'start \"\" %URL%'", B, ()),
+    # cmd's , and = split an unquoted URL's query, and start's title reading then takes
+    # its tail for the command.
+    ("fp cost cmd expansion: start of a URL with a percent escape after an =",
+     "start https://example.com/?q=a%20b", B, ()),
     # The quote-blind reading of a line with a substitution cannot see quotes, so it cannot
     # tell whether bash kept the backslashes of a path (unquoted, bash removes them and cmd
     # gets an expansion-decided word).
@@ -3289,6 +3309,15 @@ PS_CASES += [
     ("ps fp cmd expansion: if %errorlevel% neq 0", 'cmd /c "if %errorlevel% neq 0 exit /b 1"',
      A, ()),
     ("ps fp cmd expansion: % is ForEach-Object", "1..3 | % { $_ }", A, ()),
+    ("ps cmd prefix: if with empty operands, equ", "cmd /c 'if \"\" equ \"\" git push --force'",
+     B, ()),
+    ("ps cmd expansion: if with empty single-quote operands", 'cmd /c "if \'\'==\'\' %x%"', B, ()),
+    # A --% glued to cmd's switch is cmd's (PowerShell's own is a word of its own).
+    ("ps cmd expansion: --% glued to /c", "cmd /c--% echo a%", B, ()),
+    ("ps fp cmd expansion: a quoted --% is PowerShell's", "cmd /c '--%' echo a;b", A, ()),
+    ("ps fp cmd expansion: an escaped --% is PowerShell's", "cmd /c `--% echo a;b", A, ()),
+    ("ps fp cmd expansion: start of a URL holding percent escapes",
+     "cmd /c 'start \"\" \"https://example.com/?q=a%20b\"'", A, ()),
 ]
 MUST_BLOCK += [
     ("cmd expansion: call %x%", 'cmd //c "set x=git push --force& call %x%"', "bash", (),
@@ -3308,8 +3337,8 @@ STRUCT_CASES += [
     ("cmd expansion: a word holding % or ! anywhere is an expansion",
      lambda: [m._cmd_expansion_word(w) for w in
               ("%x%", "!x!", "%~i", "ec%z%o", "%x%/node.exe", "c:/%x%", "git", "node.exe",
-               "c:/program files/x.exe", "--%")],
-     [True, True, True, True, True, True, False, False, False, True]),
+               "c:/program files/x.exe", "--%", "https://x/?q=a%20b")],
+     [True, True, True, True, True, True, False, False, False, True, False]),
     ("cmd expansion: cmd's command word is past do and else, not past if",
      lambda: [m._cmd_command_index(s) for s in
               (["do", "else", "%x%"], ["do", "x"], ["if", "%a%", "neq", "0", "exit"], ["do"],

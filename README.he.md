@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=71cac3fa81158ccb -->
+<!-- he-sync: what-this-does-not-protect-against sha256=daeafb18ef7f48d4 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>

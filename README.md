@@ -179,8 +179,9 @@ limit — not a bug. Read it before you rely on any of the above.
   `cd .claude && sed -i s/block/warn/ baseline.config.json`, or
   `sed -i … "$CFG"`, does not contain the literal path and is not caught.
 - **command-guard is a blocklist, not an allowlist.** It matches command
-  *names*. Base64 or other encoding, `$VAR` or cmd `%VAR%` indirection, runtime aliases, and
-  any binary that simply isn't on the list all pass uninspected. So do git
+  *names*. Base64 or other encoding, `$VAR` or cmd `%VAR%` indirection,
+  runtime aliases, and any binary that simply isn't on the list all pass
+  uninspected. So do git
   settings made outside the command (`git config`, `GIT_CONFIG_*` variables),
   deleting a remote branch under any name other than `main`, `master` or `HEAD`
   (only server-side branch protection that binds admins stops that), cmd
