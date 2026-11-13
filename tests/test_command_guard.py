@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 562
+FP_FLOOR = 575
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1435
+BLOCK_FLOOR = 1493
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -950,6 +950,86 @@ CASES = [
     ("fp xargs -I echo", "ls | xargs -I % echo %", A, ()),
     ("fp xargs sh -c rm -f", "ls | xargs sh -c 'rm -f \"$@\"' _", A, ()),
     ("fp find -ok rm in a folder", "find ./build -ok rm {} \\;", A, ()),
+
+    # --- NAME=VALUE operands of env and sudo: any NAME, before the command ---
+    ("env: an operand with a dash in its name, then the command", "env 'a-b=1' git push --force",
+     B, ()),
+    ("env: an unquoted operand with a dash in its name", "env a-b=1 rm -rf ~", B, ()),
+    ("env: an operand with a space in its name", "env 'a b=1' git push --force", B, ()),
+    ("env: an operand with an empty name", "env =1 rm -rf ~", B, ()),
+    ("env: an operand with a digit name", "env 1=1 git push --force", B, ()),
+    ("env: an operand with a dot in its name", "env a.b=1 git push --force", B, ()),
+    ("env: an operand with a slash in its name", "env a/b=1 rm -rf /", B, ()),
+    ("env: an operand led by / holding =", "env /a=b git push --force", B, ()),
+    ("env: an upper-case operand with a dash", "env 'A-B=1' git push --force", B, ()),
+    ("env: several operands of any name", "env 'x y=1' 'p-q=2' =3 git push --force", B, ()),
+    ("env -i then an operand of any name", "env -i 'a b=1' git push --force", B, ()),
+    ("env -u X then an operand of any name", "env -u X 'a b=1' rm -rf ~", B, ()),
+    ("env -iu X then an operand of any name", "env -iu X 'a b=1' git push --force", B, ()),
+    ("env --unset=X then an operand of any name", "env --unset=X 'a b=1' git push --force",
+     B, ()),
+    ("env -C dir then an operand of any name", "env -C /tmp 'a-b=1' git push --force", B, ()),
+    ("env -- then an operand of any name", "env -- 'a b=1' git push --force", B, ()),
+    ("env's lone - then an operand of any name", "env - 'a b=1' git push --force", B, ()),
+    ("env: an option word holding = then a value", "env -x=u root git push --force", B, ()),
+    ("/usr/bin/env then an operand of any name", "/usr/bin/env 'a b=1' git push --force",
+     B, ()),
+    ("env.exe then an operand of any name", "env.exe 'a b=1' rm -rf ~", B, ()),
+    ("busybox env then an operand of any name", "busybox env 'a b=1' git push --force", B, ()),
+    ("env in env, operands of any name", "env 'a b=1' env 'c-d=2' git push --force", B, ()),
+    ("time env then an operand of any name", "time env 'a b=1' git push --force", B, ()),
+    ("nice env then an operand of any name", "nice -n 5 env 'a b=1' rm -rf ~", B, ()),
+    ("timeout env then an operand of any name", "timeout 5 env 'a b=1' git push --force",
+     B, ()),
+    ("xargs env then an operand of any name", "echo | xargs env 'a b=1' git push --force",
+     B, ()),
+    ("exec env then an operand of any name", "exec env 'a b=1' rm -rf ~", B, ()),
+    ("env, an operand of any name, then eval", "env 'a b=1' eval 'git push --force'", B, ()),
+    ("env, an operand of any name, then sudo", "env 'a b=1' sudo rm -rf ~", B, ()),
+    ("env, an operand of any name, then xargs",
+     "echo x | env 'a b=1' xargs git push --force", B, ()),
+    ("env with an operand of any name after &&", "true && env 'a b=1' git push --force", B, ()),
+    ("env with an operand of any name in a substitution", "echo $(env 'a b=1' rm -rf ~)",
+     B, ()),
+    ("env -S script: an operand of any name", "env -S \"'a b=1' git push --force\"", B, ()),
+    ("cmd runs env with an operand of any name", 'cmd //c "env a-b=1 git push --force"',
+     B, ()),
+    ("sudo: an operand with a dash in its name", "sudo 'a-b=1' git push --force", B, ()),
+    ("sudo: an operand with a space in its name", "sudo 'a b=1' rm -rf ~", B, ()),
+    ("sudo: an operand with an empty name", "sudo =1 git push --force", B, ()),
+    ("sudo: an operand with a digit name", "sudo 1=1 rm -rf ~", B, ()),
+    ("sudo: a ./ operand holding =", "sudo ./a=b git push --force", B, ()),
+    ("sudo -u root then an operand of any name", "sudo -u root 'a b=1' git push --force",
+     B, ()),
+    ("sudo --user=root then an operand of any name", "sudo --user=root 'a-b=1' rm -rf ~",
+     B, ()),
+    ("sudo -E then an operand of any name", "sudo -E 'a b=1' git push --force", B, ()),
+    ("sudo: an operand of any name, then an option", "sudo 'a b=1' -u root git push --force",
+     B, ()),
+    ("sudo: an operand holding = and a slash, then the command",
+     "sudo -u root 'a b=1/x' git push --force", B, ()),
+    ("sudo runs a ./ path holding =", "sudo ./x=y/git push --force", B, ()),
+    ("sudo runs a relative path holding =", "sudo a-b=1/git push --force", B, ()),
+    ("sudo runs a ~/ path holding =", "sudo ~/x=y/rm -rf /", B, ()),
+    ("sudo -u root runs a ./ path holding =", "sudo -u root ./x=y/git push --force", B, ()),
+    ("sudo runs an absolute path holding =", "sudo /x=y/git push --force", B, ()),
+    ("sudo runs a ./ path holding = with a backslash",
+     "sudo '." + chr(92) + "x=y" + chr(92) + "git' push --force", B, ()),
+    ("fp env: an operand of any name, then a command", "env 'a b=1' ls -la", A, ()),
+    ("fp env: an operand with an empty name, then printenv", "env =1 printenv", A, ()),
+    ("fp env: a value with a space, then git status", "env 'GIT_X=a b' git status", A, ()),
+    ("fp env FOO==bar then a command", "env FOO==bar ls", A, ()),
+    ("fp env: a path-shaped operand holding = is an assignment", "env ./x=y/git push --force",
+     A, ()),
+    ("fp env -i HOME=$HOME bash -l", "env -i HOME=$HOME bash -l", A, ()),
+    ("fp sudo: an operand of any name, then a command", "sudo 'a-b=1' ls", A, ()),
+    ("fp sudo -E VAR=x make install", "sudo -E VAR=x make install", A, ()),
+    ("fp sudo runs an absolute path holding =", "sudo /opt/a=b/tool", A, ()),
+    ("fp sudo runs an absolute path holding =, with arguments", "sudo /a=b git push --force",
+     A, ()),
+    ("fp nohup runs a word holding =", "nohup 'a b=1' ls", A, ()),
+    ("fp nohup runs a word holding =, with arguments", "nohup 'a b=1' git push --force",
+     A, ()),
 ]
 
 # PowerShell payloads (tool_name "PowerShell"): evaluated with shell="powershell",
@@ -1122,6 +1202,19 @@ PS_CASES = [
     ("ps bash script, PowerShell quoting, block comment before -c",
      "bash <# c #> -c " + chr(92) + '"' + "'; git push --force; #/x'" + chr(92) + '"', B, ()),
     ("ps fp block comment before a command", "<# list #> git status", A, ()),
+
+    ("ps env: an operand with a space in its name", "env 'a b=1' git push --force", B, ()),
+    ("ps env: an unquoted operand with a dash in its name", "env a-b=1 rm -rf ~", B, ()),
+    ("ps env.exe then an operand of any name", "env.exe 'A-B=1' git push --force", B, ()),
+    ("ps env's lone - then an operand of any name", "env - 'a b=1' git push --force", B, ()),
+    ("ps cmd runs env with an operand of any name", 'cmd /c "env a-b=1 git push --force"',
+     B, ()),
+    ("ps sudo: an operand with a space in its name", "sudo 'a b=1' git push --force", B, ()),
+    ("ps sudo runs a drive path holding =",
+     "sudo C:" + chr(92) + "x=y" + chr(92) + "git.exe push --force", B, ()),
+    ("ps cmd runs sudo with a relative path holding =",
+     'cmd /c "sudo .' + chr(92) + "x=y" + chr(92) + 'git push --force"', B, ()),
+    ("ps fp env: an operand of any name, then git status", "env 'a b=1' git status", A, ()),
 ]
 
 # Ordinary statements of the PowerShell tool's own payload (see _ps_statement_tail).
