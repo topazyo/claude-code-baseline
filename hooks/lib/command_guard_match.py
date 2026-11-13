@@ -1533,7 +1533,10 @@ def _runner_rests(toks):
             outer = any(e > i for e in getattr(toks, "expanding", ()))
         found = len(out)
         if base == "cmd":
-            # An empty argument reaches cmd as `""` (`cmd //c if "" equ "" x`), a word to it.
+            # Git Bash (and pwsh in its Standard mode) hands cmd an empty argument as `""`
+            # (`cmd //c if "" equ "" x`), a word to it; Windows PowerShell drops it. Both are
+            # read: these words with it, and the cmd text re-tokenized without it. (A trailing
+            # one lands after a here-string's `-c` words: only their order differs.)
             empties = getattr(toks, "empties", ())
             if empties:
                 args = [w for k in range(i + 1, len(toks) + 1)
@@ -2052,8 +2055,9 @@ class _Seg(list):
     compound command that ends here, so it feeds every command in it (see
     _heredoc_check). cmd_script: the segment is part of a script handed to cmd (see
     _cmd_prefix_variants); scripts nested inside it are not. empties: the indexes before
-    which the shell's words held an empty word (`""`, `''`), which the segment drops: a
-    program gets each one as an argument, and cmd reads it as a word (see _runner_rests).
+    which the shell's words held an empty word (`""`, `''`), which the segment drops: Git
+    Bash hands a program each one as an argument, and cmd reads it as a word (see
+    _runner_rests).
     """
     heredoc = heredoc_wide = herestr_fed = False
     cmd_script = False

@@ -37,7 +37,7 @@ FP_FLOOR = 562
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1434
+BLOCK_FLOOR = 1435
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -3289,6 +3289,7 @@ CASES += [
      "MSYS_NO_PATHCONV=1 cmd //c 'dir %TEMP%'", A, ()),
     # PowerShell's --% is not cmd's in the Bash tool: cmd pairs its % with the next one.
     ("cmd expansion: --% first in a Bash tool cmd script", "cmd //c '--% call %x%'", B, ()),
+    ("cmd expansion: --% first in a Bash tool cmd script, then echo", "cmd //c '--% echo a%'", B, ()),
     # cmd's own set, then a nested cmd (or call) that expands the variable as text.
     ("known limit cmd expansion: set, then a nested cmd expands it in an argument",
      "cmd //c 'set a=x ^& git pu& set b=sh --force& cmd /c echo %a%%b%'", A, ()),
@@ -3325,7 +3326,8 @@ PS_CASES += [
     ("ps cmd expansion: an expansion after a drive and //",
      "$env:x='Windows" + _BS + "system32" + _BS + "cmd.exe'; cmd /c 'C://%x% /c git push --force'",
      B, ()),
-    ("ps cmd prefix: if with empty arguments, equ", 'cmd /c if "" equ "" git push --force', B, ()),
+    ("ps cmd prefix: if with empty arguments, equ (pwsh Standard mode passes them)",
+     'cmd /c if "" equ "" git push --force', B, ()),
     ("ps cmd prefix: if with empty operands, equ", "cmd /c 'if \"\" equ \"\" git push --force'",
      B, ()),
     ("ps cmd expansion: if with empty single-quote operands", 'cmd /c "if \'\'==\'\' %x%"', B, ()),
