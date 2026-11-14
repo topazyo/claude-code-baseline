@@ -1120,6 +1120,16 @@ def _ps_statement_tail(toks, script=False):
                 j += 1
             if j + 1 < len(toks) and toks[j + 1] in _PS_ASSIGN:
                 step = j + 2
+            elif j > i:
+                # `$a, $b=cmd`, `$a, [int]$b= cmd`: the list's last item is a glued target;
+                # walk on in it, as in a glued word (not past an expanded item, see ext).
+                last = ((j, toks[j]) if _PS_GLUED_ASSIGN_RE.fullmatch(toks[j])
+                        else _ps_typed_glued_target(toks, j, toks[j]))
+                if last:
+                    if any(t in ext for t in range(i, last[0] + 1)):
+                        return [word] + list(toks[i + 1:])
+                    i, word, value_of_glue, walked = last[0], last[1], True, True
+                    continue
         if step is None and _PS_VAR_WORD_RE.fullmatch(word):
             nxt = toks[i + 1].lower() if i + 1 < len(toks) else None
             if nxt is None:

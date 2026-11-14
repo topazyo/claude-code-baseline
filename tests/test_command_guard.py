@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 747
+FP_FLOOR = 753
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1863
+BLOCK_FLOOR = 1889
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -4710,6 +4710,38 @@ PS_CASES += [
      ', $a, [int] $b = cmd /c git push --force', B, ()),
     ('ps value start: a unary comma leads a list with a typed item (pwsh script)',
      "pwsh -c ', $a, [int] $b = cmd /c git push --force'", B, ()),
+    ('ps value start: a list whose last item is a glued target',
+     '$a, $b=git push --force', B, ()),
+    ('ps value start: a list whose last item is a glued target (pwsh script)',
+     "pwsh -c '$a, $b=git push --force'", B, ()),
+    ('ps value start: a list whose last item is a glued target, its value spaced',
+     '$a, $b= git push --force', B, ()),
+    ('ps value start: a list whose last item is a glued target, its value spaced (pwsh script)',
+     "pwsh -c '$a, $b= git push --force'", B, ()),
+    ('ps value start: a list of three, the last a glued target',
+     '$a, $b, $c=git push --force', B, ()),
+    ('ps value start: a list of three, the last a glued target (pwsh script)',
+     "pwsh -c '$a, $b, $c=git push --force'", B, ()),
+    ('ps value start: a list after =, its last item a typed glued target',
+     '$x = $y, [int]$z=git push --force', B, ()),
+    ('ps value start: a list after =, its last item a typed glued target (pwsh script)',
+     "pwsh -c '$x = $y, [int]$z=git push --force'", B, ()),
+    ('ps value start: a typed target, then a list its last item a typed glued target',
+     '[int] $x = $a, [int]$b=git push --force', B, ()),
+    ('ps value start: a typed target, then a list its last item a typed glued target (pwsh script)',
+     "pwsh -c '[int] $x = $a, [int]$b=git push --force'", B, ()),
+    ('ps value start: a glued target after =, then a list its last item glued',
+     '[int] $q = $y= $a, $b= git push --force', B, ()),
+    ('ps value start: a glued target after =, then a list its last item glued (pwsh script)',
+     "pwsh -c '[int] $q = $y= $a, $b= git push --force'", B, ()),
+    ('ps value start: a comma glued to a typed glued target, then a list its last item glued',
+     '[int] $q = ,[int]$y= $a, $b= git push --force', B, ()),
+    ('ps value start: a comma glued to a typed glued target, then a list its last item glued (pwsh script)',
+     "pwsh -c '[int] $q = ,[int]$y= $a, $b= git push --force'", B, ()),
+    ('ps value start: a typed glued target, then a list its last item glued',
+     '[int] $q = [int]$y= $a, $b= git push --force', B, ()),
+    ('ps value start: a typed glued target, then a list its last item glued (pwsh script)',
+     "pwsh -c '[int] $q = [int]$y= $a, $b= git push --force'", B, ()),
     ('ps value start: a split type glued to a glued target',
      '[Collections.Generic.Dictionary[string, int]]$y=git push --force', B, ()),
     ('ps value start: a split type glued to a glued target (pwsh script)',
@@ -4852,6 +4884,12 @@ PS_CASES += [
      "$x=return 'git push --force'", A, ()),
     ('fp ps value start: a flow word then a typed target, a string',
      "$x = return [int] $y = 'git push --force'", A, ()),
+    ('fp ps value start: a list whose last item is a glued target, values (pwsh script)',
+     "pwsh -c '$a, $b= 1, 2'", A, ()),
+    ('fp ps value start: a list whose last item is a glued target, an allowed command (pwsh script)',
+     "pwsh -c '$a, $b=Get-Date'", A, ()),
+    ('fp ps value start: a list whose last item is a typed glued target, a number (pwsh script)',
+     "pwsh -c '$a, [int]$b=5'", A, ()),
 ]
 CASES += [
     ('ps script value start: a flow word then a typed target after =',
@@ -4948,6 +4986,22 @@ CASES += [
      "pwsh -c '$x = , $a, [int] $b = cmd /c git push --force'", B, ()),
     ('ps script value start: a unary comma leads a list with a typed item',
      "pwsh -c ', $a, [int] $b = cmd /c git push --force'", B, ()),
+    ('ps script value start: a list whose last item is a glued target',
+     "pwsh -c '$a, $b=git push --force'", B, ()),
+    ('ps script value start: a list whose last item is a glued target, its value spaced',
+     "pwsh -c '$a, $b= git push --force'", B, ()),
+    ('ps script value start: a list of three, the last a glued target',
+     "pwsh -c '$a, $b, $c=git push --force'", B, ()),
+    ('ps script value start: a list after =, its last item a typed glued target',
+     "pwsh -c '$x = $y, [int]$z=git push --force'", B, ()),
+    ('ps script value start: a typed target, then a list its last item a typed glued target',
+     "pwsh -c '[int] $x = $a, [int]$b=git push --force'", B, ()),
+    ('ps script value start: a glued target after =, then a list its last item glued',
+     "pwsh -c '[int] $q = $y= $a, $b= git push --force'", B, ()),
+    ('ps script value start: a comma glued to a typed glued target, then a list its last item glued',
+     "pwsh -c '[int] $q = ,[int]$y= $a, $b= git push --force'", B, ()),
+    ('ps script value start: a typed glued target, then a list its last item glued',
+     "pwsh -c '[int] $q = [int]$y= $a, $b= git push --force'", B, ()),
     ('ps script value start: a split type glued to a glued target',
      "pwsh -c '[Collections.Generic.Dictionary[string, int]]$y=git push --force'", B, ()),
     ('ps script value start: a split type glued to a glued target after a glued =',
@@ -5016,6 +5070,12 @@ CASES += [
      "pwsh -c '$x = [int] $y.Length'", A, ()),
     ('fp ps script value start: a static member',
      "pwsh -c '$x = [datetime]::Now'", A, ()),
+    ('fp ps script value start: a list whose last item is a glued target, values',
+     "pwsh -c '$a, $b= 1, 2'", A, ()),
+    ('fp ps script value start: a list whose last item is a glued target, an allowed command',
+     "pwsh -c '$a, $b=Get-Date'", A, ()),
+    ('fp ps script value start: a list whose last item is a typed glued target, a number',
+     "pwsh -c '$a, [int]$b=5'", A, ()),
     ('ps script value start: an expanded word after a typed target and a type, then =',
      'pwsh -c "[int] \\$a = [int] $CMD =1"', B, ()),
     ('ps script value start: an expanded word after a type, then a target',
@@ -5046,6 +5106,10 @@ CASES += [
      'pwsh -c "\\$x=return [int] $CMD = 1"', B, ()),
     ('ps script value start: an expanded word glued to a comma after a unary comma',
      'pwsh -c ", ,\\$y=$CMD"', B, ()),
+    ('ps script value start: an expanded list item before a glued last item',
+     'pwsh -c "[int] \\$q = $CMD, \\$b= 1"', B, ()),
+    ('ps script value start: an expanded last item of a list, glued',
+     'pwsh -c "[int] \\$q = \\$a, $CMD=1"', B, ()),
     ('fp ps script value start: exit with the last exit code, unescaped (the documented $VAR limit)',
      'pwsh -c "npm test; exit $LASTEXITCODE"', A, ()),
     ('fp ps script value start: return an expanded word (the documented $VAR limit)',
