@@ -1116,7 +1116,10 @@ def _ps_statement_tail(toks, script=False):
             # Other assignment targets, as _rules_at reads a script's (a typed `[int]$x`,
             # `$x,$y`), and a list of them (`$a, $b = cmd`).
             j = i
-            while toks[j].endswith(",") and j + 1 < len(toks) and "$" in toks[j + 1]:
+            # No item opens with an assignment operator: a resume reads that word, so the
+            # scan stops there and never rescans it (`=,$b, =,$b, ...` stays linear).
+            while (toks[j].endswith(",") and j + 1 < len(toks) and "$" in toks[j + 1]
+                   and not _PS_ASSIGN_LEAD_RE.match(toks[j + 1])):
                 j += 1
             if j + 1 < len(toks) and toks[j + 1] in _PS_ASSIGN:
                 step = j + 2

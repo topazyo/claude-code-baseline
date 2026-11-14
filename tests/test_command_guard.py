@@ -5205,6 +5205,8 @@ STRUCT_CASES += [
     ("timing: 4 KB of resumed typed lists around flow words (PowerShell)",
      lambda: _timing("powershell", _fit8af("[int] $a =", "return [int] $a, [int] $b =")) < 3.0,
      True),
+    ("timing: 4 KB of list items each resumed after a glued = (PowerShell)",
+     lambda: _timing("powershell", _fit8af("[int] $a, ", "=,$b, ")) < 3.0, True),
     ("timing: 4 KB of types glued to glued targets (PowerShell)",
      lambda: _timing("powershell", _fit8af("$x=", "[int]$a=")) < 3.0, True),
     ("timing: 4 KB of resumed typed lists in a pwsh script",
