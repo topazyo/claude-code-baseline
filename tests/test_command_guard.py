@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 735
+FP_FLOOR = 747
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 1847
+BLOCK_FLOOR = 1863
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -4670,6 +4670,26 @@ PS_CASES += [
      '$x=,[int] $y = git push --force', B, ()),
     ('ps value start: a glued =, a unary comma glued to a type (pwsh script)',
      "pwsh -c '$x=,[int] $y = git push --force'", B, ()),
+    ('ps value start: return, a unary comma glued to a typed glued target',
+     'return ,[int]$y=git push --force', B, ()),
+    ('ps value start: return, a unary comma glued to a typed glued target (pwsh script)',
+     "pwsh -c 'return ,[int]$y=git push --force'", B, ()),
+    ('ps value start: return, a unary comma glued to a glued target',
+     'return ,$y=git push --force', B, ()),
+    ('ps value start: return, a unary comma glued to a glued target (pwsh script)',
+     "pwsh -c 'return ,$y=git push --force'", B, ()),
+    ('ps value start: throw, a unary comma glued to a typed glued target',
+     'throw ,[int]$y=git push --force', B, ()),
+    ('ps value start: throw, a unary comma glued to a typed glued target (pwsh script)',
+     "pwsh -c 'throw ,[int]$y=git push --force'", B, ()),
+    ('ps value start: a unary comma, then one glued to a typed glued target',
+     ', ,[int]$y=git push --force', B, ()),
+    ('ps value start: a unary comma, then one glued to a typed glued target (pwsh script)',
+     "pwsh -c ', ,[int]$y=git push --force'", B, ()),
+    ('ps value start: a unary comma, then one glued to a glued target',
+     ', ,$y=git push --force', B, ()),
+    ('ps value start: a unary comma, then one glued to a glued target (pwsh script)',
+     "pwsh -c ', ,$y=git push --force'", B, ()),
     ('ps value start: a split type glued to the glued value of a typed glued target',
      '$x = [int]$y=[Collections.Generic.Dictionary[string, int]]$z=git push --force', B, ()),
     ('ps value start: a split type glued to the glued value of a typed glued target (pwsh script)',
@@ -4766,6 +4786,22 @@ PS_CASES += [
      '$x = ,[int] $y', A, ()),
     ('fp ps value start: a unary comma glued to a cast (pwsh script)',
      "pwsh -c '$x = ,[int] $y'", A, ()),
+    ('fp ps value start: return a unary comma glued to a cast',
+     'return ,[int]$y', A, ()),
+    ('fp ps value start: return a unary comma glued to a cast (pwsh script)',
+     "pwsh -c 'return ,[int]$y'", A, ()),
+    ('fp ps value start: a unary comma, then one glued to a variable',
+     ', ,$x', A, ()),
+    ('fp ps value start: a unary comma, then one glued to a variable (pwsh script)',
+     "pwsh -c ', ,$x'", A, ()),
+    ('fp ps value start: return a unary comma glued to a target, a variable',
+     'return ,$y=$z', A, ()),
+    ('fp ps value start: return a unary comma glued to a target, a variable (pwsh script)',
+     "pwsh -c 'return ,$y=$z'", A, ()),
+    ('fp ps value start: exit with a unary comma glued to a variable',
+     'exit ,$LASTEXITCODE', A, ()),
+    ('fp ps value start: exit with a unary comma glued to a variable (pwsh script)',
+     "pwsh -c 'exit ,$LASTEXITCODE'", A, ()),
     ('fp ps value start: a split type glued to a glued target, an empty hashtable',
      '[Collections.Generic.Dictionary[string, int]]$y=@{}', A, ()),
     ('fp ps value start: a split type glued to a glued target, an empty hashtable (pwsh script)',
@@ -4892,6 +4928,16 @@ CASES += [
      "pwsh -c '$x = ,,[int] $y = git push --force'", B, ()),
     ('ps script value start: a glued =, a unary comma glued to a type',
      "pwsh -c '$x=,[int] $y = git push --force'", B, ()),
+    ('ps script value start: return, a unary comma glued to a typed glued target',
+     "pwsh -c 'return ,[int]$y=git push --force'", B, ()),
+    ('ps script value start: return, a unary comma glued to a glued target',
+     "pwsh -c 'return ,$y=git push --force'", B, ()),
+    ('ps script value start: throw, a unary comma glued to a typed glued target',
+     "pwsh -c 'throw ,[int]$y=git push --force'", B, ()),
+    ('ps script value start: a unary comma, then one glued to a typed glued target',
+     "pwsh -c ', ,[int]$y=git push --force'", B, ()),
+    ('ps script value start: a unary comma, then one glued to a glued target',
+     "pwsh -c ', ,$y=git push --force'", B, ()),
     ('ps script value start: a split type glued to the glued value of a typed glued target',
      "pwsh -c '$x = [int]$y=[Collections.Generic.Dictionary[string, int]]$z=git push --force'", B, ()),
     ('ps script value start: a split type glued to an indexed target a space splits',
@@ -4940,6 +4986,14 @@ CASES += [
      "pwsh -c '$x = ,$y'", A, ()),
     ('fp ps script value start: a unary comma glued to a cast',
      "pwsh -c '$x = ,[int] $y'", A, ()),
+    ('fp ps script value start: return a unary comma glued to a cast',
+     "pwsh -c 'return ,[int]$y'", A, ()),
+    ('fp ps script value start: a unary comma, then one glued to a variable',
+     "pwsh -c ', ,$x'", A, ()),
+    ('fp ps script value start: return a unary comma glued to a target, a variable',
+     "pwsh -c 'return ,$y=$z'", A, ()),
+    ('fp ps script value start: exit with a unary comma glued to a variable',
+     "pwsh -c 'exit ,$LASTEXITCODE'", A, ()),
     ('fp ps script value start: a split type glued to a glued target, an empty hashtable',
      "pwsh -c '[Collections.Generic.Dictionary[string, int]]$y=@{}'", A, ()),
     ('fp ps script value start: a split type after a glued =, an allowed command',
@@ -4990,6 +5044,8 @@ CASES += [
      'pwsh -c "@{ a = return $CMD = 1 }"', B, ()),
     ('ps script value start: an expanded word after a glued flow word and a type',
      'pwsh -c "\\$x=return [int] $CMD = 1"', B, ()),
+    ('ps script value start: an expanded word glued to a comma after a unary comma',
+     'pwsh -c ", ,\\$y=$CMD"', B, ()),
     ('fp ps script value start: exit with the last exit code, unescaped (the documented $VAR limit)',
      'pwsh -c "npm test; exit $LASTEXITCODE"', A, ()),
     ('fp ps script value start: return an expanded word (the documented $VAR limit)',

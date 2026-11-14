@@ -1203,9 +1203,10 @@ def _ps_value_start(toks, i, word, glue, first=False):
             i, word, glue, typed = i + 1, toks[i + 1], False, True
             continue
         commas = len(word) - len(word.lstrip(","))
-        if 0 < commas < len(word) and (not first or "$" not in word):
+        if 0 < commas < len(word) and (flow or typed or not first or "$" not in word):
             # `$x = ,[int] $y = cmd`: a unary comma glued to its operand, read as glued
-            # text. Not a first word holding a `$` (see the glued target below).
+            # text. Not a statement's first word holding a `$` (see the glued target
+            # below); a word a hop reached is no first word (`return ,$y=cmd`).
             word, glue, typed = word[commas:], True, True
             continue
         k = _ps_type_words_end(toks, i, word if glue else None)   # `$x=[string] $y = cmd`
