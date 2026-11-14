@@ -1146,7 +1146,7 @@ def _ps_statement_tail(toks, script=False):
             # resumed after (`[int] $a, [int] $b = return [int] $c, $d = cmd`). The
             # searches never overlap, so this stays linear.
             found = _ps_assignment_operator(toks, max(i, resumed + 1))
-            if found is not None and i in ext:
+            if found is not None and any(t in ext for t in range(i, max(found[0], i + 1))):
                 # Not past a word an outer shell expanded (see ext). With no operator
                 # after it, it stays a flow word's value (`exit $LASTEXITCODE`: the
                 # documented `$VAR` limit).
@@ -1184,14 +1184,14 @@ def _ps_flow_word(toks, i, word):
 def _ps_value_start(toks, i, word, glue, first=False):
     """Where a value's own words begin (see _ps_statement_tail), from word: toks[i], or
     with glue the value glued to an `=` in toks[i] (`$x=return`). Past a flow word with an
-    operand (`return cmd`), a unary comma (`, $y = cmd`, read as a type: typed) and a run
-    of type literals (`[int] $y = cmd`), hopped until
-    neither applies, so a statement's start, a value after an operator, a glued value and
-    a resumed one all read alike: `$x=return [int] $y = cmd`. PowerShell takes at most a
-    flow word, then the types; other orders are read the same way, which only adds words
-    to judge. Each hop moves i on, so this stays linear. Returns (i, word, glue, flow,
-    typed): flow, typed when a flow word, a type run was hopped. first: word is the
-    statement's first word."""
+    operand (`return cmd`), a unary comma, alone or glued (`, $y = cmd`, `,[int] $y =
+    cmd`), and a run of type literals (`[int] $y = cmd`), hopped until none applies, so a
+    statement's start, a value after an operator, a glued value and a resumed one all
+    read alike: `$x=return [int] $y = cmd`. PowerShell takes at most a flow word, then the
+    types; other orders are read the same way, which only adds words to judge. Each hop
+    moves i on or shortens word, so this stays linear. Returns (i, word, glue, flow,
+    typed): flow when a flow word was hopped, typed when a comma or a type run was. first:
+    word is the statement's first word."""
     flow = typed = False
     while True:
         if _ps_flow_word(toks, i, word):
@@ -1202,12 +1202,18 @@ def _ps_value_start(toks, i, word, glue, first=False):
             # target as after a type.
             i, word, glue, typed = i + 1, toks[i + 1], False, True
             continue
+        commas = len(word) - len(word.lstrip(","))
+        if 0 < commas < len(word) and (not first or "$" not in word):
+            # `$x = ,[int] $y = cmd`: a unary comma glued to its operand, read as glued
+            # text. Not a first word holding a `$` (see the glued target below).
+            word, glue, typed = word[commas:], True, True
+            continue
         k = _ps_type_words_end(toks, i, word if glue else None)   # `$x=[string] $y = cmd`
         if k == i:
-            # `return [int]$y=cmd`: a type glued to a glued target. Not when it is all the
-            # statement's first word, whose reading _rules_at's early return depends on.
+            # `return [int]$y=cmd`: a type glued to a glued target. Not from a statement's
+            # first word holding a `$`, whose reading _rules_at's early return depends on.
             found = _ps_typed_glued_target(toks, i, word)
-            if found and (flow or typed or not first or found[0] > i):
+            if found and (flow or typed or not first or "$" not in word):
                 return found[0], found[1], True, flow, True
             return i, word, glue, flow, typed
         i, word, glue, typed = k, toks[k], False, True
@@ -1216,17 +1222,20 @@ def _ps_value_start(toks, i, word, glue, first=False):
 def _ps_typed_glued_target(toks, i, word):
     """A type glued to a glued target from word (toks[i], or the value glued to an `=` in
     it): `[int]$y=cmd`, the type perhaps split by a space (`[Dictionary[string,`
-    `int]]$y=cmd`), joined as _ps_type_words_end joins one, up to 8 words. (The index of
-    the word the target is in, the target and its value), or None."""
+    `int]]$y=cmd`), joined as _ps_type_words_end joins one, up to 8 words. The word alone
+    is read first: an open `[` may be its value's (`[int]$y=[Dictionary[string,`). (The
+    index of the last word read, the target and its value as one text), or None."""
+    lead = _PS_TYPE_WORD_RE.match(word).end()
+    if lead and _PS_GLUED_ASSIGN_RE.fullmatch(word, lead):
+        return i, word[lead:]
     joined, j = word, i
     while (joined[:1] in "[]" and joined.count("[") > joined.count("]")
            and j + 1 < len(toks) and j - i < 7):
         j += 1
         joined += toks[j]
     lead = _PS_TYPE_WORD_RE.match(joined).end()
-    last = len(toks[j]) if j > i else len(word)
-    if lead and lead >= len(joined) - last and _PS_GLUED_ASSIGN_RE.fullmatch(joined, lead):
-        return j, joined[lead:]
+    if lead and _PS_GLUED_ASSIGN_RE.fullmatch(joined, lead):
+        return j, joined[lead:]          # `$y[ 0]=cmd`: a target a space splits too
     return None
 
 
