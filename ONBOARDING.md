@@ -342,7 +342,7 @@ and why each entry is on it:
 | `drop table`, `truncate table`, `delete from` | destructive data operations |
 | `curl`/`wget` at a remote host (with or without a `scheme://`; `http(s)://localhost`, `127.x.x.x` and `[::1]` are allowed) | unreviewed remote fetch (injection / supply-chain) |
 | `npm install`, `pnpm install`, `yarn add`, `pip install` | unvetted dependency (supply-chain) |
-| PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | the same three categories, in the shell Windows sessions actually get — refused by the `PowerShell(...)` **deny rules** in `settings.template.json`, not by command-guard, which does not match PowerShell cmdlets |
+| PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | the same three categories, in the shell Windows sessions actually get — refused by the `PowerShell(...)` **deny rules** in `settings.template.json`. command-guard also reads `Remove-Item` and its aliases as PowerShell binds them (a recursive delete of a root, home or current-location target, or of targets piped in), but no other cmdlet |
 
 You can extend it per-repo via `guardrails.commandGuard.extraPatterns` (e.g.
 `["terraform destroy"]`). *(Anthropic ships a near-identical `block-rm.sh` example —

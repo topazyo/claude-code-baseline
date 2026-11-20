@@ -317,7 +317,7 @@ Claude Code מפעיל hooks ב**אירועים** (events) בעלי שם. התי
 
 ---
 
-<!-- he-sync: part-2--why-secure-by-default-for-an-ai-coding-agent sha256=36b324d7b94a74ec -->
+<!-- he-sync: part-2--why-secure-by-default-for-an-ai-coding-agent sha256=f6879f131cdd8838 -->
 ## חלק 2 — למה סוכן תכנות מבוסס AI צריך הגנה כברירת מחדל
 
 <sub>[המקור באנגלית](ONBOARDING.md#part-2--why-secure-by-default-for-an-ai-coding-agent)</sub>
@@ -393,7 +393,7 @@ Claude Code יכול להריץ פקודות מעטפת ולערוך קבצים 
 | `drop table`, `truncate table`, `delete from` | פעולות הרסניות על נתונים |
 | הפקודות `curl`/`wget` מול שרת מרוחק (עם או בלי `scheme://`; מותר `http(s)://localhost`, `127.x.x.x` ו-`[::1]`) | הורדה מרוחקת שלא נבדקה (הזרקה / שרשרת אספקה) |
 | `npm install`, `pnpm install`, `yarn add`, `pip install` | תלות שלא נבדקה (שרשרת אספקה) |
-| ב-PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | אותן שלוש קטגוריות, במעטפת שסשנים ב-Windows מקבלים בפועל. אותן דוחים **כללי ה-deny** מסוג `PowerShell(...)` שב-`settings.template.json`, ולא ה-command-guard, שלא מזהה cmdlets של PowerShell |
+| ב-PowerShell: `Remove-Item`, `Invoke-WebRequest`/`iwr`, `Invoke-Expression`/`iex` | אותן שלוש קטגוריות, במעטפת שסשנים ב-Windows מקבלים בפועל. אותן דוחים **כללי ה-deny** מסוג `PowerShell(...)` שב-`settings.template.json`. בנוסף, ה-command-guard קורא את `Remove-Item` ואת הכינויים שלו כפי ש-PowerShell מקשר אליהם את הפרמטרים (מחיקה רקורסיבית של יעד שהוא שורש, תיקיית הבית או התיקייה הנוכחית, או של יעדים שמגיעים דרך צינור), אבל לא אף cmdlet אחר |
 
 אפשר להרחיב את הרשימה בכל ריפו דרך `guardrails.commandGuard.extraPatterns` (למשל
 `["terraform destroy"]`). *(Anthropic מפרסמת דוגמה כמעט זהה בשם `block-rm.sh`, כך שזה

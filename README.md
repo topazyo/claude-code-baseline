@@ -129,11 +129,15 @@ Two limits, stated plainly:
    why `install.sh` warns below the pin. Note too that scope-guard is wired even
    while its module is off, so with `onFailure: "block"` a scope-guard that
    cannot start, or runs past its 10 s timeout, blocks every Write/Edit.
-2. **command-guard's blocklist is POSIX command names.** It will inspect a
-   PowerShell payload, but it does not know cmdlet verbs (`Remove-Item`,
-   `Invoke-WebRequest`). Those are covered by the deny rules only, which is a
-   coarser floor than the Bash side gets. "The hook fired" does not mean "the
-   command was understood".
+2. **command-guard's blocklist is POSIX command names, plus PowerShell's
+   `Remove-Item`.** It inspects a PowerShell payload, and it reads `Remove-Item`
+   and its aliases (`ri`, `rm`, `del`, `erase`, `rd`, `rmdir`) as PowerShell
+   binds their parameters: a recursive delete of a root, home or current-location
+   target, or of targets piped in, is refused. It does not know other cmdlet
+   verbs (`Invoke-WebRequest`, `Invoke-Expression`), nor a target the command
+   computes (`(Resolve-Path ~)`, `$x`). Those are covered by the deny rules only,
+   which is a coarser floor than the Bash side gets. "The hook fired" does not
+   mean "the command was understood".
 
 ### Modules (opt-in)
 

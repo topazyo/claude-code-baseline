@@ -104,14 +104,18 @@ separates words on read as spaces, with the dashes it reads as `-` (U+2013, U+20
 U+2015) read as `-`, all of them or only one before `=`, and with a ( ) / $( ) / @( )
 group around one word and every { } read away, so
 `git reset ("--hard")` and `& {...}` are judged as the words they become (see
-_ps_unescape, _PS_SPACES, _ps_dash_readings, _ps_ungroup and _powershell_segments);
+_ps_unescape, _PS_SPACES, _ps_dash_readings, _ps_ungroup and _powershell_segments); a
+pipeline continued after a `|` that ends a line, and a literal list's group (`('a','~')`),
+are each also read as one line / without the group (_PS_PIPE_EOL_RE, _PS_LIST_GROUP_RE);
 more than one dash before `=` is refused. Limits: a $( )
 subexpression holding a nested "..." string is scanned as if the inner quote closed
 the outer string (the context-free reading still decodes every escape in it); --%
 (stop-parsing) is not modelled, so the text after it is judged decoded as well as
 raw, and the raw readings give what the program receives there (for cmd, the text
 after it is also read as the script cmd gets: _ps_stop_parsing_cmd_scripts); and PowerShell
-cmdlets (Remove-Item ...) are matched by the deny-list only. The context-free reading
+cmdlets are matched by the deny-list only, except Remove-Item and its aliases, read as
+PowerShell binds their parameters (see _ps_remove_item; a target it computes, such as
+`(Resolve-Path ~)` or `$x`, and a call through a new alias are not read). The context-free reading
 decodes escapes inside '...' too, so a single-quoted commit message holding `n
 followed by a blocked command at the start of the next line is blocked, the cost the
 multi-line pass already accepts for a real newline; a "..." message whose decoded
@@ -403,6 +407,78 @@ _REDIR_RE = re.compile(r"^(?:&>>?|[<>]&|>>|>\||<<<|<<|<>|<|>)$")
 # WSL /mnt/c, Cygwin /cygdrive/c) and a path made only of `..` steps.
 _DRIVE_ROOT_RE = re.compile(r"^(?:[a-z]:|/[a-z]|/mnt/[a-z]|/cygdrive/[a-z])$")
 _PARENT_ONLY_RE = re.compile(r"^\.\.(?:/\.\.)*$")
+# PowerShell's Remove-Item and its aliases (PowerShell 7 and Windows PowerShell 5.1 alike),
+# read as PowerShell binds their parameters (see _ps_remove_item). `ri` and `rm` only in a
+# PowerShell text: bash's ri is Ruby's viewer, and bash's rm has its own rule. The others
+# everywhere: no bash meaning of them takes -r or a PowerShell parameter.
+_PS_REMOVE_ITEM = frozenset({"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"})
+_PS_REMOVE_ITEM_GATED = frozenset({"ri", "rm"})
+# Remove-Item's parameter names and aliases (7.6 and 5.1, the common parameters included),
+# each mapped to its parameter. A parameter word binds every parameter it is a prefix of;
+# PowerShell refuses an ambiguous or unknown one, so nothing runs.
+_PS_REMOVE_ITEM_PARAMS = {
+    "path": "path", "literalpath": "literalpath", "pspath": "literalpath", "lp": "literalpath",
+    "filter": "filter", "include": "include", "exclude": "exclude", "recurse": "recurse",
+    "force": "force", "credential": "credential", "stream": "stream",
+    "usetransaction": "usetransaction", "usetx": "usetransaction",
+    "verbose": "verbose", "vb": "verbose", "debug": "debug", "db": "debug",
+    "erroraction": "erroraction", "ea": "erroraction",
+    "warningaction": "warningaction", "wa": "warningaction",
+    "informationaction": "informationaction", "infa": "informationaction",
+    "progressaction": "progressaction", "proga": "progressaction",
+    "errorvariable": "errorvariable", "ev": "errorvariable",
+    "warningvariable": "warningvariable", "wv": "warningvariable",
+    "informationvariable": "informationvariable", "iv": "informationvariable",
+    "outvariable": "outvariable", "ov": "outvariable", "outbuffer": "outbuffer",
+    "ob": "outbuffer", "pipelinevariable": "pipelinevariable", "pv": "pipelinevariable",
+    "whatif": "whatif", "wi": "whatif", "confirm": "confirm", "cf": "confirm",
+}
+_PS_REMOVE_ITEM_SWITCHES = frozenset({"recurse", "force", "usetransaction", "verbose", "debug",
+                                      "whatif", "confirm"})
+_PS_REMOVE_ITEM_PATHS = frozenset({"path", "literalpath"})
+# A delete target as PowerShell spells a root: a FileSystem provider prefix, removed; the
+# variables naming the home, the system drive or the current location, each read as the
+# bash root it names (after `\` has become `/`); a PSDrive name (`C:`, `HKCU:`, `Env:`) read
+# as the root `/`, so `HKCU:\*` and `Env:*` are roots as `/*` is.
+_PS_PROVIDER_RE = re.compile(r"^(?:microsoft\.powershell\.core\\)?filesystem::")
+_PS_HOME_RE = re.compile(
+    r"^(?:(?:\$env:homedrive|\$\{env:homedrive\})(?:\$env:homepath|\$\{env:homepath\})"
+    r"|\$env:(?:userprofile|home|homepath)|\$\{env:(?:userprofile|home|homepath)\})(?=/|$)")
+_PS_SYSTEM_DRIVE_RE = re.compile(r"^(?:\$env:(?:systemdrive|homedrive)"
+                                 r"|\$\{env:(?:systemdrive|homedrive)\})(?=/|$)")
+_PS_CWD_RE = re.compile(
+    r"^(?:\$pwd(?:\.path|\.providerpath)?"
+    r"|\$\(\s*(?:get-location|gl|pwd)\s*\)(?:\.path|\.providerpath)?"
+    r"|\(get-location\)\.(?:path|providerpath)|get-location|gl|pwd)(?=/|$)")
+_PS_DRIVE_RE = re.compile(r"^[a-z][\w.-]*:(?!:)")
+# A Win32 device or long-path prefix (`\\?\C:\`, `\\.\C:\`), removed, and `\\?\UNC\`
+# read as `\\`; a drive's admin share (`\\host\c$`), read as that drive.
+_PS_LONG_PATH_RE = re.compile(r"^//[?.]/(unc/)?")
+_PS_ADMIN_SHARE_RE = re.compile(r"^//[^/]+/([a-z])\$(?=/|$)")
+# A variable's scope or drive qualifier (`$global:HOME`, `${variable:PWD}`): the same variable.
+_PS_SCOPE_RE = re.compile(r"^\$(\{?)(?:global|local|script|private|using|variable):")
+# A payload that can reach $PSDefaultParameterValues without spelling it whole: through the
+# variable cmdlets (and their aliases), the variable: drive, or the session state's PSVariable.
+_PS_DEFAULTS_RE = re.compile(
+    r"psdefault|parametervalues|psvariable|variable:"
+    r"|(?<![\w-])(?:get|set|new)-variable(?![\w-])"
+    r"|(?:^|(?<=[\s(;|&{=,]))(?:gv|sv|nv)(?=[\s)]|$)")
+# A literal list in a group (`('./build','~')`, `@("a", "b")`): two or more quoted strings or
+# bare words, comma-separated, and nothing else, opening a word (a method call's arguments
+# do not). Read without its parentheses, it is the list a command gets as one argument (a
+# group that runs a command is not a literal list). Each
+# item's alternatives start with a different character, so the match is linear.
+_PS_LIST_GROUP_RE = re.compile(
+    r"(?<!\S)@?\(\s*((?:'[^']*'|\"[^\"]*\"|[^\s'\"(),]+)"
+    r"(?:\s*,\s*(?:'[^']*'|\"[^\"]*\"|[^\s'\"(),]+))+)\s*\)")
+# A `|` that ends a line, with any blank lines after it: PowerShell continues the pipeline on
+# the next command line (see _ps_joined_pipes). Each repetition takes a newline, so the
+# match is linear. A comment starts at a `#` that begins a word; its matches run to the end
+# of a line and never overlap, and a failed position costs one character, so it is linear.
+_PS_PIPE_EOL_RE = re.compile(r"\|(?:[ \t]*\r?\n)+")
+_PS_COMMENT_RE = re.compile(r"(?:^|(?<=[\s;|&({]))#[^\r\n]*", re.M)
+# The variables a script block bound per piped item reads it through (`{ $_.PSPath }`).
+_PS_PIPED_ITEM_RE = re.compile(r"\$(?:_|\{_\}|psitem|\{psitem\}|input)(?!\w)")
 # Package-manager options that consume the next word, skipped to find the subcommand.
 _NPM_VALUE_OPTS = {"--prefix", "--registry", "--cache", "--userconfig", "--globalconfig",
                    "--workspace", "--loglevel", "--dir", "--filter", "--reporter",
@@ -560,6 +636,121 @@ def _collapse_parents(t: str) -> str:
         else:
             out.append(c)
     return "/".join(out) or ("/" if t.startswith("/") else ".")
+
+
+def _ps_joined_pipes(text: str) -> list:
+    """text with each `|` that ends a line (blank lines after it included) joined to the next
+    command line: as it is, and without its comments (a `#` that begins a word, so `| # c`
+    still joins); the ones that join anything. Added, lenient readings: a `#` the comment
+    pattern takes inside a string (`' #'`) only stops the second one joining, and the first
+    still does. Both miss a quoted ` #` followed by a real comment after the `|`."""
+    out = []
+    for t in (text, _PS_COMMENT_RE.sub("", text)):
+        if _PS_PIPE_EOL_RE.search(t):
+            joined = _PS_PIPE_EOL_RE.sub("| ", t)
+            if joined not in out:
+                out.append(joined)
+    return out
+
+
+def _ps_list_items(m) -> str:
+    """_PS_LIST_GROUP_RE's replacement: the list's items on one line (a list may break after a
+    comma, and the newline would end the statement)."""
+    return m.group(1).replace("\r", " ").replace("\n", " ")
+
+
+def _ps_long_path(m) -> str:
+    """_PS_LONG_PATH_RE's replacement: `//?/unc/host/...` is `//host/...`, `//?/c:/` is `c:/`."""
+    return "//" if m.group(1) else ""
+
+
+def _ps_tilde_names(path: str) -> str:
+    """path with each `~`-led component other than a leading `~` alone spelled as a plain
+    name: PowerShell reads `~` as the home only as the whole first component, so `~foo` is a
+    name in the current location (and `~foo/..` that location), not bash's ~name home,
+    which _is_danger_target and _collapse_parents read it as (a POSIX reading of `~\\foo`
+    gives `~foo`)."""
+    comps = path.split("/")
+    return "/".join(c if (i == 0 and c == "~") or not c.startswith("~") else "_" + c[1:]
+                    for i, c in enumerate(comps))
+
+
+def _ps_root_target(word: str) -> bool:
+    """A Remove-Item target word that names a root, the home or the current location: each
+    comma-separated item, as it is and in its PowerShell spellings (see _PS_HOME_RE and its
+    neighbours), with `\\` read as the path separator it is."""
+    for item in word.lower().split(","):
+        item = item.strip()
+        # An item of a literal list keeps the list's parentheses (`('./build','~')`).
+        if item.count("(") > item.count(")"):
+            item = item[2:] if item.startswith("@(") else item[1:] if item[:1] == "(" else item
+        if item.count(")") > item.count("(") and item.endswith(")"):
+            item = item[:-1]
+        item = _PS_SCOPE_RE.sub(r"$\1", item.strip(), count=1)
+        if not item:
+            continue
+        plain = item.replace("\\", "/")
+        t = _PS_PROVIDER_RE.sub("", item).replace("\\", "/")
+        t = _PS_ADMIN_SHARE_RE.sub(r"\1:", _PS_LONG_PATH_RE.sub(_ps_long_path, t, count=1), count=1)
+        t = _PS_HOME_RE.sub("$home", t, count=1)
+        t = _PS_SYSTEM_DRIVE_RE.sub("c:", t, count=1)
+        t = _PS_CWD_RE.sub("$pwd", t, count=1)
+        drive = _PS_DRIVE_RE.match(t)
+        cands = (plain, t) + (("/" + t[drive.end():],) if drive else ())
+        if any(_is_danger_target(_ps_tilde_names(x)) for x in cands):
+            return True
+    return False
+
+
+def _ps_style_parameter(arg: str) -> bool:
+    """A parameter only PowerShell spells so (`-rec`, `-Recurse`, `-x:y`): POSIX rm refuses
+    it, so an `rm` holding one is Remove-Item in any text (see _PS_REMOVE_ITEM_GATED)."""
+    w = arg.lower()
+    return (len(w) > 1 and w[0] in "-" + _PS_DASHES
+            and (":" in w or (len(w) > 2 and "recurse".startswith(w[1:]))))
+
+
+def _ps_remove_item(args, piped: bool, defaults: bool = False):
+    """(root, unknown) for Remove-Item's arguments, bound as PowerShell binds them. root:
+    it recurses into a target that names a root, the home or the current location (see
+    _ps_root_target). unknown: it recurses into what a pipe feeds it, with no path of its
+    own (`Get-Item ~ | Remove-Item -Recurse`, the xargs case). Recursion is a parameter that
+    binds Recurse, whatever its value, or a splat (`@p`), or, with defaults, any call: the
+    payload names $PSDefaultParameterValues, which can turn it on. A path of its own is a
+    non-empty positional word, or the value of a parameter that binds only Path or
+    LiteralPath; none counts when any word holds a piped item's variable (_PS_PIPED_ITEM_RE:
+    a script block bound per piped item). A word after a parameter is that parameter's value
+    unless the parameter binds only switches and has no bare `:`; one that binds nothing
+    (`--`, an unknown name, which PowerShell refuses) also takes it, so a parameter missing
+    from _PS_REMOVE_ITEM_PARAMS can only lose a path. Every misreading can only lose a path
+    of its own, so it adds a block, never an allow."""
+    recursive, targets, paths = defaults, [], []
+    takes = None            # the parameters the last word binds, when the next is its value
+    for a in args:
+        w = a.lower()
+        if len(w) > 1 and w[0] in "-" + _PS_DASHES:
+            name, colon, value = w[1:].partition(":")
+            binds = {p for n, p in _PS_REMOVE_ITEM_PARAMS.items() if name and n.startswith(name)}
+            recursive = recursive or "recurse" in binds
+            takes = None
+            if colon and value:
+                targets.append(value)
+                if binds and binds <= _PS_REMOVE_ITEM_PATHS:
+                    paths.append(value)
+            elif colon or not binds or not binds <= _PS_REMOVE_ITEM_SWITCHES:
+                takes = binds or {""}
+            continue
+        if len(w) > 1 and w[0] == "@" and w[1] not in "({":
+            recursive = True
+        else:
+            targets.append(w)
+            if takes is None or takes <= _PS_REMOVE_ITEM_PATHS:
+                paths.append(w)
+        takes = None
+    root = recursive and any(_ps_root_target(t) for t in targets)
+    own = (any(p.strip() for p in paths)
+           and not any(_PS_PIPED_ITEM_RE.search(a.lower()) for a in args))
+    return root, recursive and piped and not own
 
 
 def _wrapper_assignment(base: str, t: str, consume=True) -> bool:
@@ -1767,6 +1958,21 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
                 rest.append(rhs)
         return out
 
+    # PowerShell's Remove-Item (and its aliases), read as PowerShell binds it; an `rm` in a
+    # PowerShell text is judged by the rule below as well (see _PS_REMOVE_ITEM).
+    name = cmd.lower()
+    if name in _PS_REMOVE_ITEM and (name not in _PS_REMOVE_ITEM_GATED
+                                    or getattr(toks, "ps_tool", False)
+                                    or getattr(toks, "ps_script", False)
+                                    or (name == "rm" and any(map(_ps_style_parameter, args)))):
+        root, unknown = _ps_remove_item(args, getattr(toks, "piped", False),
+                                        _Command.ps_defaults)
+        if root:
+            out.append("recursive delete of a root/cwd/home target (Remove-Item -Recurse)")
+        if unknown:
+            out.append("recursive delete with targets piped in "
+                       "(Remove-Item -Recurse, unknown scope)")
+
     if cmd == "rm":
         recursive = force = target = False
         for a in args:
@@ -2259,6 +2465,12 @@ def _ps_script_texts(text: str):
     base = list(texts)
     texts += [_ps_unescape(t) for t in base]
     texts += [_ps_unescape_everywhere(t) for t in base if "`" in t]
+    # A pipeline continued after a `|` that ends a line, read as one line (the runner's
+    # segments are lenient, so a here-string this cuts cannot refuse the script).
+    texts += [j for t in plain for j in _ps_joined_pipes(t)]
+    # A literal list's group read away (see _PS_LIST_GROUP_RE), likewise lenient.
+    texts += [_PS_LIST_GROUP_RE.sub(_ps_list_items, t) for t in plain
+              if _PS_LIST_GROUP_RE.search(t)]
     return texts
 
 
@@ -4094,8 +4306,11 @@ class _RunnerBudget:
 
 class _Command:
     """The whole payload of this evaluate() call: what an alias defined anywhere in it may
-    be fed by (see _expand_scripts)."""
+    be fed by (see _expand_scripts). ps_defaults: the payload names
+    $PSDefaultParameterValues, which can give Remove-Item -Recurse without the word (set by
+    evaluate() while it judges, see _ps_remove_item)."""
     raw = ""
+    ps_defaults = False
 
 
 @functools.lru_cache(maxsize=4096)
@@ -4513,6 +4728,19 @@ def _powershell_segments(raw: str):
         texts += [_PS_DOT_QUOTE_RE.sub(r"\1. ", t) for t in texts]
     # A <# #> comment reads as two redirects, whose targets take the words beside it. An
     # added reading, and lenient: a `<#` in a string can leave an odd quote behind.
+    # A pipeline continued after a `|` that ends a line, read as one line. An added reading,
+    # and lenient: joining a line inside a here-string can cut its terminator.
+    if "|" in raw:
+        for joined in (j for t in base for j in _ps_joined_pipes(t)):
+            segments += _segments(joined, shell="powershell", lenient_on_error=True,
+                                  ps_tool=True)
+    # A literal list's group read away (see _PS_LIST_GROUP_RE), likewise added and lenient.
+    if "(" in raw:
+        for text in base:
+            listed = _PS_LIST_GROUP_RE.sub(_ps_list_items, text)
+            if listed != text:
+                segments += _segments(listed, shell="powershell", lenient_on_error=True,
+                                      ps_tool=True)
     if "<#" in raw:
         for text in dict.fromkeys(texts):
             segments += _segments(_PS_BLOCK_COMMENT_RE.sub(" ", text), shell="powershell",
@@ -4600,10 +4828,16 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
             unique.append(toks)
 
     reasons = []
-    for toks in unique:
-        for r in _reasons_for(toks):
-            if r not in reasons:
-                reasons.append(r)
+    # A backtick inside a variable's braced name is an escape PowerShell reads away; either
+    # half of the name, or any route to a variable by a computed name (see _PS_DEFAULTS_RE).
+    _Command.ps_defaults = bool(_PS_DEFAULTS_RE.search(raw.lower().replace("`", "")))
+    try:
+        for toks in unique:
+            for r in _reasons_for(toks):
+                if r not in reasons:
+                    reasons.append(r)
+    finally:
+        _Command.ps_defaults = False
 
     # extraPatterns are documented as case-insensitive SUBSTRING matches. Test them
     # against both the tokenized form (quotes removed, so an ${IFS}-spliced pattern
