@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 909
+FP_FLOOR = 907
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 2478
+BLOCK_FLOOR = 2498
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -6315,6 +6315,14 @@ PS_CASES += [
      '[int]$b[$c[0]]=git push --force', B, ()),
     ('ps index target: a type glued to a nested index (pwsh script)',
      "pwsh -c '[int]$b[$c[0]]=git push --force'", B, ()),
+    ('ps index target: a split type glued to a nested index',
+     '[Collections.Generic.Dictionary[string, int]]$b[$c[0]]=git push --force', B, ()),
+    ('ps index target: a split type glued to a nested index (pwsh script)',
+     "pwsh -c '[Collections.Generic.Dictionary[string, int]]$b[$c[0]]=git push --force'", B, ()),
+    ('ps index target: a list, a split type glued to a nested index last',
+     '$a, [Collections.Generic.Dictionary[string, int]]$b[$c[0]]=git push --force', B, ()),
+    ('ps index target: a list, a split type glued to a nested index last (pwsh script)',
+     "pwsh -c '$a, [Collections.Generic.Dictionary[string, int]]$b[$c[0]]=git push --force'", B, ()),
     ('ps index target: a quoted key split from its [',
      '[int] $b[ "k"]=git push --force', B, ()),
     ('ps index target: a quoted key split from its [ (pwsh script)',
@@ -6547,6 +6555,22 @@ PS_CASES += [
      'Write-Host "a`" b"; return $b[ 0]=git push --force #"', B, ()),
     ('ps index target: the same, a split index after return (pwsh script)',
      'pwsh -c \'Write-Host "a`" b"; return $b[ 0]=git push --force #"\'', B, ()),
+    ('ps index target: the same over three lines, comment quotes around it',
+     'Write-Host "a`" b" # "\nWrite-Host "a`" b"; [int] $b[ 0]=git push --force; Write-Host "c" #"\nWrite-Host "a`" b" # "', B, ()),
+    ('ps index target: the same over three lines, comment quotes around it (pwsh script)',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; [int] $b[ 0]=git push --force; Write-Host "c" #"\nWrite-Host "a`" b" # "\'', B, ()),
+    ('ps index target: the same over three lines, a nested index after return',
+     'Write-Host "a`" b" # "\nWrite-Host "a`" b"; return $b[$c[0]]=rm -rf / #"\nWrite-Host "a`" b" # "', B, ()),
+    ('ps index target: the same over three lines, a nested index after return (pwsh script)',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; return $b[$c[0]]=rm -rf / #"\nWrite-Host "a`" b" # "\'', B, ()),
+    ('ps index target: the same over three lines, a member a variable names',
+     'Write-Host "a`" b" # "\nWrite-Host "a`" b"; [int] $b.$c=git push --force #"\nWrite-Host "a`" b" # "', B, ()),
+    ('ps index target: the same over three lines, a member a variable names (pwsh script)',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; [int] $b.$c=git push --force #"\nWrite-Host "a`" b" # "\'', B, ()),
+    ('ps index target: the same over three lines, no index (blocked before)',
+     'Write-Host "a`" b" # "\nWrite-Host "a`" b"; git push --force #"\nWrite-Host "a`" b" # "', B, ()),
+    ('ps index target: the same over three lines, no index (blocked before) (pwsh script)',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; git push --force #"\nWrite-Host "a`" b" # "\'', B, ()),
     ('fp cost ps index target: a split index assigned a number, a quoted [ in a comment',
      "[int] $b[ 0]=5 # '['", B, ()),
     ('fp cost ps index target: a split index assigned a number, a quoted [ in a comment (pwsh script)',
@@ -6653,14 +6677,14 @@ PS_CASES += [
      '$x = $b[ $i] + 1', A, ()),
     ('fp ps index target: a member a variable names, read into a variable',
      '$x = $b.$c', A, ()),
-    ('fp ps index target: a split index returned with an escape in a string',
-     'return $lines[$i + 1] + "`n"', A, ()),
-    ('fp ps index target: a split index returned after a string with an escape',
-     'Write-Host "Done`n"; return $lines[$i + 1]', A, ()),
     ("fp ps index target: a script's first word, an index split after a comma, a number (pwsh script)",
      "pwsh -c '$b[$i, 0]=5'", A, ()),
+    ('fp cost ps index target: a split index returned with an escape in a string',
+     'return $lines[$i + 1] + "`n"', B, ()),
     ('fp cost ps index target: a split index returned with an escape in a string (pwsh script)',
      'pwsh -c \'return $lines[$i + 1] + "`n"\'', B, ()),
+    ('fp cost ps index target: a split index returned after a string with an escape',
+     'Write-Host "Done`n"; return $lines[$i + 1]', B, ()),
     ('fp cost ps index target: a split index returned after a string with an escape (pwsh script)',
      'pwsh -c \'Write-Host "Done`n"; return $lines[$i + 1]\'', B, ()),
 ]
@@ -6715,6 +6739,10 @@ CASES += [
      "pwsh -c 'return $b[$c[0]]=cmd /c git push --force'", B, ()),
     ('ps script index target: a type glued to a nested index',
      "pwsh -c '[int]$b[$c[0]]=git push --force'", B, ()),
+    ('ps script index target: a split type glued to a nested index',
+     "pwsh -c '[Collections.Generic.Dictionary[string, int]]$b[$c[0]]=git push --force'", B, ()),
+    ('ps script index target: a list, a split type glued to a nested index last',
+     "pwsh -c '$a, [Collections.Generic.Dictionary[string, int]]$b[$c[0]]=git push --force'", B, ()),
     ('ps script index target: a quoted key split from its [',
      'pwsh -c \'[int] $b[ "k"]=git push --force\'', B, ()),
     ('ps script index target: a quoted key with a space, split',
@@ -6831,6 +6859,14 @@ CASES += [
      'pwsh -c \'Write-Host "a`" b"; [int] $b[ 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 ]=rm -rf / #"\'', B, ()),
     ('ps script index target: the same, a split index after return',
      'pwsh -c \'Write-Host "a`" b"; return $b[ 0]=git push --force #"\'', B, ()),
+    ('ps script index target: the same over three lines, comment quotes around it',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; [int] $b[ 0]=git push --force; Write-Host "c" #"\nWrite-Host "a`" b" # "\'', B, ()),
+    ('ps script index target: the same over three lines, a nested index after return',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; return $b[$c[0]]=rm -rf / #"\nWrite-Host "a`" b" # "\'', B, ()),
+    ('ps script index target: the same over three lines, a member a variable names',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; [int] $b.$c=git push --force #"\nWrite-Host "a`" b" # "\'', B, ()),
+    ('ps script index target: the same over three lines, no index (blocked before)',
+     'pwsh -c \'Write-Host "a`" b" # "\nWrite-Host "a`" b"; git push --force #"\nWrite-Host "a`" b" # "\'', B, ()),
     ('fp cost ps script index target: a split index assigned a number, a quoted [ in a comment',
      "pwsh -c '[int] $b[ 0]=5 # '\\''['\\'''", B, ()),
     ('fp cost ps script index target: a split index, a quoted [ in a later argument',
@@ -6940,6 +6976,12 @@ def _unread_seg8ai(words):
     return seg
 
 
+def _quoted8ai(seg, indexes):
+    """seg with indexes as its words that open with a quote (ps_quoted)."""
+    seg.ps_quoted = frozenset(indexes)
+    return seg
+
+
 def _index8ai(words, i, qbracket=()):
     """_ps_index_target on words[i], or ("unread", index, word) when it raises."""
     try:
@@ -7031,6 +7073,11 @@ STRUCT_CASES += [
     ("ps statement tail: not past a word an outer shell expanded in a split index",
      lambda: m._ps_statement_tail(_qb8ai(_outer8af(["[int]", "$b[", "$T]=1"], {2})), True),
      ["$b[", "$T]=1"]),
+    # The text a split index is read as is no word of the payload: the last word it
+    # joined opening with a quote makes it no string.
+    ("ps statement tail: a joined target is judged whatever its last word's quoting",
+     lambda: m._ps_statement_tail(_quoted8ai(_seg8ai(["$x", "=", "$b[", "0]", "foo"]), {3})),
+     ["$b", "foo"]),
     ("ps statement tails: a refused tail's segment is marked ps_unread",
      lambda: [s.ps_unread for s in m._ps_statement_tails(
          [_seg8ai(["[int]", "$b[", "0]=git", "push", "["], (4,))])], [True]),

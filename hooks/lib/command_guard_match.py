@@ -3680,8 +3680,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
               piped: bool = False, lenient_on_error: bool = False,
               windows_paths: bool = True, ps_script: bool = False,
               ps_tool: bool = False, outer_expanded: bool = False,
-              heredoc: bool = False, cmd_script: bool = False, scan: bool = True,
-              ps_decoded: bool = False):
+              heredoc: bool = False, cmd_script: bool = False, scan: bool = True):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -3698,17 +3697,14 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     marked so, and also judged with cmd's command prefixes read away (see
     _cmd_prefix_variants). scan: bash text is also read as bash reads its command
     substitutions and comments (see _bash_substitutions); False for a reading that came
-    from one. ps_decoded: raw is a PowerShell payload with its escapes decoded (see
-    _powershell_segments): a line break an escape made is no statement's end, so the
-    quote-blind segments of a line it split are ps_quote_covered when the line
-    tokenized (the raw text's own reading has its own).
+    from one.
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
                   lenient_on_error=lenient_on_error, windows_paths=windows_paths,
                   ps_script=ps_script, ps_tool=ps_tool, outer_expanded=outer_expanded,
-                  heredoc=heredoc, cmd_script=cmd_script, scan=scan, ps_decoded=ps_decoded)
+                  heredoc=heredoc, cmd_script=cmd_script, scan=scan)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
@@ -3741,13 +3737,13 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
         if words is None or len(physical) > 1 or words.subst:
-            # Only where the strict pass read this line whole are these words also in a
-            # segment with a record of quoted brackets (see ps_quote_covered on _Seg): a
-            # substitution on one physical line, or, in a reading with PowerShell's
-            # escapes decoded (ps_decoded), a line an escape's line break split (a break
-            # inside a string, no statement's end; the raw text is read too). A line the
-            # strict pass could not tokenize is read here alone.
-            covered = words is not None and (len(physical) == 1 or ps_decoded)
+            # Only where the strict pass read this line whole, on one physical line (the
+            # piecewise pass is here for a substitution), are these words also in a
+            # segment with a record of quoted brackets (see ps_quote_covered on _Seg). A
+            # line the strict pass could not tokenize, or one over several physical
+            # lines, is read here alone (a quote the strict pass took for a string's may
+            # be a comment's, or an escaped one: `"a`" b"`).
+            covered = words is not None and len(physical) == 1
             # Physical lines, plus every continuation chain regardless of quote
             # state: a desync that leaves the scanner inside a quote also stops it
             # joining `git push \` + newline + `--force`, which bash still joins.
@@ -4440,7 +4436,7 @@ def _powershell_segments(raw: str):
         for reading in dict.fromkeys(readings):
             if reading != text:
                 segments += _segments(reading, shell="powershell", ps_slashes=False,
-                                      lenient_on_error=True, ps_tool=True, ps_decoded=True)
+                                      lenient_on_error=True, ps_tool=True)
     return segments
 
 
