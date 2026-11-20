@@ -37,7 +37,7 @@ FP_FLOOR = 1129
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 3847
+BLOCK_FLOOR = 3855
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -8531,6 +8531,12 @@ _COMPUTED8AT = [
     ("the function: drive by New-Item",
      "New-Item -Path function:f -Value 'Remove-Item -Recurse -Force ~'; f", _CODE8AT),
     ("the function: drive by assignment", "$function:f = 'git push --force'; f", _CODE8AT),
+    # The drive's root with the item named by -Name: a bare `function:` that counts only
+    # beside a cmdlet that writes items (pwsh 7.6 and 5.1 both define and run f).
+    ("the function: drive's root by New-Item",
+     "New-Item -Path function: -Name f -Value 'git push --force'; f", _CODE8AT),
+    ("the function: drive's root by ni",
+     "ni function: -Name f -Value 'Remove-Item -Recurse -Force ~'; f", _CODE8AT),
     ("the ScriptBlock type from a block", "& ({}.GetType()::Create('git push --force'))",
      _CODE8AT),
     ("Create on a stored type", "$t = {}.GetType(); $t::Create('git push --force').Invoke()",
@@ -8612,6 +8618,11 @@ _COMPUTED8AT = [
      "try { pwsh -c '& \"gi`u{74}\" push --force' } catch {}", "forced git push"),
     ("a dot-sourced iex in a try block",
      "try { . iex -- '& \"gi`u{74}\" push --force' } catch {}", _CODE8AT),
+    # A dot-sourced runner: no iex in the text, so only the skip past the dot reads it.
+    ("a dot-sourced runner in a try block, an escaped name in its script",
+     "try { . pwsh -c '& \"gi`u{74}\" push --force' } catch {}", "forced git push"),
+    ("a dot-sourced runner in a typed catch block",
+     "catch [System.Exception] { . pwsh -c '& \"gi`u{74}\" push --force' }", "forced git push"),
     ("a runner in a typed catch block",
      "catch [System.IO.IOException], [System.Exception] { pwsh -c '& \"gi`u{74}\" push "
      "--force' }", "forced git push"),
