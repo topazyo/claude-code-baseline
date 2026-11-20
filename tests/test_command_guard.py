@@ -7201,6 +7201,19 @@ def _piped8ai(words):
     return m._new_seg(words, True)
 
 
+def _flag8ai(words, **attrs):
+    """words as the tool's segment, with attrs set on it."""
+    seg = _seg8ai(words)
+    for k, v in attrs.items():
+        setattr(seg, k, v)
+    return seg
+
+
+def _prefix8ai(strict, toks):
+    """Whether the strict segment covers the tool's quote-blind segment of toks."""
+    return m._ps_strict_prefix(m._ps_strict_prefixes([strict]), _seg8ai(toks, None))
+
+
 def _covered8ai(text, words):
     """ps_quote_covered of the quote-blind segments of text (the tool's reading) that are
     words."""
@@ -7340,13 +7353,16 @@ STRUCT_CASES += [
      lambda: {t.ps_quote_covered for t in m._segments(
          'return $x[0] "', shell="powershell", lenient_on_error=True, ps_tool=True)},
      {False}),
-    ("ps strict prefix: not a strict segment with other walk flags or a recorded word",
-     lambda: (m._ps_strict_prefix(m._ps_strict_prefixes([_piped8ai(["a", "b"])]), ["a", "b"]),
-              m._ps_strict_prefix(m._ps_strict_prefixes([_quoted8ai(_seg8ai(["a", "b"]), {1})]),
-                                  ["a", "b"]),
-              m._ps_strict_prefix(m._ps_strict_prefixes([_quoted8ai(_seg8ai(["a", "b"]), {1})]),
-                                  ["a"])),
-     (False, False, True)),
+    ("ps strict prefix: not a strict segment with other walk flags",
+     lambda: [_prefix8ai(_flag8ai(["a", "b"], **kw), ["a", "b"])
+              for kw in ({"piped": True}, {"ps_call": True}, {"ps_foreach": True}, {})],
+     [False, False, False, True]),
+    ("ps strict prefix: not past a word with a record, the words before it are",
+     lambda: [(_prefix8ai(_flag8ai(["a", "b"], **{k: v}), ["a", "b"]),
+               _prefix8ai(_flag8ai(["a", "b"], **{k: v}), ["a"]))
+              for k, v in (("ps_quoted", frozenset({1})), ("ps_quoted_value", frozenset({1})),
+                           ("ps_qbracket", (1,)), ("empties", (1,)))],
+     [(False, True)] * 4),
     ("ps strict prefix: words that begin a strict segment, compared word for word",
      lambda: [m._ps_strict_prefix(m._ps_strict_prefixes([["a", "b", "c"]]), w)
               for w in (["a", "b"], ["a", "b", "c"], ["a", "c"], ["a", "b", "c", "d"], [])]
