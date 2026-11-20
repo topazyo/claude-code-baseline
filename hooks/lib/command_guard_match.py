@@ -115,7 +115,12 @@ raw, and the raw readings give what the program receives there (for cmd, the tex
 after it is also read as the script cmd gets: _ps_stop_parsing_cmd_scripts); and PowerShell
 cmdlets are matched by the deny-list only, except Remove-Item and its aliases, read as
 PowerShell binds their parameters (see _ps_remove_item; a target it computes, such as
-`(Resolve-Path ~)` or `$x`, and a call through a new alias are not read). The context-free reading
+`(Resolve-Path ~)` or `$x`, and a call through a new alias are not read), and code run
+from a string: Invoke-Expression's (`iex`) Command, bound as PowerShell binds it, and the
+literal of a [scriptblock]::Create / .InvokeScript / .NewScriptBlock / .AddScript call
+are read as a pwsh script; a computed one, an iex fed from the pipe, and any other
+code-from-string route are refused (see _ps_iex_command and _ps_code_strings; a command,
+type or member reached without its name is not read). The context-free reading
 decodes escapes inside '...' too, so a single-quoted commit message holding `n
 followed by a blocked command at the start of the next line is blocked, the cost the
 multi-line pass already accepts for a real newline; a "..." message whose decoded
@@ -239,8 +244,11 @@ _PS_RUNNERS = {"pwsh", "powershell"}
 # data (`git diff | pwsh -c '$input | Out-String'`) is not enough.
 _PS_STDIN_RE = re.compile(r"\$input\b|console\]::(?:in\b|read)|readtoend|readline"
                           r"|read-host|openstandardinput", re.IGNORECASE)
-_PS_EVAL_RE = re.compile(r"\biex\b|invoke-expression|scriptblock\]|newscriptblock"
-                         r"|invokescript|add-type\b[^;|]*-typedefinition", re.IGNORECASE)
+_PS_EVAL_RE = re.compile(r"\biex\b|invoke-expression|(?<!-)scriptblock\b|newscriptblock"
+                         r"|invokescript|addscript|expandstring|getscriptblock|createpipeline"
+                         r"|createnestedpipeline|function:|addcommand"
+                         r"|add-type\b[^;|]*-typedefinition",
+                         re.IGNORECASE)
 # The characters PowerShell reads as `-` wherever its own syntax takes a dash (its
 # tokenizer's IsDash): U+2013 (en dash), U+2014 (em dash) and U+2015 (horizontal bar). Not
 # U+2212, U+2010 to U+2012, U+FE63 or U+FF0D. A native program gets them as they are. See
@@ -1938,6 +1946,7 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
             # `$a = $b = cmd` comes back here for `$b`, one link per worklist item).
             rhs = _new_seg(toks[idx + 2:], getattr(toks, "piped", False))
             rhs.ps_script = True
+            _ps_rhs_records(toks, rhs)
             rest.append(rhs)
         elif toks[idx].endswith(",") and rest is not None:
             # `$a, $b = cmd`: a list target; the command after its `=` (the script's tail
@@ -1946,6 +1955,7 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
             if k is not None and k + 1 < len(toks):
                 rhs = _new_seg(toks[k + 1:], getattr(toks, "piped", False))
                 rhs.ps_script = True
+                _ps_rhs_records(toks, rhs)
                 rest.append(rhs)
             # `$a, $b =cmd`: also the value glued to the first word an assignment operator
             # opens (in addition: the reading above stays).
@@ -1955,6 +1965,7 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
                 rhs = _new_seg([toks[g][_PS_ASSIGN_LEAD_RE.match(toks[g]).end():]]
                                + list(toks[g + 1:]), getattr(toks, "piped", False))
                 rhs.ps_script = True
+                _ps_rhs_records(toks, rhs)
                 rest.append(rhs)
         return out
 
@@ -1972,6 +1983,16 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
         if unknown:
             out.append("recursive delete with targets piped in "
                        "(Remove-Item -Recurse, unknown scope)")
+
+    # Invoke-Expression runs its Command as code: a literal one is read (see _runner_rests);
+    # one fed from the pipe, or computed, cannot be read (the `| sh` and `eval $x` cases).
+    if _ps_is_iex(name) and (getattr(toks, "ps_tool", False)
+                             or getattr(toks, "ps_script", False)):
+        state = _ps_iex_command(toks, idx)[0]
+        if state == "none" and getattr(toks, "piped", False):
+            out.append("shell reading its commands from a pipe (uninspectable)")
+        elif state in ("none", "computed", "blind"):
+            out.append("uninspectable command (PowerShell code from a computed string)")
 
     if cmd == "rm":
         recursive = force = target = False
@@ -2337,15 +2358,29 @@ def _wsl_rests(args):
     return rests
 
 
-def _runner_rests(toks):
+def _runner_rests(toks, ps=None):
     """(kind, words, outer) for each command a Windows runner at the command position would
     run: `cmd /c|/r|/k ...`, `pwsh|powershell -Command ...` (and 5.1's positional command),
     and `wsl ...`. Both readings of wrapper options are tried. Empty commands are dropped.
     outer: a word after the runner holds a `$` the shell expands (see expanding on _Seg),
-    so the words are not the text the runner gets."""
-    out = []
+    so the words are not the text the runner gets. In PowerShell text, also Invoke-Expression
+    (`iex`) with a literal Command, read as a pwsh script (see _ps_iex_command), with its own
+    outer. ps: whether toks are PowerShell text; None reads ps_tool / ps_script (a quote-blind
+    segment of a pwsh script is marked ps_script only after its runners are read, so
+    _segments passes it)."""
+    out, iex = [], []
+    if ps is None:
+        ps = getattr(toks, "ps_tool", False) or getattr(toks, "ps_script", False)
     for consume in _READINGS:
         i = _shell_index(toks, consume)
+        if i is not None and ps:
+            # `try { pwsh -c '...' }`: the block's first statement follows the word in the
+            # readings that keep its words whole; the block reading, which splits it off,
+            # also splits a brace inside a string (`"i`u{65}x"`).
+            k = _ps_skip_block_words(toks, i)
+            if k != i:
+                j = _shell_index(toks[k:], consume)
+                i = None if j is None else k + j
         if i is None:
             continue
         base, args = _cmd_word(toks[i]), list(toks[i + 1:])
@@ -2388,6 +2423,10 @@ def _runner_rests(toks):
             # `powershell git push -f` the -f is git's, not -File.
             if base == "powershell":
                 out += [("ps", _ps_positionals(args, c)) for c in (True, False)]
+        elif ps and _ps_is_iex(base):
+            state, readings, outer_iex = _ps_iex_command(toks, i)
+            if state in ("literal", "blind"):
+                iex += [("ps", words, outer_iex) for words in readings]
         elif base == "wsl":
             out += [("wsl", r) for r in _wsl_rests(args)]
         elif base == "start" and not any(getattr(toks, a, False) for a in
@@ -2400,6 +2439,7 @@ def _runner_rests(toks):
             # start is also read as cmd's: an extra reading, which only adds blocks.)
             out.append(("cmd", ["start"] + args))
         out[found:] = [(kind, words, outer) for kind, words in out[found:]]
+    out += iex
     seen, uniq = set(), []
     for kind, words, outer in out:
         if words and (kind, tuple(words), outer) not in seen:
@@ -2456,8 +2496,12 @@ def _runner_scripts(toks):
     return list(dict.fromkeys(out))
 
 
-def _ps_script_texts(text: str):
-    """The texts a pwsh/powershell script is read as (see _runner_scripts)."""
+@functools.lru_cache(maxsize=4096)
+def _ps_script_texts(text: str, nest: int = 0) -> tuple:
+    """The texts a pwsh/powershell script is read as (see _runner_scripts), and those of
+    the code each canonical literal call in it runs from a string (_ps_code_strings), nest
+    levels deep at most _MAX_INLINE_DEPTH. Memoized (evaluate() clears it): a script's text
+    comes down once per reading of each level above it."""
     texts = _ps_dash_readings(text)
     plain = list(texts)
     texts += [_ps_ungroup(t) for t in plain]
@@ -2471,15 +2515,48 @@ def _ps_script_texts(text: str):
     # A literal list's group read away (see _PS_LIST_GROUP_RE), likewise lenient.
     texts += [_PS_LIST_GROUP_RE.sub(_ps_list_items, t) for t in plain
               if _PS_LIST_GROUP_RE.search(t)]
-    return texts
+    # After the decoders, so a body is not decoded twice: its own readings decode it.
+    for t in plain:
+        for body in _ps_code_strings(t):
+            if nest >= _MAX_INLINE_DEPTH:
+                raise _Uninspectable(f"inline scripts nested too deep to inspect (> "
+                                     f"{_MAX_INLINE_DEPTH} levels)")
+            texts += _ps_script_texts(body, nest + 1)
+    return tuple(texts)
 
 
-def _lenient_runner(toks, outer_expanded=False):
+# PowerShell words that open a block whose first statement follows them in a segment
+# (`try { ... }`, `catch [T] { ... }`, a script block's named blocks), see _runner_rests.
+# Not _PS_BLOCK_WORDS (_ps_argument_group's own set).
+_PS_BLOCK_OPENERS = frozenset({"try", "catch", "finally", "trap", "begin", "process", "end",
+                               "clean", "dynamicparam", "else", "do"})
+
+
+def _ps_skip_block_words(toks, i):
+    """The index after any run of _PS_BLOCK_OPENERS at toks[i] (with a catch or trap's type
+    words: `catch [IOException], [Exception]`), and after a dot-source `.` there (`try { .
+    iex '...' }`: the dot runs the next word, as _effective_cmd_index reads it), keeping at
+    least one word after it."""
+    n = len(toks)
+    while i < n - 1 and toks[i].lower() in _PS_BLOCK_OPENERS:
+        i += 1
+        while i < n - 1 and (toks[i].startswith("[") or toks[i] == ","):
+            i += 1
+        if i < n - 1 and toks[i] == ".":
+            i += 1
+    return i
+
+
+def _lenient_runner(toks, outer_expanded=False, ps=None):
     """In a quote-blind segment, the command words of each Windows runner, one segment
     each (the counterpart of _lenient_inline): `echo "$(wsl rm -rf ~)"` is judged as
-    `rm -rf ~`."""
+    `rm -rf ~`. ps: see _runner_rests. A pwsh script here that names a code-from-string
+    call is refused (_ps_code_strings: its quotes are gone, so no literal is covered),
+    unless the strict pass read the same line (ps_quote_covered on _Seg)."""
     out = []
-    for kind, words, outer in _runner_rests(toks):
+    for kind, words, outer in _runner_rests(toks, ps):
+        if kind == "ps" and not getattr(toks, "ps_quote_covered", False):
+            _ps_code_strings(" ".join(words))
         variants = [words]
         if kind == "cmd":
             variants.append([w.replace("^", "") for w in words])
@@ -4100,7 +4177,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                         for seg in [toks] + extra:
                             lenient.append(seg)
                             lenient.extend(_lenient_inline(seg))
-                            lenient_runs.extend(_lenient_runner(seg, outer_expanded))
+                            lenient_runs.extend(_lenient_runner(seg, outer_expanded,
+                                                                ps_script or ps_tool))
                     orphan = orphan or line_latch.orphan_heredoc
                 # Quote-blind words do not model groups: a heredoc on the line feeds
                 # every command the line's readings found.
@@ -4425,6 +4503,349 @@ _PS_UNICODE_RE = re.compile(r"u\{([0-9A-Fa-f]{1,6})\}")
 _PS_DQ = {'"', chr(0x201C), chr(0x201D), chr(0x201E)}
 _PS_SQ = {"'", chr(0x2018), chr(0x2019), chr(0x201A), chr(0x201B)}
 _PS_TYPOGRAPHIC_QUOTES = (_PS_DQ | _PS_SQ) - {'"', "'"}
+
+# PowerShell code run from a string (follow-up 8at). Invoke-Expression's names (_cmd_word
+# reads its module qualifier away); its common parameters that are switches.
+_PS_IEX = frozenset({"iex", "invoke-expression"})
+_PS_COMMON_SWITCHES = ("verbose", "debug")
+# A parameter's name: the characters after its dash up to the first one no name holds
+# (`-c@p` is -c and the splat @p, `-c:x` is -c and x).
+_PS_PARAM_NAME_RE = re.compile(r"[\w?]*")
+# The members that run a string as code, as words: a gap, comment, quote or type spelling
+# around one cannot hide the word. `create` counts in a text that also holds `::` and
+# `scriptblock` or `gettype` (`{}.GetType()::Create(...)`), and after a computed receiver's
+# `::` (`$t::Create(`, `(...)::Create(`: _ps_computed_receiver), see _ps_code_strings; a
+# named type's Create (`[Security.Cryptography.SHA256]::Create()`) stays unread. The
+# function: drive (`Set-Item function:f '...'`, `${function:f} = '...'`) turns a string into
+# a command, and AddCommand builds one from strings: both refused whenever named.
+_PS_CODE_TRIGGER_RE = re.compile(
+    r"(?<![\w-])(?:(invokescript|newscriptblock|addscript|expandstring|createpipeline"
+    r"|createnestedpipeline|getscriptblock|addcommand|create)(?![\w-])|function:)", re.I)
+
+_PS_SQ_CLASS = "".join(sorted(_PS_SQ))
+_PS_DQ_CLASS = "".join(sorted(_PS_DQ))
+# One string literal: single-quoted (its quotes doubled inside), or double-quoted with no `$`
+# or backtick. Each stops at the next quote, which every call brings, so a run of calls
+# scans linearly. Not a here-string: with no terminator in the text, each call's scan
+# would run to its end (quadratic); a here-string argument is refused (an accepted cost).
+_PS_CODE_LIT = (
+    "(?:[{s}](?:[^{s}]|[{s}][{s}])*[{s}]"
+    "|[{d}](?:[^{d}$`]|[{d}][{d}])*[{d}])"
+).format(s=_PS_SQ_CLASS, d=_PS_DQ_CLASS)
+# A bare argument: no quote, `$`, `@`, bracket, brace, paren, comma or backtick, so nothing
+# PowerShell computes (numbers, operators and words; a word there does not parse at the top
+# level). It is what a reading that lost a literal's quotes leaves (`pwsh -c '...''x''...'`
+# read with bash's quoting): read as the literal it was.
+_PS_CODE_BARE_CHARS = r"$@()\[\]{}`," + _PS_SQ_CLASS + _PS_DQ_CLASS
+_PS_CODE_BARE = r"[^{x}\s](?:[^{x}\s]|[ \t]+(?=[^{x}\s]))*".format(
+    x=_PS_CODE_BARE_CHARS)
+# The canonical calls whose literal is read: [scriptblock]::Create('...') (the type with or
+# without its namespace) and .InvokeScript / .NewScriptBlock / .AddScript('...'[, ...]).
+_PS_CODE_CALL_RE = re.compile(
+    r"(?:\[[ \t]*(?:system\.)?(?:management\.automation\.)?scriptblock[ \t]*\]::[ \t]*create"
+    r"|\.[ \t]*(?:invokescript|newscriptblock|addscript))"
+    r"(?:\([ \t]*(" + _PS_CODE_LIT + "|" + _PS_CODE_BARE + r")[ \t]*[,)]"
+    # The grouping reading (_ps_ungroup) reads a one-word argument's parens away: `Create
+    # 'x' `. Without them the call does not parse at the top level, so this form only ever
+    # stands for a canonical call.
+    r"|[ \t]+(" + _PS_CODE_LIT + r"|[^{x}\s]+))".format(x=_PS_CODE_BARE_CHARS),
+    re.I | re.S)
+_PS_SQ_PAIR_RE = re.compile("[{s}][{s}]".format(s=_PS_SQ_CLASS))
+_PS_DQ_PAIR_RE = re.compile("[{d}][{d}]".format(d=_PS_DQ_CLASS))
+
+
+def _ps_computed_receiver(form: str, start: int) -> bool:
+    """Whether the `create` at form[start] follows `::` on any receiver but a named type
+    literal: `$t::Create(`, `$o.T::Create(`, `$o['T']::Create(`, `({ })::Create(`, `{ }::Create(`,
+    across any whitespace and a quote before the name (a comment between them is gone in the
+    comment-stripped forms _ps_code_strings also counts). A named type is a `[` ... `]` (the
+    `]`'s own `[`, nested brackets of a generic type included: `[Tuple[int, string]]`) holding
+    only name characters, that no word, `$`, closing bracket or quote stands before (that would
+    make it an index: `$o[0]`). Each walk back stops at the name's own gap and reads at most 200
+    characters before it, so a run of them stays linear."""
+    k = start
+    while k > 0 and (form[k - 1].isspace() or form[k - 1] in _PS_SQ or form[k - 1] in _PS_DQ):
+        k -= 1
+    if form[k - 2:k] != "::":
+        return False
+    k -= 2
+    while k > 0 and form[k - 1].isspace():
+        k -= 1
+    if k == 0 or form[k - 1] != "]":
+        return True
+    j, depth, stop = k - 1, 0, max(0, k - 200)
+    while j >= stop:
+        c = form[j]
+        if c == "]":
+            depth += 1
+        elif c == "[":
+            depth -= 1
+            if not depth:
+                break
+        elif not (c.isalnum() or c in "._, `" or c == chr(9)):
+            return True
+        j -= 1
+    if j < stop:
+        return True
+    before = form[j - 1] if j > 0 else " "
+    return before.isalnum() or before in "_$)]}" or before in _PS_SQ or before in _PS_DQ
+
+
+# An Invoke-Expression word in a text (backticks removed): see _ps_iex_operand.
+_PS_IEX_WORD_RE = re.compile(r"(?<![\w$.-])(?:iex|invoke-expression)(?![\w-])", re.I)
+# A quote directly followed by a member, index or static-member operator: a literal used as an
+# expression's operand (`'x'.Replace('a','b')`, `'x'[0]`, `'x'::Join`; pwsh 7's null-conditional
+# `?.` and `?[`), or an opening quote so followed (`'.git'`, a false positive this accepts).
+# After `.` or `::` anything but a space, a tab, a path's `\` or `/` or another `.` counts: a
+# name, a quoted or dynamic name (`.$m(`), a block (`.{Replace}(`), and the line break a
+# continuation or a line comment leaves (`.`LF`Replace(`, `.#c`LF`Replace(`); `'.\x'`,
+# `'./x'` and `'..\x'` (paths) stay out.
+_PS_QUOTE_MEMBER_RE = re.compile(
+    "[" + "".join(sorted(_PS_SQ | _PS_DQ)) + r"]\??(?:(?:\.|::)[^ \t\\/.]|\[)")
+# Cmdlets that write a drive's items: with them, a bare `function:` (the drive's root, its
+# item named by -Name) is a write to the function drive.
+_PS_ITEM_WRITER_RE = re.compile(
+    r"(?<![\w-])(?:new-item|ni|set-item|si|set-content|sc|add-content|ac|copy-item|cpi|copy|cp"
+    r"|move-item|mi|move|mv|rename-item|rni|ren)(?![\w-])", re.I)
+
+
+def _ps_iex_operand(forms) -> bool:
+    """Whether a text (its forms: as written, escape-decoded, comments deleted; backticks
+    removed here) names Invoke-Expression and holds a quote directly followed by `.`, `[` or
+    `::`: iex's Command may be a literal used as an expression's operand (`iex
+    'x'.Replace(...)` runs the method's result, not the literal; a block comment between them
+    changes nothing, so its deleted form is tested too). Any such quote in the text counts,
+    since where a literal ends is not tracked: a false positive this accepts. Also true for
+    any `u{} escape in such a text (see below). forms[0] is the text as written."""
+    raw = forms[0]
+    forms = [f.replace("`", "") for f in forms]
+    if not any(_PS_IEX_WORD_RE.search(f) for f in forms):
+        return False
+    # A `u{...} escape (a name spelled by code point): the brace reading that exposes a
+    # script block argument's statements (`1 | % { iex '& "i`u{65}x" ...' }`) splits its
+    # braces, so where iex is named such a text is refused rather than misread.
+    return "`u{" in raw or any(_PS_QUOTE_MEMBER_RE.search(f) for f in forms)
+
+
+def _ps_strip_block_comments(text: str, repl: str = " ") -> str:
+    """text with each `<#` ... `#>` block comment read as a space (an unclosed one to the end).
+    A linear scan, not a lazy regex (a run of unclosed `<#` would make that quadratic). An
+    added form only: a `<#` inside a string loses text, which only lowers this form's count."""
+    out, i = [], 0
+    while True:
+        a = text.find("<#", i)
+        if a < 0:
+            out.append(text[i:])
+            return "".join(out)
+        out.append(text[i:a])
+        b = text.find("#>", a + 2)
+        if b < 0:
+            return "".join(out)
+        out.append(repl)
+        i = b + 2
+
+
+# A line comment right after a member operator (`{ }::#c` LF `Create(`, `.#c` LF `Run(`): pwsh
+# 7.6 and 5.1 read the name on the next line. _PS_COMMENT_RE takes a `#` only after a space
+# or an operator such as `;`, so this form reads these away too. Linear.
+_PS_MEMBER_COMMENT_RE = re.compile(r"((?:::|\.)[ \t]*)#[^\r\n]*")
+
+
+def _ps_code_body(lit: str) -> str:
+    """The value of a _PS_CODE_LIT literal: the string's text with its doubled quotes read
+    as one; a bare argument as it is."""
+    if lit[0] in _PS_SQ:
+        return _PS_SQ_PAIR_RE.sub("'", lit[1:-1])
+    if lit[0] in _PS_DQ:
+        return _PS_DQ_PAIR_RE.sub('"', lit[1:-1])
+    return lit                                       # a bare argument (_PS_CODE_BARE)
+
+
+@functools.lru_cache(maxsize=4096)
+def _ps_code_strings(text: str) -> tuple:
+    """The code PowerShell text runs from string literals: the value of each canonical call's
+    literal (_PS_CODE_CALL_RE). Raises _Uninspectable when the text names more code-from-string
+    members (_PS_CODE_TRIGGER_RE; in the text with backticks removed, and in its escape-decoded
+    readings, which spell out a quoted member name's escapes, and with its comments read
+    away) than it has canonical calls:
+    a computed argument, a gap, comment or unusual spelling in a call, ExpandString or a
+    pipeline or ParseInput route, the function: drive, or a trigger word in a string or
+    comment (a false positive this accepts). Memoized; evaluate() clears it."""
+    forms = [text]
+    if "`" in text:
+        forms.append(_ps_unescape_everywhere(text))
+        if "`e" in text or "`u" in text:
+            forms.append(_ps_unescape_everywhere(text, legacy=True))
+    # Comments read away, so a computed receiver's Create is seen across one (`{ }::<#c#>Create(`,
+    # `$t::#c` LF `Create(`): counted forms only, never the ones calls are covered in.
+    # Both the block-stripped forms and those with line comments also gone: a `#` inside a
+    # string reads as a comment's start and would hide the rest of its line.
+    if "#" in text:
+        blocks = list(dict.fromkeys(_ps_strip_block_comments(f) for f in forms))
+        forms += blocks + [_PS_COMMENT_RE.sub("", _PS_MEMBER_COMMENT_RE.sub(r"\1", f))
+                           for f in blocks]
+    if _ps_iex_operand(forms + ([_ps_strip_block_comments(f, "") for f in forms]
+                                if "<#" in text else [])):
+        raise _Uninspectable("PowerShell code from a computed string")
+    triggers = 0
+    for form in forms:
+        form = form.replace("`", "")
+        low = form.lower()
+        creates = ("scriptblock" in low or "gettype" in low) and "::" in form
+        writes = bool(_PS_ITEM_WRITER_RE.search(form))
+        n = sum(1 for m in _PS_CODE_TRIGGER_RE.finditer(form)
+                if _ps_trigger_counts(m, form, creates, writes))
+        triggers = max(triggers, n)
+    if not triggers:
+        return ()
+    calls = {m.start(): _ps_code_body(m.group(1) or m.group(2))
+             for m in _PS_CODE_CALL_RE.finditer(text)}
+    if triggers > len(calls):
+        raise _Uninspectable("PowerShell code from a computed string")
+    return tuple(calls.values())
+
+
+def _ps_trigger_counts(m, form: str, creates: bool, writes: bool) -> bool:
+    """Whether a _PS_CODE_TRIGGER_RE match in form counts: a member name always; `create` in a
+    text naming scriptblock or gettype with a `::`, or after a receiver no named type is
+    (_ps_computed_receiver); `function:` naming an item (`function:f`), or the drive's root
+    when the text holds a cmdlet that writes items (`New-Item -Path function: -Name f`), not
+    a bare `function:` in prose (`extract helper function: parse`)."""
+    name = m.group(1)
+    if name is None:
+        nxt = form[m.end():m.end() + 1]
+        return writes or not (nxt == "" or nxt.isspace() or nxt in "|;)")
+    if name.lower() == "create":
+        return creates or _ps_computed_receiver(form, m.start())
+    return True
+
+
+def _ps_rhs_records(src, rhs):
+    """Give rhs, a suffix of src's words that _rules_at builds (an assignment's right-hand
+    side), src's quote records for its words: expanding, ps_qbracket and ps_quote_covered,
+    which the Invoke-Expression rule reads (_ps_iex_command). Without them rhs would read as
+    quote-blind, and an expanded word as a literal."""
+    rhs.expanding = _suffix_expanding(src, rhs)
+    rhs.ps_qbracket = _suffix_qbracket(src, rhs)
+    rhs.ps_quote_covered = getattr(src, "ps_quote_covered", False)
+
+
+def _ps_is_iex(base: str) -> bool:
+    """Whether a command word's basename (_cmd_word) is Invoke-Expression: `iex`, or a name
+    ending in `invoke-expression` (the quote-blind pass resolves the module qualifier's
+    backslash away: `microsoft.powershell.utilityinvoke-expression`)."""
+    base = base.lower()
+    return base in _PS_IEX or base.endswith("invoke-expression")
+
+
+def _ps_is_parameter(word: str) -> bool:
+    """A PowerShell parameter word: a dash (`-` or one of _PS_DASHES) and a name."""
+    return len(word) > 1 and word[0] in "-" + _PS_DASHES
+
+
+def _ps_iex_command(toks, i):
+    """(state, readings, outer) for Invoke-Expression at toks[i]: its Command bound as
+    PowerShell binds it (measured, pwsh 7.6 and 5.1): -Command by any prefix (`-c`), with a
+    glued value (`-c:x`, `-c@p`: a name ends at its first character no name holds) or the next
+    word (`-c x`, `-c: x`); a bare `-Name:` takes the next word for any parameter, switches
+    included (`-Verbose: 1`); a switch common parameter with no colon (-Verbose, -Debug, by
+    prefix) takes none; any other parameter takes the next word; `--` ends the parameters;
+    else the first other word. state: "none" (no Command; a `--%` too), "computed" (the word
+    holds a `$` the shell expands, starts with `@`, a splat or a group, or holds a `,`, an
+    array that $OFS joins), or "literal". readings: the word lists to read as the script
+    ([[the text]] when strict).
+
+    A quote-blind segment (no ps_qbracket record), whose words have lost their quotes so
+    neither the parameters nor the Command can be told apart, nor a group the segment ended
+    at (`iex -ea 0 (Get-Content f)`): "covered" when the strict pass read the same line
+    (ps_quote_covered: that segment decides); "none" when piped; else "blind", refused like
+    a computed one (8ai: quote-blind coverage fails closed), with its readings: each suffix
+    of the words after the head (to a `#` that starts a comment, a glued value split off,
+    typographic quotes trimmed) that starts at a word no dash starts (the _lenient_inline
+    approach), read as scripts so their own reasons are reported too."""
+    words = list(toks[i + 1:])
+    if getattr(toks, "ps_qbracket", None) is None:
+        if getattr(toks, "ps_quote_covered", False):
+            return "covered", [], False
+        if getattr(toks, "piped", False):
+            return "none", [], False
+        cut = next((k for k, w in enumerate(words) if w.startswith("#")), len(words))
+        split = []
+        for w in words[:cut]:
+            name = _PS_PARAM_NAME_RE.match(w, 1).group(0) if _ps_is_parameter(w) else None
+            if name and len(w) > 1 + len(name):
+                split += [w[:1 + len(name)], w[1 + len(name):].lstrip(":")]
+            else:
+                split.append(w)
+        words = [w.strip("".join(_PS_TYPOGRAPHIC_QUOTES)) for w in split]
+        words = [w for w in words if w]
+        readings = [words[k:] for k in range(len(words)) if not _ps_is_parameter(words[k])]
+        return "blind", readings, any("$" in w for w in words)
+    expanding = getattr(toks, "expanding", frozenset())
+    j, n = 0, len(words)
+    while j < n:
+        w = words[j]
+        if w == "--":
+            j += 1
+            break
+        if w == "--%" or not _ps_is_parameter(w):
+            break
+        name = _PS_PARAM_NAME_RE.match(w, 1).group(0)
+        rest = w[1 + len(name):]
+        colon, value = rest.startswith(":"), rest[1:] if rest.startswith(":") else rest
+        name = name.lower()
+        if name and "command".startswith(name):
+            if value:
+                return _ps_iex_word(value, i + 1 + j in expanding, words[j + 1:])
+            j += 1
+            break
+        if colon and not value:
+            j += 2
+        elif value or (name and any(s.startswith(name) for s in _PS_COMMON_SWITCHES)
+                       or name in ("vb", "db")):
+            j += 1
+        else:
+            j += 2
+    if j >= n or words[j] == "--%":
+        return "none", [], False
+    return _ps_iex_word(words[j], i + 1 + j in expanding, words[j + 1:])
+
+
+def _ps_iex_word(word: str, expands: bool, after=()):
+    """_ps_iex_command's state for the Command word. A literal's reading is the word alone
+    when only parameters follow it (up to a comment); with a positional word among them,
+    PowerShell refuses the command (nothing runs), and the words are the literal's own only
+    in a reading whose quotes an outer reading lost (`iex -vb: 0 git push --force`): the
+    word joined with them."""
+    if expands or word.startswith("@") or "," in word:
+        return "computed", [[word]], True
+    after = list(after)
+    after = after[:next((k for k, w in enumerate(after) if w.startswith("#")), len(after))]
+    return "literal", [[word] + after] if _ps_positional_after(after) else [[word]], False
+
+
+def _ps_positional_after(after) -> bool:
+    """Whether Invoke-Expression's words after its Command hold a positional word, walking
+    its parameters as _ps_iex_command does."""
+    j, n = 0, len(after)
+    while j < n:
+        w = after[j]
+        if not _ps_is_parameter(w) or w == "--%":
+            return True
+        if w == "--":
+            return j + 1 < n
+        name = _PS_PARAM_NAME_RE.match(w, 1).group(0)
+        rest = w[1 + len(name):]
+        colon, value = rest.startswith(":"), rest[1:] if rest.startswith(":") else rest
+        name = name.lower()
+        if colon and not value:
+            j += 2
+        elif value or (name and any(s.startswith(name) for s in _PS_COMMON_SWITCHES)
+                       or name in ("vb", "db")):
+            j += 1
+        else:
+            j += 2
+    return False
 _POSIX_BARE_SPECIAL = set(" \t\n\\'\"$`;&|<>()*?[]{}#~=!")
 
 
@@ -4719,6 +5140,13 @@ def _powershell_segments(raw: str):
                 _RunnerBudget.charge(len(body))
                 segments += _powershell_segments(body)
     base = _ps_dash_readings(raw)
+    # The code a canonical literal call runs from a string ([scriptblock]::Create('...'),
+    # .InvokeScript('...'), ...), read as a pwsh script; any other such call is refused
+    # (_ps_code_strings raises).
+    for t in base:
+        for body in _ps_code_strings(t):
+            for s in _ps_script_texts(body, 1):
+                segments += _runner_segments(s, 1, False, True)
     texts = list(base)
     if "(" in raw or "{" in raw:
         texts += [_ps_ungroup(t, keep_variables=True) for t in base]
@@ -4796,6 +5224,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
         return []
 
     _runner_segments.cache_clear()
+    _ps_script_texts.cache_clear()
+    _ps_code_strings.cache_clear()
     _RunnerBudget.used = 0
     _Command.raw = raw
     try:
@@ -4822,7 +5252,12 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
                getattr(toks, "ps_tool", False), getattr(toks, "ps_call", False),
                getattr(toks, "ps_foreach", False), getattr(toks, "xargs_fed", False),
                getattr(toks, "ps_outer", False), getattr(toks, "cmd_script", False),
-               getattr(toks, "ps_unread", False))
+               getattr(toks, "ps_unread", False),
+               # Read by the Invoke-Expression rule (_ps_iex_command): a quote-blind copy
+               # of a strict segment, or one whose word is not expanded, stands for neither.
+               getattr(toks, "ps_qbracket", None) is None,
+               getattr(toks, "ps_quote_covered", False),
+               frozenset(getattr(toks, "expanding", ())))
         if key not in seen:
             seen.add(key)
             unique.append(toks)
