@@ -1473,12 +1473,10 @@ def _ps_index_target(toks, i, word):
     moves the walk past them and a refusal ends it, so each word is scanned once and
     this stays linear.
 
-    Also refused: a word that ends in a member's `.` with a word after it (`$b. c=cmd`,
-    `$b[ 0]. c=cmd`: PowerShell reads the name after the space; at the segment's end, as
-    `return $sb.` before a line `ToString()`, it is not read: the next line is a segment of
-    its own, judged as before), and steps _PS_VAR reads whole that may hold a quoted
-    bracket (`$h["x]" ]=cmd`: toks[i] held one, or there is no record of that outside a
-    covered segment), whose index may go on past the word."""
+    Also refused: a word that ends in a member's `.` (`$b. c=cmd`, `$b[ 0]. c=cmd`:
+    PowerShell reads the name after the space), and steps _PS_VAR reads whole that may
+    hold a quoted bracket (`$h["x]" ]=cmd`: toks[i] held one, or there is no record of
+    that outside a covered segment), whose index may go on past the word."""
     m = _PS_VAR_RE.match(word)
     if not m:
         return None
@@ -1487,9 +1485,7 @@ def _ps_index_target(toks, i, word):
     covered = qb is None and getattr(toks, "ps_quote_covered", False)
     name = _PS_VAR_NAME_RE.match(word).end()
     if word[m.end():] == ".":
-        if i + 1 < len(toks):
-            raise _PsUnreadTarget(i, word)
-        return None
+        raise _PsUnreadTarget(i, word)
     if not (stop in ("[", "]") or stop == "." and _PS_MEMBER_RE.match(word, m.end())):
         if "[" in word[name:m.end()] and not covered and (
                 qb is None or _ps_qbracket_holds(qb, i)):
@@ -1518,8 +1514,6 @@ def _ps_index_target(toks, i, word):
             n += 1
         if not depth:
             rest = joined[n:]
-            if rest == "." and j + 1 >= len(toks):
-                return None                    # `return $b[ 0].` before a line: see above
             if _PS_STEP_JUNK_RE.match(rest) or rest == ".":
                 raise _PsUnreadTarget(i, word)
             return j, word[:name] + rest
