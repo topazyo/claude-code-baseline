@@ -3697,28 +3697,47 @@ def _ps_subexpressions(text: str, reading: str = "strict"):
     return bodies
 
 
+def _ps_walk_flags(seg):
+    """The flags of a segment a statement walk reads that the words do not show (the others,
+    ps_tool, ps_script, ps_outer, are the same for every segment of one _segments call)."""
+    return (getattr(seg, "piped", False), getattr(seg, "ps_call", False),
+            getattr(seg, "ps_foreach", False))
+
+
 def _ps_strict_prefixes(strict):
-    """Every prefix of the strict segments of a logical line, keyed by (its length, a hash
-    of its words, built word by word), each with a segment and the length it is a prefix
-    of: built in one pass over the words, so linear (see _ps_strict_prefix)."""
+    """Every prefix of the strict segments of a logical line that holds no word with a
+    record (one that opens with a quote, whose value does, that held a bracket inside
+    quotes, or before which an empty word was dropped: the quote-blind words have none of
+    that), keyed by (its length, a hash of its words built word by word, the segment's walk
+    flags), each with a segment and the length it is a prefix of. Built in one pass over
+    the words, so linear (see _ps_strict_prefix)."""
     out = {}
     for seg in strict:
-        h = 0
+        recorded = (set(getattr(seg, "ps_quoted", ()))
+                    | set(getattr(seg, "ps_quoted_value", ()))
+                    | set(getattr(seg, "ps_qbracket", None) or ())
+                    | set(getattr(seg, "empties", ())))
+        flags, h = _ps_walk_flags(seg), 0
         for n, word in enumerate(seg, 1):
+            if n - 1 in recorded:
+                break
             h = hash((h, word))
-            out.setdefault((n, h), (seg, n))
+            out.setdefault((n, h, flags), (seg, n))
     return out
 
 
 def _ps_strict_prefix(prefixes, toks):
-    """Whether the words of toks begin a strict segment (see _ps_strict_prefixes): looked up
-    by length and hash, then compared word for word (one comparison per segment)."""
+    """Whether the words of toks begin a strict segment with the same walk flags, read with
+    no record (see _ps_strict_prefixes): that segment's walk reads those words as toks's
+    would, with their quote record, and is judged; words after them only lengthen what it
+    judges. Looked up by length, hash and flags, then compared word for word (one
+    comparison per segment)."""
     if not prefixes or not toks:
         return False
     h = 0
     for word in toks:
         h = hash((h, word))
-    found = prefixes.get((len(toks), h))
+    found = prefixes.get((len(toks), h, _ps_walk_flags(toks)))
     return found is not None and list(found[0][:found[1]]) == list(toks)
 
 

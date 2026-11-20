@@ -37,7 +37,7 @@ FP_FLOOR = 932
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 2574
+BLOCK_FLOOR = 2580
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -6647,6 +6647,14 @@ PS_CASES += [
      '$x = "$b"[ 0]=git push --force', B, ()),
     ('ps index target: a split index of a string holding a variable (pwsh script)',
      'pwsh -c \'$x = "$b"[ 0]=git push --force\'', B, ()),
+    ('ps index target: a split index, a piped decoy of it in a string over two lines',
+     'Write-Host \u2018a"\u2019; [int] $b[ 0]=git push --force\nWrite-Host \u2018" | [int] $b[ 0]=git push --force; #\u2019', B, ()),
+    ('ps index target: a split index, a piped decoy of it in a string over two lines (pwsh script)',
+     'pwsh -c \'Write-Host \u2018a"\u2019; [int] $b[ 0]=git push --force\nWrite-Host \u2018" | [int] $b[ 0]=git push --force; #\u2019\'', B, ()),
+    ('ps index target: a split index, a decoy of it with a quoted value in a string over two lines',
+     'Write-Host \u2018a"\u2019; [int] $b[ 0]=git push --force\nWrite-Host \u2018"; [int] $b[ 0]="git" push --force; #\u2019', B, ()),
+    ('ps index target: a split index, a decoy of it with a quoted value in a string over two lines (pwsh script)',
+     'pwsh -c \'Write-Host \u2018a"\u2019; [int] $b[ 0]=git push --force\nWrite-Host \u2018"; [int] $b[ 0]="git" push --force; #\u2019\'', B, ()),
     ('fp cost ps index target: a split index assigned a number, a quoted [ in a comment',
      "[int] $b[ 0]=5 # '['", B, ()),
     ('fp cost ps index target: a split index assigned a number, a quoted [ in a comment (pwsh script)',
@@ -7039,6 +7047,10 @@ CASES += [
      'pwsh -c \'# say "hi\n[int] $h["x]" ]=git push --force\n# "\'', B, ()),
     ('ps script index target: a split index of a string holding a variable',
      'pwsh -c \'$x = "$b"[ 0]=git push --force\'', B, ()),
+    ('ps script index target: a split index, a piped decoy of it in a string over two lines',
+     'pwsh -c \'Write-Host \u2018a"\u2019; [int] $b[ 0]=git push --force\nWrite-Host \u2018" | [int] $b[ 0]=git push --force; #\u2019\'', B, ()),
+    ('ps script index target: a split index, a decoy of it with a quoted value in a string over two lines',
+     'pwsh -c \'Write-Host \u2018a"\u2019; [int] $b[ 0]=git push --force\nWrite-Host \u2018"; [int] $b[ 0]="git" push --force; #\u2019\'', B, ()),
     ('fp cost ps script index target: a split index assigned a number, a quoted [ in a comment',
      "pwsh -c '[int] $b[ 0]=5 # '\\''['\\'''", B, ()),
     ('fp cost ps script index target: a split index, a quoted [ in a later argument',
@@ -7184,6 +7196,11 @@ def _quoted8ai(seg, indexes):
     return seg
 
 
+def _piped8ai(words):
+    """words as a piped segment."""
+    return m._new_seg(words, True)
+
+
 def _covered8ai(text, words):
     """ps_quote_covered of the quote-blind segments of text (the tool's reading) that are
     words."""
@@ -7323,6 +7340,13 @@ STRUCT_CASES += [
      lambda: {t.ps_quote_covered for t in m._segments(
          'return $x[0] "', shell="powershell", lenient_on_error=True, ps_tool=True)},
      {False}),
+    ("ps strict prefix: not a strict segment with other walk flags or a recorded word",
+     lambda: (m._ps_strict_prefix(m._ps_strict_prefixes([_piped8ai(["a", "b"])]), ["a", "b"]),
+              m._ps_strict_prefix(m._ps_strict_prefixes([_quoted8ai(_seg8ai(["a", "b"]), {1})]),
+                                  ["a", "b"]),
+              m._ps_strict_prefix(m._ps_strict_prefixes([_quoted8ai(_seg8ai(["a", "b"]), {1})]),
+                                  ["a"])),
+     (False, False, True)),
     ("ps strict prefix: words that begin a strict segment, compared word for word",
      lambda: [m._ps_strict_prefix(m._ps_strict_prefixes([["a", "b", "c"]]), w)
               for w in (["a", "b"], ["a", "b", "c"], ["a", "c"], ["a", "b", "c", "d"], [])]
