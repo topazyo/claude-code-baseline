@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 932
+FP_FLOOR = 945
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 2580
+BLOCK_FLOOR = 2589
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -6631,6 +6631,18 @@ PS_CASES += [
      'return $b.c. d=rm -rf /', B, ()),
     ('ps index target: a second member split after its dot (pwsh script)',
      "pwsh -c 'return $b.c. d=rm -rf /'", B, ()),
+    ("ps index target: a member split after its dot at a line's end",
+     '[int] $b.\nc=git push --force', B, ()),
+    ("ps index target: a member split after its dot at a line's end (pwsh script)",
+     "pwsh -c '[int] $b.\nc=git push --force'", B, ()),
+    ("ps index target: a split index's member split at a line's end",
+     'return $b[ 0].\nc=git push --force', B, ()),
+    ("ps index target: a split index's member split at a line's end (pwsh script)",
+     "pwsh -c 'return $b[ 0].\nc=git push --force'", B, ()),
+    ("ps index target: a member split at a line's end after return",
+     'return $b.\nc=rm -rf /', B, ()),
+    ("ps index target: a member split at a line's end after return (pwsh script)",
+     "pwsh -c 'return $b.\nc=rm -rf /'", B, ()),
     ('ps index target: a member split after its dot by a tab',
      '[int] $b.\tc=git push --force', B, ()),
     ('ps index target: a member split after its dot by a tab (pwsh script)',
@@ -6775,6 +6787,18 @@ PS_CASES += [
      'return $data[$row][$col + 1] + "`t"', A, ()),
     ('fp ps index target: two indexes, a tab escape after (pwsh script)',
      'pwsh -c \'return $data[$row][$col + 1] + "`t"\'', A, ()),
+    ('fp ps index target: a method chain broken after its dot',
+     'return $sb.\nToString()', A, ()),
+    ('fp ps index target: a method chain broken after its dot (pwsh script)',
+     "pwsh -c 'return $sb.\nToString()'", A, ()),
+    ('fp ps index target: a member broken after its dot',
+     'return $items.\n  Count', A, ()),
+    ('fp ps index target: a member broken after its dot (pwsh script)',
+     "pwsh -c 'return $items.\n  Count'", A, ()),
+    ("fp ps index target: a split index's member broken after its dot",
+     'return $b[ 0].\nName', A, ()),
+    ("fp ps index target: a split index's member broken after its dot (pwsh script)",
+     "pwsh -c 'return $b[ 0].\nName'", A, ()),
     ('fp ps index target: a split index returned with a line-break escape',
      'return $lines[$i + 1] + "`n"', A, ()),
     ('fp ps index target: a split index returned with a line-break escape (pwsh script)',
@@ -6809,6 +6833,10 @@ PS_CASES += [
      '$x = $b[ $i] + 1', A, ()),
     ('fp ps index target: a member a variable names, read into a variable',
      '$x = $b.$c', A, ()),
+    ("fp ps index target: a typed value's method chain broken after its dot (pwsh script)",
+     "pwsh -c '[string] $x = $sb.\nToString()'", A, ()),
+    ("fp ps index target: a typed value's member broken after its dot (pwsh script)",
+     "pwsh -c '[int] $n = $list.\nCount'", A, ()),
     ("fp ps index target: a script's first word, an index split after a comma, a number (pwsh script)",
      "pwsh -c '$b[$i, 0]=5'", A, ()),
     ('fp ps index target: an index after a string over two lines',
@@ -7039,6 +7067,12 @@ CASES += [
      "pwsh -c '[int] $a, $b. c=git push --force'", B, ()),
     ('ps script index target: a second member split after its dot',
      "pwsh -c 'return $b.c. d=rm -rf /'", B, ()),
+    ("ps script index target: a member split after its dot at a line's end",
+     "pwsh -c '[int] $b.\nc=git push --force'", B, ()),
+    ("ps script index target: a split index's member split at a line's end",
+     "pwsh -c 'return $b[ 0].\nc=git push --force'", B, ()),
+    ("ps script index target: a member split at a line's end after return",
+     "pwsh -c 'return $b.\nc=rm -rf /'", B, ()),
     ('ps script index target: a member split after its dot by a tab',
      "pwsh -c '[int] $b.\tc=git push --force'", B, ()),
     ('ps script index target: a split index after a string over two lines',
@@ -7111,6 +7145,12 @@ CASES += [
      "pwsh -c '[string] $p='\\''[x]'\\'''", A, ()),
     ('fp ps script index target: two indexes, a tab escape after',
      'pwsh -c \'return $data[$row][$col + 1] + "`t"\'', A, ()),
+    ('fp ps script index target: a method chain broken after its dot',
+     "pwsh -c 'return $sb.\nToString()'", A, ()),
+    ('fp ps script index target: a member broken after its dot',
+     "pwsh -c 'return $items.\n  Count'", A, ()),
+    ("fp ps script index target: a split index's member broken after its dot",
+     "pwsh -c 'return $b[ 0].\nName'", A, ()),
     ('fp ps script index target: a split index returned with a line-break escape',
      'pwsh -c \'return $lines[$i + 1] + "`n"\'', A, ()),
     ('fp ps script index target: a member a variable names, a line-break escape after',
@@ -7125,6 +7165,10 @@ CASES += [
      'pwsh -c \'$items | ForEach-Object { return $_.$prop + "`t" }\'', A, ()),
     ('fp ps script index target: two indexes, an escape after',
      'pwsh -c \'return $data[$row][$col + 1] + "`t"\'', A, ()),
+    ("fp ps script index target: a typed value's method chain broken after its dot",
+     "pwsh -c '[string] $x = $sb.\nToString()'", A, ()),
+    ("fp ps script index target: a typed value's member broken after its dot",
+     "pwsh -c '[int] $n = $list.\nCount'", A, ()),
     ("fp ps script index target: a script's first word, an index split after a comma, a number",
      "pwsh -c '$b[$i, 0]=5'", A, ()),
     ('fp cost ps script index target: an index after a string over two lines',
@@ -7328,6 +7372,9 @@ STRUCT_CASES += [
     ("ps index target: a word that ends in a member's dot",
      lambda: (_index8ai(["[int]", "$b.", "c=cmd"], 1), _index8ai(["[int]", "$b[", "0].", "c=cmd"], 1)),
      (("unread", 1, "$b."), ("unread", 1, "$b["))),
+    ("ps index target: a member's dot at the segment's end is not read",
+     lambda: (_index8ai(["return", "$sb."], 1), _index8ai(["return", "$b[", "0]."], 1)),
+     (None, None)),
     ("ps index target: steps read whole in a word that held a quoted bracket",
      lambda: (_index8ai(["[int]", "$h[x]", "]=cmd"], 1, (1,)),
               _index8ai(["[int]", "$h[x]", "]=cmd"], 1, None),
