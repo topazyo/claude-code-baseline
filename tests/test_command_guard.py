@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 971
+FP_FLOOR = 1047
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 2994
+BLOCK_FLOOR = 3293
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 36
+REASON_FLOOR = 38
 
 
 def _str_value(node):
@@ -7987,6 +7987,393 @@ try:
     import pytest
 except ImportError:  # pytest is not a dependency of this suite
     pytest = None
+
+# Follow-up 8as: PowerShell's Remove-Item and its aliases (ri, rm, del, erase, rd, rmdir), read
+# as PowerShell binds their parameters: recursion (a parameter binding Recurse, whatever its
+# value; a splat; or any call when the payload names $PSDefaultParameterValues) into a root,
+# home or current-location target, with or without -Force; or recursion into what a pipe
+# feeds it with no path of its own. `<BS>` is a backslash, `<EN>` U+2013, `<NL>` a newline,
+# `<CR>` a carriage return.
+# Each block row is pinned to its reason (MUST_BLOCK), in the tool's own payload and in a
+# pwsh script from Bash, since the POSIX rm rule or an unrelated refusal could block it too.
+_ROOT8AS = "(Remove-Item -Recurse)"
+_PIPED8AS = "(Remove-Item -Recurse, unknown scope)"
+
+
+def _t8as(text):
+    return (text.replace("<BS>", chr(92)).replace("<EN>", _EN8AO).replace("<NL>", chr(10))
+            .replace("<CR>", chr(13)))
+
+
+def _pwsh8as(text):
+    """text as a pwsh script in a Bash single-quoted word."""
+    return "pwsh -c '" + text.replace("'", "'" + '"' + "'" + '"' + "'") + "'"
+
+
+_BLOCK8AS = [
+    # Names and parameter spellings (the POSIX rm rule reads none of these).
+    ("Remove-Item, -Recurse -Force", "Remove-Item -Recurse -Force ~"),
+    ("Remove-Item, -Recurse:$true", "Remove-Item ~ -Recurse:$true -Force"),
+    ("ri, -r -fo", "ri ~ -r -fo"),
+    ("del", "del -Recurse -Force ~/"),
+    ("erase", "erase -Recurse -Force ~"),
+    ("rd", "rd -Recurse -Force ~"),
+    ("rmdir", "rmdir -Recurse ~"),
+    ("rm, -Recurse alone", "rm -Recurse ~"),
+    ("rm, -r alone", "rm -r ~"),
+    ("Remove-Item without -Force", "Remove-Item -Recurse ~"),
+    ("upper case", "REMOVE-ITEM -RECURSE ~"),
+    ("module-qualified", "Microsoft.PowerShell.Management<BS>Remove-Item -Recurse -Force C:<BS>"),
+    ("cased parameters", "Remove-Item -R -LiteralPath ~"),
+    ("-rec", "Remove-Item -rec ~"),
+    ("-Recurse:1", "Remove-Item ~ -Recurse:1"),
+    ("a dash-spelled -Recurse", "Remove-Item ~ <EN>Recurse"),
+    ("& ri", "& ri -r ~"),
+    ("& 'Remove-Item'", "& 'Remove-Item' -r ~"),
+    (". ri", ". ri -r ~"),
+    # Targets.
+    ("~<BS>", "ri -r ~<BS>"),
+    ("~<BS>*", "ri -r ~<BS>*"),
+    ("$HOME", "ri -r $HOME"),
+    ("${HOME}", "ri -r ${HOME}"),
+    ('"$HOME<BS>"', 'ri -r "$HOME<BS>"'),
+    ("$HOME<BS>*", "ri -r $HOME<BS>*"),
+    ("$env:USERPROFILE", "ri -r $env:USERPROFILE"),
+    ("${env:USERPROFILE}", "ri -r ${env:USERPROFILE}"),
+    ("$env:USERPROFILE<BS>", "ri -r $env:USERPROFILE<BS>"),
+    ("$env:HOMEDRIVE$env:HOMEPATH", "ri -r $env:HOMEDRIVE$env:HOMEPATH"),
+    ("$env:HOMEPATH", "ri -r $env:HOMEPATH"),
+    ("$env:HOMEDRIVE${env:HOMEPATH}", "ri -r $env:HOMEDRIVE${env:HOMEPATH}"),
+    ("a long-path prefix", "ri -r <BS><BS>?<BS>C:<BS>"),
+    ("a device prefix", "ri -r <BS><BS>.<BS>C:<BS>"),
+    ("an admin share", "ri -r <BS><BS>localhost<BS>c$"),
+    ("an admin share's contents", "ri -r <BS><BS>srv<BS>c$<BS>*"),
+    ("a long-path UNC admin share", "ri -r <BS><BS>?<BS>UNC<BS>localhost<BS>c$<BS>"),
+    ("$env:SystemDrive<BS>", "ri -r $env:SystemDrive<BS>"),
+    ("C:<BS>", "ri -r C:<BS>"),
+    ("C:/", "ri -r C:/"),
+    ("C:", "ri -r C:"),
+    ("c:<BS>*", "ri -r c:<BS>*"),
+    ("<BS>", "ri -r <BS>"),
+    ("/", "ri -r /"),
+    (".", "ri -r ."),
+    (".<BS>", "ri -r .<BS>"),
+    ("..", "ri -r .."),
+    ("..<BS>..", "ri -r ..<BS>.."),
+    ("*", "ri -r *"),
+    (".<BS>*", "ri -r .<BS>*"),
+    ("$PWD", "ri -r $PWD"),
+    ("$PWD.Path", "ri -r $PWD.Path"),
+    ('"$(Get-Location)"', 'ri -r "$(Get-Location)"'),
+    ("(Get-Location)", "ri -r (Get-Location)"),
+    ("FileSystem::C:<BS>", "ri -r FileSystem::C:<BS>"),
+    ("the provider's full name", "ri -r Microsoft.PowerShell.Core<BS>FileSystem::C:<BS>"),
+    ("a registry drive's root", "ri -r HKCU:<BS>"),
+    ("Env:", "ri -r Env:"),
+    ("a registry drive's contents", "ri -r HKCU:<BS>*"),
+    ("Env:*", "ri -r Env:*"),
+    ("a drive's every item", "ri -r cert:<BS>**"),
+    ("a registry drive, dot", "ri -r hkcu:<BS>."),
+    ("~foo<BS>.. (a name, then its parent)", "ri -r ~foo<BS>.."),
+    ("-Path ~", "ri -r -Path ~"),
+    ("-Path:~", "ri -r -Path:~"),
+    ("-LiteralPath $HOME", "ri -r -LiteralPath $HOME"),
+    ("-lp ~", "ri -r -lp ~"),
+    ("a comma list in one word", "ri -r ./build,~"),
+    ("a comma list", "ri -r ./build, ~"),
+    ("'~'", "ri -r '~'"),
+    ("$global:HOME", "ri -r $global:HOME"),
+    ("${global:HOME}", "ri -r ${global:HOME}"),
+    ("$local:HOME", "ri -r $local:HOME"),
+    ("$variable:HOME", "ri -r $variable:HOME"),
+    ("${variable:HOME}", "ri -r ${variable:HOME}"),
+    ("$global:HOME<BS>*", "ri -r $global:HOME<BS>*"),
+    ("$global:PWD", "ri -r $global:PWD"),
+    ("$script:PWD", "ri -r $script:PWD"),
+    ("$variable:PWD", "ri -r $variable:PWD"),
+    ("a list in parentheses", 'ri -r ("./build", "~")'),
+    ("a single-quoted list in parentheses", "ri -r ('./build','~')"),
+    ("an array subexpression", 'ri -r @("./build", "~")'),
+    ("a list in parentheses, the root first", "ri -r ('~','x')"),
+    ("-Path, a list in parentheses", "ri -r -Path ('./a','~')"),
+    ("a list in parentheses over two lines", "ri -r ('a',<NL>'~')"),
+    ('"~"', 'ri -r "~"'),
+    # Statement positions.
+    ("after ;", "Get-Date; ri -r ~"),
+    ("after &&", "Get-Date && ri -r ~"),
+    ("in an if block", "if ($true) { ri -r ~ }"),
+    ("in a script block", "& { ri -r ~ }"),
+    ("an assignment's value", "$r = ri -r ~"),
+    ("$null = ", "$null = Remove-Item -Recurse ~"),
+    ("piped on", "ri -r ~ | Out-Null"),
+    ("in a foreach block", "foreach ($i in 1) { ri -r ~ }"),
+    ("in a try block", "try { ri -r ~ } catch { }"),
+    ("on a second line", "Write-Output 1<NL>ri -r ~"),
+    ("in a subexpression in a string", 'Write-Output "$(Remove-Item -Recurse ~)"'),
+    # Recursion without the word.
+    ("a splat", "$p = @{Recurse = $true}; Remove-Item ~ @p"),
+    ("$PSDefaultParameterValues", "$PSDefaultParameterValues['Remove-Item:Recurse'] = $true; "
+     "Remove-Item ~ -Force"),
+    ("$PSDefaultParameterValues for every command",
+     "$PSDefaultParameterValues = @{'*:Recurse' = $true}; ri ~"),
+    ("$PSDefaultParameterValues with a backtick", "${PSDefault`ParameterValues}.Add("
+     "'Remove-Item:Recurse', 1); ri ~"),
+    # Backticks before letters that are no escape, in both halves of the braced name
+    # (PowerShell 7.6 and 5.1 resolve it to $PSDefaultParameterValues).
+    ("$PSDefaultParameterValues with a backtick in each half", "${PS`DefaultPara`meterValues}"
+     ".Add('Remove-Item:Recurse', 1); ri ~"),
+    ("$PSDefaultParameterValues through the variable drive by a computed name",
+     "Set-Location ('Var'+'iable:'); (dir *ParameterValues).Value['*:Recurse']=1; ri ~"),
+    ("$PSDefaultParameterValues by a wildcard",
+     "(Get-Variable PSDefault*).Value['Remove-Item:Recurse'] = $true; ri ~"),
+    ("$PSDefaultParameterValues by a leading wildcard",
+     "(Get-Variable *ParameterValues).Value['Remove-Item:Recurse'] = $true; ri ~"),
+    ("$PSDefaultParameterValues by an inner wildcard",
+     "(Get-Variable PS*Values).Value['Remove-Item:Recurse'] = $true; ri ~"),
+    ("$PSDefaultParameterValues by gv", "(gv *faultPar*).Value['*:Recurse'] = 1; ri ~"),
+    ("$PSDefaultParameterValues by gv right after =",
+     "$v=gv PS*Values; $v.Value['*:Recurse']=1; ri ~"),
+    ("$PSDefaultParameterValues by a computed name",
+     "(Get-Variable ('PSDe'+'faultParam'+'eterValues')).Value['*:Recurse']=1; ri ~"),
+]
+# Recursion into what a pipe feeds it, with no path of its own (the xargs case).
+_PIPED_BLOCK8AS = [
+    ("Get-Item ~ piped", "Get-Item ~ | Remove-Item -Recurse"),
+    ("ls ~ piped to ri", "ls ~ | ri -r -fo"),
+    ("gci piped to rm", "gci | rm -r"),
+    ("a | that ends a line", "Get-Item ~ |<NL>Remove-Item -Recurse"),
+    ("a | that ends a line, ri", "Get-Item ~ |<NL>ri -r -fo"),
+    ("a | that ends a line, rm", "Get-Item ~ |<NL>rm -r -fo"),
+    ("a | that ends a CRLF line", "Get-Item ~ |  <CR><NL>Remove-Item -Recurse"),
+    ("a | then a blank line", "Get-Item ~ |<NL><NL>ri -r"),
+    ("a | then a comment", "Get-Item ~ | # c<NL>ri -r"),
+    ("a | then a comment line", "Get-Item ~ |<NL># c<NL>ri -r"),
+    ("a # in a quoted item before the |", "Get-Item ~,'#' |<NL>ri -r"),
+    ("a # inside a word before the |", "gci ~ -Filter *#* |<NL>ri -r"),
+    ("a # in an earlier string on the line", "Write-Output '#' | Out-Null; Get-Item ~ |<NL>ri -r"),
+    ("a space and # in a quoted item before the |", "Get-Item ~,' #' |<NL>ri -r"),
+    ("a # in a quoted item, then a comment after the |", "Get-Item ~,'#' | # c<NL>ri -r"),
+    ("a parameter value is not a path", "Get-Item ~ | Remove-Item -Recurse -ErrorAction "
+     "SilentlyContinue"),
+    ("a delay-bind -LiteralPath", "Get-Item ~ | Remove-Item -Recurse -LiteralPath { $_.PSPath }"),
+    ("a delay-bind positional", "Get-Item ~ | Remove-Item { $_.FullName } -Recurse"),
+    ("a delay-bind $PSItem", "Get-Item ~ | Remove-Item -Path { $PSItem.FullName } -Recurse"),
+    ("-lp with no value", "Get-Item ~ | Remove-Item -Recurse -lp"),
+    ("a switch's value after its colon and a space", "Get-Item ~ | Remove-Item -Recurse: $true"),
+    ("-Force's value after its colon and a space",
+     "Get-Item ~ | Remove-Item -Recurse -Force: $true"),
+    ("a delay-bind ${_}", "Get-Item ~ | Remove-Item -Recurse -LiteralPath { ${_}.FullName }"),
+    ("a delay-bind ${PSItem}", "Get-Item ~ | Remove-Item -Recurse -LiteralPath { ${PSItem} }"),
+    ("a delay-bind $input", "Get-Item ~ | Remove-Item -Recurse -LiteralPath { $input }"),
+    ("a delay-bind block with no item variable",
+     "Get-Item ~ | Remove-Item -Recurse -LiteralPath { $x }"),
+    ("a positional delay-bind, recursion after it",
+     "Get-Item ~ | Remove-Item { 'x' -replace 'x', $_.PSPath } -Recurse"),
+    ("an ambiguous -p", "Get-Item ~ | Remove-Item -Recurse -p x"),
+    ("a splat", "Get-Item ~ | Remove-Item @p"),
+]
+# Other readings: a Windows runner's command, cmd running pwsh, a $( ) body.
+_RUNNER_BLOCK8AS = [
+    ("powershell.exe -Command", "powershell", 'powershell.exe -NoProfile -Command '
+     '"Remove-Item -Recurse ~"'),
+    ("powershell, a positional script", "powershell", "powershell Remove-Item -Recurse ~"),
+    ("cmd /c pwsh -c", "powershell", 'cmd /c pwsh -c "Remove-Item -Recurse ~"'),
+    ("powershell.exe -Command, bash", "bash", "powershell.exe -Command 'Remove-Item -Recurse ~'"),
+    ("cmd //c pwsh, bash", "bash", 'cmd //c "pwsh -c Remove-Item -Recurse ~"'),
+    ("a pwsh script in a substitution, bash", "bash", 'echo "$(pwsh -c ' + "'ri -r ~')" + '"'),
+    ("remove-item read in bash too", "bash", "remove-item -r ~"),
+    ("erase read in bash too", "bash", "erase -Recurse ~"),
+    ("rm with -Recurse, bash", "bash", "rm -Recurse ~"),
+    ("rm with -rec:$true, bash", "bash", "rm -rec:$true ~"),
+]
+_ALLOW8AS = [
+    ("a build directory", "Remove-Item -Recurse -Force ./build"),
+    ("ri .<BS>dist", "ri .<BS>dist -r"),
+    ("a file", "Remove-Item foo.txt"),
+    ("the home without recursion (it prompts)", "Remove-Item ~"),
+    ("the home with -Force alone", "Remove-Item ~ -Force"),
+    ("under the home", "Remove-Item ~/foo -Recurse"),
+    ("under the home, backslashes", "Remove-Item ~<BS>foo<BS>bar -Recurse"),
+    ("a name starting with ~", "Remove-Item ~foo -Recurse"),
+    ("a temp directory", "Remove-Item $env:TEMP<BS>x -r"),
+    ("a worktree", 'Remove-Item -Recurse -Force -LiteralPath ".claude/worktrees/feat"'),
+    ("a drive path", "Remove-Item C:<BS>tmp<BS>x -Recurse"),
+    ("under $HOME", "Remove-Item $HOME<BS>proj<BS>bin -Recurse"),
+    ("two paths", "Remove-Item -Recurse -Path ./a, ./b"),
+    ("piped, with its own path", "gci ./build | Remove-Item -Recurse -Path ./build"),
+    ("piped, a positional path", "gci ./build | Remove-Item ./build -Recurse"),
+    ("piped, a glued -Path", "gci ./build | Remove-Item -Recurse -Path:./build"),
+    ("piped, no recursion", "Get-ChildItem ./build | Remove-Item"),
+    ("listing the home", "Get-ChildItem -Recurse ~"),
+    ("a registry key", "Remove-Item HKCU:<BS>Software<BS>MyApp -Recurse"),
+    ("a share's folder", "Remove-Item <BS><BS>srv<BS>share<BS>x -Recurse"),
+    ("a folder on an admin share", "Remove-Item <BS><BS>srv<BS>c$<BS>tmp -Recurse"),
+    ("a literal list of ordinary paths", "ri -r ('./a','./b')"),
+    ("a | that ends a line, its own path",
+     "Get-ChildItem ./build |<NL>Remove-Item -Recurse ./build"),
+    ("a .gv file, then a piped delete with no recursion",
+     "dot -Tpng graph.gv -o g.png; Get-ChildItem -Filter *.tmp | Remove-Item"),
+    ("a folder named sv", "Get-ChildItem ./sv | Remove-Item"),
+    ("a multi-line pipeline ending in a delete with no recursion",
+     "Get-ChildItem ./build |<NL>Where-Object Name -like '*.tmp' |<NL>Remove-Item"),
+    ("a path holding gv", "Get-ChildItem ./gv/out | Remove-Item -Force"),
+    ("a here-string line that ends in |", "git commit -m @'<NL>a |<NL>b<NL>'@"),
+]
+# A pipe into the pwsh script marks it piped; a path of its own still lets it through.
+_BASH_ALLOW8AS = [
+    ("piped pwsh, switches first", "echo y | pwsh -c 'Remove-Item -Recurse -Force ./x'"),
+    ("piped pwsh, -Path", "echo y | pwsh -c 'Remove-Item -Recurse -Force -Path ./x'"),
+    ("piped pwsh, path first", "echo y | pwsh -c 'Remove-Item ./x -Recurse'"),
+    ("ri is Ruby's viewer in bash", "ri -r ~"),
+    ("echo of the words", "echo Remove-Item -Recurse ~"),
+]
+# Accepted costs: blocked, though PowerShell would not delete a root here.
+_FP_COST8AS = [
+    ("-Recurse:$false still counts", "Remove-Item ~ -Recurse:$false"),
+    ("piped with no path of its own", "Get-ChildItem ./build | Remove-Item -Recurse -Force"),
+    ("the node_modules idiom",
+     "gci -Recurse -Directory -Filter node_modules | Remove-Item -Recurse -Force"),
+    ("a filter value is judged as a target", "Remove-Item . -Recurse -Include *.pyc"),
+    ("-Include *", "Remove-Item ./build -Recurse -Include *"),
+    ("*> leaves a * word", "Remove-Item ./build -Recurse *> $null"),
+    ("-WhatIf", "Remove-Item ~ -Recurse -WhatIf"),
+    # The grouping reading turns `(gl)` / `(pwd)` / `(Get-Location)` into the bare word, so
+    # the bare word (a name in the current location) is read as the location too.
+    ("a folder named pwd", "ri -r pwd"),
+    ("a folder named gl", "ri -r gl"),
+    ("a folder named get-location", "ri -r get-location"),
+    # A payload that names a variable cmdlet could set $PSDefaultParameterValues by a
+    # computed name, so every Remove-Item in it is read as recursive.
+    ("gv in the payload", "gv x; Remove-Item * -Include *.log"),
+    ("Get-Variable in the payload", "Get-Variable x; gci *.log | Remove-Item"),
+    # A `|` that ends a comment or a here-string line is read as a pipe too (the line is also
+    # joined as it is, so a `#` inside a string cannot hide a real one).
+    ("a | ending a comment line", "# comment |<NL>Remove-Item -Recurse"),
+    ("a | ending a comment", 'Get-Item "~" # |<NL>ri -r'),
+    ("a | ending a here-string line", "$t = @'<NL>| col |<NL>Remove-Item -Recurse<NL>'@"),
+]
+# Known limits: computed arguments, calls and aliases, a recursing producer, .NET.
+_LIMIT8AS = [
+    ("a variable target", "Remove-Item $x -Recurse"),
+    ("$_ in a ForEach-Object block", "gci ~ | % { Remove-Item $_ -Recurse }"),
+    ("a group target", "Remove-Item (Resolve-Path ~) -Recurse"),
+    ("a group target in a try block", "try { ri -r (Get-Location) } catch { }"),
+    ("a recursing producer", "Get-ChildItem ~ -Recurse | Remove-Item -Force"),
+    ("a new alias", "Set-Alias x Remove-Item; x -r ~"),
+    ("a computed call", "& (Get-Command Remove-Item) -Recurse ~"),
+    ("a subexpression target", 'ri -r "$(Resolve-Path ~)"'),
+    ("another variable's parent", "ri -r $env:SystemRoot/.."),
+    ("another variable's grandparent", "ri -r $env:LOCALAPPDATA/../.."),
+    ("a list in a group in a group", "ri -r (('a','~'))"),
+    ("a computed cmdlet name for the defaults",
+     "(& ('Get-'+'Vari'+'able') ('PS*Val'+'ues')).Value['*:Recurse']=1; ri ~"),
+    ("a | then a block comment", "Get-Item ~ | <# c #><NL>ri -r"),
+    ("a quoted space and #, then a real comment after the |", "Get-Item ~,' #' | # c<NL>ri -r"),
+    ("a splat with no target", "Remove-Item @p"),
+]
+PS_CASES += [
+    (f"ps remove-item: {_t8as(label)}", _t8as(cmd), B, ()) for label, cmd in _BLOCK8AS
+] + [
+    (f"ps remove-item piped: {label}", _t8as(cmd), B, ()) for label, cmd in _PIPED_BLOCK8AS
+] + [
+    (f"ps remove-item: {label}", cmd, B, ()) for label, _s, cmd in _RUNNER_BLOCK8AS
+    if _s == "powershell"
+] + [
+    (f"ps remove-item fp: {_t8as(label)}", _t8as(cmd), A, ()) for label, cmd in _ALLOW8AS
+] + [
+    (f"fp cost: ps remove-item: {label}", _t8as(cmd), B, ()) for label, cmd in _FP_COST8AS
+] + [
+    (f"known limit: ps remove-item: {label}", _t8as(cmd), A, ()) for label, cmd in _LIMIT8AS
+]
+CASES += [
+    (f"pwsh remove-item: {_t8as(label)}", _pwsh8as(_t8as(cmd)), B, ())
+    for label, cmd in _BLOCK8AS
+] + [
+    (f"pwsh remove-item piped: {label}", _pwsh8as(_t8as(cmd)), B, ())
+    for label, cmd in _PIPED_BLOCK8AS
+] + [
+    (f"bash remove-item: {label}", cmd, B, ()) for label, _s, cmd in _RUNNER_BLOCK8AS
+    if _s == "bash"
+] + [
+    (f"pwsh remove-item fp: {_t8as(label)}", _pwsh8as(_t8as(cmd)), A, ())
+    for label, cmd in _ALLOW8AS
+] + [
+    (f"bash remove-item fp: {label}", cmd, A, ()) for label, cmd in _BASH_ALLOW8AS
+]
+MUST_BLOCK += [
+    (f"ps remove-item: {_t8as(label)}{suffix}", form(_t8as(cmd)), shell, (), _ROOT8AS)
+    for label, cmd in _BLOCK8AS
+    for suffix, form, shell in (("", str, "powershell"), (" (pwsh, bash)", _pwsh8as, "bash"))
+] + [
+    (f"ps remove-item piped: {label}{suffix}", form(_t8as(cmd)), shell, (), _PIPED8AS)
+    for label, cmd in _PIPED_BLOCK8AS
+    for suffix, form, shell in (("", str, "powershell"), (" (pwsh, bash)", _pwsh8as, "bash"))
+] + [
+    (f"remove-item: {label}", cmd, shell, (), _ROOT8AS) for label, shell, cmd in _RUNNER_BLOCK8AS
+]
+def _pattern_ratio8as(fn, unit):
+    """The best of seven times of fn over unit repeated to 16 KB, over the same at 8 KB: about
+    2 for a linear pattern, about 4 for a quadratic one (the pattern alone, not evaluate()).
+    The sizes run in turn, so a burst of load slows both alike."""
+    import time
+
+    texts = (unit * (8192 // len(unit)), unit * (16384 // len(unit)))
+    best = [float("inf"), float("inf")]
+    for _ in range(7):
+        for k, text in enumerate(texts):
+            t0 = time.perf_counter()
+            fn(text)
+            best[k] = min(best[k], time.perf_counter() - t0)
+    return best[1] / best[0]
+
+
+STRUCT_CASES += [
+    ("remove-item: aliases, and the two read only in a PowerShell text",
+     lambda: (sorted(m._PS_REMOVE_ITEM), sorted(m._PS_REMOVE_ITEM_GATED)),
+     (["del", "erase", "rd", "remove-item", "ri", "rm", "rmdir"], ["ri", "rm"])),
+    ("remove-item: Recurse is the only parameter an r binds",
+     lambda: sorted({p for n, p in m._PS_REMOVE_ITEM_PARAMS.items() if n.startswith("r")}),
+     ["recurse"]),
+    ("remove-item: the binding of root and piped (tool form words)",
+     lambda: [m._ps_remove_item(a.split(), piped) for a, piped in (
+         ("-Recurse ~", False), ("~ -Recurse:$false", False), ("~ -Force", False),
+         ("~ @p", False), ("-Recurse", True), ("-Recurse ./x", True), ("-Recurse -Path ./x", True),
+         ("-Recurse -ErrorAction x", True), ("-Recurse -LiteralPath $_.pspath", True),
+         ("-R -LiteralPath ./x", True), ("-f x -Recurse", True))],
+     [(True, False), (True, False), (False, False), (True, False), (False, True),
+      (False, False), (False, False), (False, True), (False, True), (False, False),
+      (False, True)]),
+    ("remove-item: $PSDefaultParameterValues makes a call recursive",
+     lambda: [m._ps_remove_item(["~"], False, d) for d in (False, True)],
+     [(False, False), (True, False)]),
+    ("remove-item: the defaults flag is cleared after evaluate()",
+     lambda: (bool(m.evaluate("$PSDefaultParameterValues = @{}; ri ~", shell="powershell")),
+              m._Command.ps_defaults), (True, False)),
+    ("remove-item: PowerShell's root spellings",
+     lambda: [m._ps_root_target(_t8as(w)) for w in (
+         "~", "~<BS>", "~foo", "~<BS>foo", "$env:userprofile<BS>*", "hkcu:<BS>", "c:<BS>tmp",
+         "./a,c:", " get-location ", "filesystem::c:<BS>", "$pwd.providerpath", "x y",
+         "~foo<BS>..", "~x<BS>..<BS>..", "a<BS>~b<BS>..<BS>..", "~*", "env:*",
+         "hkcu:<BS>software", "registry::hkey_current_user<BS>x")],
+     [True, True, False, False, True, True, False, True, True, True, True, False,
+      True, True, True, False, True, False, False]),
+    ("remove-item: rm is Remove-Item in any text with a PowerShell-only parameter",
+     lambda: [m._ps_style_parameter(a) for a in (
+         "-Recurse", "-rec", "-re", "-r", "-rf", "-r:$true", "--recursive", "-R", "~", "-fo")],
+     [True, True, True, False, False, True, False, False, False, False]),
+    ("timing: the joined-pipe reading is linear on `|#` and `| ` runs (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(m._ps_joined_pipes, u) < 3.0
+              for u in ("|#", "| #", "|" + " " * 40, "|" + chr(10))], [True] * 4),
+    ("timing: the literal-list reading is linear (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(lambda t: m._PS_LIST_GROUP_RE.sub(m._ps_list_items, t), u)
+              < 3.0 for u in ("('a'," + chr(10), " (" + " " * 30, "('" + " " * 30)], [True] * 3),
+    ("timing: a long Remove-Item comma list scales linearly (4 KB vs 2 KB, PowerShell)",
+     lambda: _ratio8ah("powershell", "Remove-Item -Recurse ", "./a,") < 3.0, True),
+    ("timing: a long Remove-Item path word scales linearly (4 KB vs 2 KB, PowerShell)",
+     lambda: _ratio8ah("powershell", "Remove-Item -Recurse ./", "a<BS>".replace("<BS>", chr(92)))
+     < 3.0, True),
+]
+
 
 def _main_blocks(tool_name, cmd):
     """Run the matcher as the hook does (payload on stdin) and report block/allow."""

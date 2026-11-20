@@ -582,8 +582,9 @@ Run these on a machine after deploying, to prove the floor is non-overridable:
    PowerShell. On v2.1.295+ command-guard's `onFailure: "block"` then refuses **every**
    shell command — install Git for Windows; it is a requirement. Below v2.1.295 the hook
    most likely fails open (unverified): confirm a PowerShell `Remove-Item -Recurse -Force`
-   is refused — that refusal comes from the deny list, and on such a host it is the whole
-   floor.
+   is refused — that refusal comes from the deny list (a running command-guard also
+   refuses a recursive delete of a root, home or current-location target, but not when it
+   fails open), and on such a host it is the whole floor.
 6. **Strict profile only:** confirm a hook defined in a user/project settings file
    does **not** run, while the managed hooks still do; and confirm a project `.mcp.json`
    server does **not** load (the `mcp` surface — see the `mcpServers` correction above).
