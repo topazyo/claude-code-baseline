@@ -3699,8 +3699,9 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     _cmd_prefix_variants). scan: bash text is also read as bash reads its command
     substitutions and comments (see _bash_substitutions); False for a reading that came
     from one. ps_decoded: raw is a PowerShell payload with its escapes decoded (see
-    _powershell_segments): a line break an escape made is no statement's end, so its
-    quote-blind segments are ps_quote_covered (the raw text's own reading has its own).
+    _powershell_segments): a line break an escape made is no statement's end, so the
+    quote-blind segments of a line it split are ps_quote_covered when the line
+    tokenized (the raw text's own reading has its own).
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
@@ -3740,11 +3741,13 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
         if words is None or len(physical) > 1 or words.subst:
-            # Only for a substitution on one line the strict pass read whole are these
-            # words also in a segment with a record of quoted brackets (see
-            # ps_quote_covered on _Seg), and in a reading with PowerShell's escapes
-            # decoded (ps_decoded), whose raw text is read too.
-            covered = ps_decoded or (words is not None and len(physical) == 1)
+            # Only where the strict pass read this line whole are these words also in a
+            # segment with a record of quoted brackets (see ps_quote_covered on _Seg): a
+            # substitution on one physical line, or, in a reading with PowerShell's
+            # escapes decoded (ps_decoded), a line an escape's line break split (a break
+            # inside a string, no statement's end; the raw text is read too). A line the
+            # strict pass could not tokenize is read here alone.
+            covered = words is not None and (len(physical) == 1 or ps_decoded)
             # Physical lines, plus every continuation chain regardless of quote
             # state: a desync that leaves the scanner inside a quote also stops it
             # joining `git push \` + newline + `--force`, which bash still joins.
