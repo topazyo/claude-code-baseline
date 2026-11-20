@@ -100,10 +100,12 @@ PowerShell payloads are also judged as the text PowerShell produces with its own
 quoting, backtick escapes and typographic quotes (so an inline `bash -c` script is
 read as PowerShell quotes it, not only as bash would), with PowerShell 7's and
 Windows PowerShell 5.1's escapes, with the Unicode space characters PowerShell
-separates words on read as spaces, and with a ( ) / $( ) / @( ) group around one word
-and every { } read away, so
+separates words on read as spaces, with the dashes it reads as `-` (U+2013, U+2014,
+U+2015) read as `-`, all of them or only one before `=`, and with a ( ) / $( ) / @( )
+group around one word and every { } read away, so
 `git reset ("--hard")` and `& {...}` are judged as the words they become (see
-_ps_unescape, _PS_SPACES, _ps_ungroup and _powershell_segments). Limits: a $( )
+_ps_unescape, _PS_SPACES, _ps_dash_readings, _ps_ungroup and _powershell_segments);
+more than one dash before `=` is refused. Limits: a $( )
 subexpression holding a nested "..." string is scanned as if the inner quote closed
 the outer string (the context-free reading still decodes every escape in it); --%
 (stop-parsing) is not modelled, so the text after it is judged decoded as well as
@@ -235,8 +237,13 @@ _PS_STDIN_RE = re.compile(r"\$input\b|console\]::(?:in\b|read)|readtoend|readlin
                           r"|read-host|openstandardinput", re.IGNORECASE)
 _PS_EVAL_RE = re.compile(r"\biex\b|invoke-expression|scriptblock\]|newscriptblock"
                          r"|invokescript|add-type\b[^;|]*-typedefinition", re.IGNORECASE)
+# The characters PowerShell reads as `-` wherever its own syntax takes a dash (its
+# tokenizer's IsDash): U+2013 (en dash), U+2014 (em dash) and U+2015 (horizontal bar). Not
+# U+2212, U+2010 to U+2012, U+FE63 or U+FF0D. A native program gets them as they are. See
+# _ps_dash_readings.
+_PS_DASHES = "".join(map(chr, (0x2013, 0x2014, 0x2015)))
 # Characters pwsh's command-line parser accepts as a switch prefix: -, /, and the dashes.
-_PS_SWITCH_CHARS = "-/–—―"
+_PS_SWITCH_CHARS = "-/" + _PS_DASHES
 # pwsh / powershell options that take a value, by full name; a switch matches by prefix.
 _PS_VALUE_OPTS = ("executionpolicy", "ep", "windowstyle", "inputformat", "outputformat",
                   "configurationname", "configurationfile", "custompipename", "version",
@@ -2224,11 +2231,12 @@ def _runner_scripts(toks):
     --hard"` is `git reset --hard`. (A quoted script for a shell later in the words,
     `wsl -e bash -c '...'`, is still found whole by _split_inline_script.) cmd's text is
     also read as _cmd_texts gives it. A pwsh/powershell script is also read with each
-    of _PS_SPACES a space, as PowerShell separates words on them; then each of those two
-    in its grouping and block readings (_ps_ungroup, _ps_block_statements), and all of
-    those with PowerShell's own quoting (_ps_unescape; see _powershell_segments) and with
-    its backtick escapes decoded. The spaces are read before the escapes, so a space an
-    escape produces stays inside its word. Both decoders read the same base texts, never
+    of _PS_SPACES a space, as PowerShell separates words on them, and with its dashes as
+    `-` (_ps_dash_readings); then each of those in its grouping and block readings
+    (_ps_ungroup, _ps_block_statements), and all of those with PowerShell's own quoting
+    (_ps_unescape; see _powershell_segments) and with its backtick escapes decoded. The
+    spaces are read before the escapes, so a space an escape produces stays inside its
+    word. Both decoders read the same base texts, never
     each other's output, so no escape is decoded twice. kind is the runner's
     ("cmd", "ps" or "wsl"): "ps" marks a PowerShell script (see ps_script in _rules_at),
     "cmd" a cmd script (see cmd_script on _Seg); outer, see _runner_rests.
@@ -2244,10 +2252,7 @@ def _runner_scripts(toks):
 
 def _ps_script_texts(text: str):
     """The texts a pwsh/powershell script is read as (see _runner_scripts)."""
-    texts = [text]
-    spaced = text.translate(_PS_AS_SPACE)
-    if spaced != text:
-        texts.append(spaced)
+    texts = _ps_dash_readings(text)
     plain = list(texts)
     texts += [_ps_ungroup(t) for t in plain]
     texts += [_ps_block_statements(t) for t in plain if "{" in t or "}" in t]
@@ -3121,6 +3126,38 @@ _AS_IN_WORD = str.maketrans(dict.fromkeys(_WORD_BREAKS, "\x01"))
 _PS_SPACES = "".join(map(chr, (0xA0, 0x1680, 0x180E, *range(0x2000, 0x200B),
                                0x202F, 0x205F, 0x3000)))
 _PS_AS_SPACE = str.maketrans(dict.fromkeys(_PS_SPACES, " "))
+# PowerShell reads each of _PS_DASHES as `-` in its own syntax: an operator (`$b -= cmd`
+# spelled with U+2013), a unary minus, `--`, a parameter name (`rm`, Remove-Item's alias,
+# binds -Recurse -Force from U+2013 r U+2013 fo). A native program gets the character as
+# it is: git rejects U+2013 followed by `-force`, and curl.exe reads U+2013 `o` as a URL
+# and goes on to fetch the next one. So a PowerShell text is also read with every dash as
+# `-`, and with only a dash right before `=` as `-` (the operator read as PowerShell reads
+# it, a program's arguments as the program gets them): see _ps_dash_readings.
+_PS_AS_DASH = str.maketrans(dict.fromkeys(_PS_DASHES, "-"))
+_PS_DASH_ASSIGN_RE = re.compile("[" + _PS_DASHES + "]=")
+
+
+def _ps_dash_readings(text: str) -> list:
+    """The base texts a PowerShell text is read as: the text and the text with each of
+    _PS_SPACES a space, each of them as it is, with every one of _PS_DASHES as `-`, and
+    with only a dash right before `=` as `-`; the text first, then the spaced text,
+    duplicates dropped. Readings only add segments, so the extra ones can only add
+    blocks; a text without a dash gets the same texts as before (main's raw and spaced
+    readings, one when they are equal).
+
+    A text holding more than one dash right before `=` is refused as uninspectable: the
+    text alone cannot tell PowerShell's `-=` from a program's argument (`$b <D>= curl.exe
+    <D>=x URL` hands curl.exe `<D>=x`, which it reads as a URL), so no single reading has
+    each operator ASCII and each argument as it is. With one, the reading with it ASCII is
+    that reading. No command in the recorded corpus holds even one; a string holding two
+    (`Write-Output 'a <D>= b <D>= c'`) is refused too, an accepted cost."""
+    if len(_PS_DASH_ASSIGN_RE.findall(text)) > 1:
+        raise _Uninspectable("more than one PowerShell `-=` spelled with a dash")
+    out = []
+    for t in (text, text.translate(_PS_AS_SPACE)):
+        out += [t, t.translate(_PS_AS_DASH), _PS_DASH_ASSIGN_RE.sub("-=", t)]
+    return list(dict.fromkeys(out))
+
 
 # cmd's own reading of its line: , and = separate words as a space does (so does ;, which
 # the bash reading already ends a segment at), and so does every one of _PS_SPACES (cmd
@@ -4451,7 +4488,9 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
 def _powershell_segments(raw: str):
     """Every segment evaluate() judges for a PowerShell payload: the readings below of
     the raw text and, when it holds one of _PS_SPACES, the same readings of the text
-    with each of them a space, as PowerShell reads them outside a string; and the same
+    with each of them a space, as PowerShell reads them outside a string; when it holds
+    one of _PS_DASHES, the same readings of each of those with the dashes as `-`, all
+    of them or only one before `=` (_ps_dash_readings); and the same
     again with PowerShell's grouping read away (_ps_ungroup: `git reset ("--hard")`,
     `& ('git') ...`, `& {...}`), so a grouped value is judged as the argument or command
     word it becomes. The raw readings stay, so this only adds segments. Raises as
@@ -4464,11 +4503,12 @@ def _powershell_segments(raw: str):
             if body.strip() not in ("", ":"):
                 _RunnerBudget.charge(len(body))
                 segments += _powershell_segments(body)
-    texts = [raw, raw.translate(_PS_AS_SPACE)]
+    base = _ps_dash_readings(raw)
+    texts = list(base)
     if "(" in raw or "{" in raw:
-        texts += [_ps_ungroup(t, keep_variables=True) for t in texts]
+        texts += [_ps_ungroup(t, keep_variables=True) for t in base]
     if "{" in raw or "}" in raw:
-        texts += [_ps_block_statements(t) for t in texts[:2]]
+        texts += [_ps_block_statements(t) for t in base]
     if ".'" in raw or '."' in raw:
         texts += [_PS_DOT_QUOTE_RE.sub(r"\1. ", t) for t in texts]
     # A <# #> comment reads as two redirects, whose targets take the words beside it. An
