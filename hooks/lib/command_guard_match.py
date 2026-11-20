@@ -1060,9 +1060,12 @@ def _ps_statement_tail(toks, script=False):
     target (`[string] $x = cmd`, `[ValidateNotNull()] $x = cmd`, where the attribute's
     parentheses leave a `]`), and after an `=` (`$x = [string] $y = cmd`, `$x=[string] $y
     = cmd`). After a flow or type word, a word that opens with `[`, or in a script, any `$`
-    word is a target, and so is a list of them; and when that walk stops short of a
-    command in a statement led by a `$` or `[` word, a flow word or a type run, it resumes
-    after the next assignment operator (see _ps_assignment_operator): `[int] $a, [int] $b
+    word is a target, and so is a list of them (an item may have types before it, see
+    _ps_list_item; an item that is a glued target ends the list, and an operator glued
+    to its value may follow the list: `$a, [int] $b=cmd`, `$a, $b =cmd`); and when that
+    walk stops at a type it cannot read or short of a command in a statement led by a `$`
+    or `[` word, a flow word or a type run, it resumes after the next assignment operator
+    (see _ps_assignment_operator): `[int] $a, [int] $b
     = cmd`, `[int] $x =cmd`, `return $a , $b = cmd`. Every value starts as the statement
     does, past a flow word and a type run (see _ps_value_start): `$x = return cmd`,
     `$x=return [int] $y = cmd`, `[int] $a =return cmd`. In a script an outer shell
@@ -1100,7 +1103,7 @@ def _ps_statement_tail(toks, script=False):
         glued = _PS_GLUED_ASSIGN_RE.fullmatch(word)
         if glued:
             if i in ext:
-                return [word] + list(toks[i + 1:])
+                return _ps_outer_tail(toks, i, word, ext)
             walked, word, value_of_glue = True, glued[3], True
             if not word:
                 i += 1                 # `$x= 1`: the value is the next word
@@ -1112,27 +1115,36 @@ def _ps_statement_tail(toks, script=False):
             loose = loose or flow or typed
             continue
         step = None
-        if loose and "$" in word and not _PS_VAR_WORD_RE.fullmatch(word):
+        # `[Dictionary[string,` `int]]$c, $y = cmd`: a first item a type a space split leads.
+        first = (_ps_list_item(toks, i, word) if (loose or walked) and "$" not in word
+                 and word[:1] in "[]" else None)
+        if first or loose and "$" in word and (
+                not _PS_VAR_WORD_RE.fullmatch(word)
+                or toks[i + 1:i + 2] and toks[i + 1].startswith(",")):
             # Other assignment targets, as _rules_at reads a script's (a typed `[int]$x`,
-            # `$x,$y`), and a list of them (`$a, $b = cmd`).
-            j = i
-            # No item opens with an assignment operator: a resume reads that word, so the
-            # scan stops there and never rescans it (`=,$b, =,$b, ...` stays linear).
-            while (toks[j].endswith(",") and j + 1 < len(toks) and "$" in toks[j + 1]
-                   and not _PS_ASSIGN_LEAD_RE.match(toks[j + 1])):
-                j += 1
-            if j + 1 < len(toks) and toks[j + 1] in _PS_ASSIGN:
+            # `$x,$y`), and a list of them (`$a, $b = cmd`, `$a, [int] $b = cmd`, `$a , $b
+            # = cmd`): see _ps_list_scan.
+            j, last = _ps_list_scan(toks, i, word, first[1] if first else i)
+            op = _PS_ASSIGN_LEAD_RE.match(toks[j + 1]) if j + 1 < len(toks) else None
+            if op and toks[j + 1] in _PS_ASSIGN:
                 step = j + 2
-            elif j > i:
-                # `$a, $b=cmd`, `$a, [int]$b= cmd`: the list's last item is a glued target;
-                # walk on in it, as in a glued word (not past an expanded item, see ext).
-                last = ((j, toks[j]) if _PS_GLUED_ASSIGN_RE.fullmatch(toks[j])
-                        else _ps_typed_glued_target(toks, j, toks[j]))
-                if last:
-                    if any(t in ext for t in range(i, last[0] + 1)):
-                        return [word] + list(toks[i + 1:])
-                    i, word, value_of_glue, walked = last[0], last[1], True, True
-                    continue
+            elif last:
+                # The list's last item is a glued target: walk on in it, as in a glued
+                # word (not past an expanded item, see ext).
+                if any(t in ext for t in range(i, last[0] + 1)):
+                    return _ps_outer_tail(toks, i, word, ext)
+                i, word, value_of_glue, walked = last[0], last[1], True, True
+                continue
+            elif op:
+                # `$a, $b =cmd`, `$x = $a, [int] $b +=cmd`: the operator glued to its value
+                # (not past an expanded item, see ext).
+                if any(t in ext for t in range(i, j + 1)):
+                    return _ps_outer_tail(toks, i, word, ext)
+                walked = True
+                i, word, value_of_glue, flow, typed = _ps_value_start(
+                    toks, j + 1, toks[j + 1][op.end():], True)
+                loose = loose or flow or typed
+                continue
         if step is None and _PS_VAR_WORD_RE.fullmatch(word):
             nxt = toks[i + 1].lower() if i + 1 < len(toks) else None
             if nxt is None:
@@ -1142,7 +1154,7 @@ def _ps_statement_tail(toks, script=False):
                 step = i + 2
         if step is not None:
             if toks[step - 1] in _PS_ASSIGN and any(t in ext for t in range(i, step - 1)):
-                return [word] + list(toks[i + 1:])
+                return _ps_outer_tail(toks, i, word, ext)
             walked = True
             if step >= len(toks):
                 return []
@@ -1152,18 +1164,27 @@ def _ps_statement_tail(toks, script=False):
             loose = loose or flow or typed
             continue
         # After a flow word or a type run, a `$` word is a value or a target, no command.
-        stuck = not walked or ((flow or typed) and ("$" in word or word.startswith(",")))
-        if stuck and loose and led:
+        # A word that opens a type it does not close and holds no `$` is a type literal the
+        # walk could not read (`[x, Get-Date ...`): no command either.
+        unread = word[:1] == "[" and "$" not in word and word.count("[") > word.count("]")
+        stuck = (not walked or ((flow or typed) and ("$" in word or word.startswith(",")))
+                 or unread)
+        if stuck and (loose or unread) and led:
             # The walk did not reach a command: resume it after the next assignment
             # operator, if there is one (see _ps_assignment_operator), past the last one
-            # resumed after (`[int] $a, [int] $b = return [int] $c, $d = cmd`). The
-            # searches never overlap, so this stays linear.
-            found = _ps_assignment_operator(toks, max(i, resumed + 1))
+            # resumed after (`[int] $a, [int] $b = return [int] $c, $d = cmd`); past an
+            # unread type, at the glued target that ends it too. The searches never
+            # overlap, so this stays linear.
+            found = _ps_assignment_operator(toks, max(i, resumed + 1), unread)
             if found is not None and any(t in ext for t in range(i, max(found[0], i + 1))):
                 # Not past a word an outer shell expanded (see ext). With no operator
                 # after it, it stays a flow word's value (`exit $LASTEXITCODE`: the
                 # documented `$VAR` limit).
-                return [word] + list(toks[i + 1:])
+                return _ps_outer_tail(toks, i, word, ext)
+            if found is None and unread and any(t in ext for t in range(i, len(toks))):
+                # An unread type that holds or precedes a word an outer shell expanded
+                # (`[Dictionary[string, $T]]$a, ...`): what it reads as is not known.
+                return _ps_outer_tail(toks, i, word, ext)
             if found is not None:
                 k, rest = found
                 walked, resumed = True, k
@@ -1183,6 +1204,91 @@ def _ps_statement_tail(toks, script=False):
         if i in (toks.ps_quoted_value if value_of_glue else toks.ps_quoted):
             return []
         return [word] + list(toks[i + 1:])
+
+
+def _ps_list_scan(toks, i, word, j):
+    """The items of a list target from toks[j] on (see _ps_statement_tail), word being the
+    text read for toks[i] (the walk's word) and j the last word of the first item. Each
+    item is read by _ps_list_item. A separator: a comma inside the word that starts an item
+    in it (`$a,$b=cmd`, `$a,[int] $b=cmd`; read once per word, see _ps_comma_item), a
+    comma that ends an item (`$a, $b`), a word of commas (`$a , $b`), or one that leads the
+    next item (`$a ,$b`, read without it). An item that is a glued target ends the list,
+    whatever its value holds (`$a, $b=cmd`, `$a, [int] $b= cmd`, `$a, [Dictionary[string,`
+    `int]]$b=cmd`; `$b=[Dictionary[string,` ends in its value's comma). (The index of the
+    last word read, (its index, the glued target and its value as one text) for that item
+    or None.)"""
+    last, inner = None, -1
+    while True:
+        piece = _ps_comma_item(word if j == i else toks[j]) if inner < j else None
+        nxt, head = (toks[j + 1] if j + 1 < len(toks) else None), None
+        if piece:
+            s, head, inner = j, piece, j
+        elif nxt is None:
+            break
+        elif not nxt.strip(","):
+            s = j + 2
+        elif nxt.startswith(","):
+            s, head = j + 1, nxt.lstrip(",")
+        elif toks[j].endswith(","):
+            s = j + 1
+        else:
+            break
+        item = _ps_list_item(toks, s, head) if s < len(toks) else None
+        if item is None:
+            break
+        k, j, kword = item
+        text = kword if j == k else toks[j]
+        last = ((j, text) if _PS_GLUED_ASSIGN_RE.fullmatch(text)
+                else _ps_typed_glued_target(toks, k, kword))
+        if last:
+            break
+    return j, last
+
+
+def _ps_comma_item(text):
+    """The list item a comma inside a word starts (`$a,$b=cmd`, `$a,[int]$b=cmd`, `$a,[int]`
+    before ` $b=cmd`), as the text to read for that word (see _ps_list_item): the first
+    item after such a comma that is a glued target, perhaps typed, with the rest of the
+    word (its value may hold commas: `$a,$b=1,2`), else the last item; None when there is
+    none. A comma inside brackets, parentheses or braces is not the list's. Each item is
+    read once, within its own text, as soon as it ends: the scan stops at the first glued
+    one, so a chain of them in one word (`$a,$b=$c,$d=$e,...`, one per walk step) is read
+    in linear time."""
+    depth, start, last, n, size = 0, None, None, 0, len(text)
+    while n <= size:
+        c = text[n] if n < size else ","
+        # start is None until the first top-level comma: before it, only the word's start.
+        if c == "[" and not depth and n in (0, start):
+            # A type that leads an item (or the word) ends at the first `]` that closes
+            # it there, as _ps_split_target reads one (`[x,[int]$b,$c=cmd`): its commas
+            # and brackets are not the list's.
+            end = _PS_TYPE_WORD_RE.match(text, n).end()
+            if end > n:
+                n = end
+                continue
+        if c in "[({":
+            depth += 1
+        elif c in "])}":
+            depth = max(depth - 1, 0)
+        elif c == "," and (not depth or n == size):
+            if start is not None and start < n:
+                lead = _PS_TYPE_WORD_RE.match(text, start, n).end()
+                if _PS_GLUED_ASSIGN_RE.fullmatch(text, lead, n):
+                    return text[start:]
+                last = (start, n)
+            start = n + 1
+        n += 1
+    return text[last[0]:last[1]] if last else None
+
+
+def _ps_outer_tail(toks, i, word, ext):
+    """What a walk hands back when it stops before a word an outer shell expanded (ext,
+    see _ps_statement_tail): from its word when that holds a `$` (_rules_at refuses such a
+    command word there), else from the first expanded word after i (`[Dictionary[string,`
+    `int]]$T, ...`: a word with no `$` would be judged as a command)."""
+    if "$" in word:
+        return [word] + list(toks[i + 1:])
+    return list(toks[min((t for t in ext if t >= i), default=i):])
 
 
 def _ps_flow_word(toks, i, word):
@@ -1210,6 +1316,11 @@ def _ps_value_start(toks, i, word, glue, first=False):
         if _ps_flow_word(toks, i, word):
             i, word, glue, flow = i + 1, toks[i + 1], False, True
             continue
+        if word.endswith(",") and _ps_flow_word(toks, i, word.rstrip(",")):
+            # `return, $b = cmd`: a flow word glued to a unary comma; what follows is the
+            # comma's operand, a value or a target as after a type.
+            i, word, glue, flow, typed = i + 1, toks[i + 1], False, True, True
+            continue
         if word and not word.strip(",") and i + 1 < len(toks):
             # `$x = , $y = cmd`: a unary comma; what follows is its operand, a value or a
             # target as after a type.
@@ -1236,30 +1347,69 @@ def _ps_value_start(toks, i, word, glue, first=False):
 def _ps_typed_glued_target(toks, i, word):
     """A type glued to a glued target from word (toks[i], or the value glued to an `=` in
     it): `[int]$y=cmd`, the type perhaps split by a space (`[Dictionary[string,`
-    `int]]$y=cmd`), joined as _ps_type_words_end joins one, up to 8 words. The word alone
-    is read first: an open `[` may be its value's (`[int]$y=[Dictionary[string,`). (The
-    index of the last word read, the target and its value as one text), or None."""
-    lead = _PS_TYPE_WORD_RE.match(word).end()
-    if lead and _PS_GLUED_ASSIGN_RE.fullmatch(word, lead):
-        return i, word[lead:]
+    `int]]$y=cmd`), joined as _ps_split_target joins one. The word alone is read first:
+    an open `[` may be its value's (`[int]$y=[Dictionary[string,`). (The index of the last
+    word read, the target and its value as one text), or None. `$y[ 0]=cmd`: a target a
+    space splits is read too."""
+    return _ps_split_target(toks, i, word, True)
+
+
+def _ps_split_target(toks, i, word, glued):
+    """A type literal from word (toks[i], or the value glued to an `=` in it) and the
+    target after it, the two perhaps split by spaces: word joined with the words after it
+    one at a time while it opens a `[` it has not closed, up to 8 words. The first text
+    that reads as a type, then a target (glued: a glued assignment, `$y=cmd`; else a word
+    holding a `$`) is the one: PowerShell's type ends at the first `]` that closes it there
+    (`[x, [int]$y=cmd` types `$y` as `[x, [int]`, and `cmd` is its value, not part of a
+    longer type). (The index of the last word read, the text after the type), or None."""
     joined, j = word, i
-    while (joined[:1] in "[]" and joined.count("[") > joined.count("]")
-           and j + 1 < len(toks) and j - i < 7):
+    while True:
+        lead = _PS_TYPE_WORD_RE.match(joined).end()
+        if lead and (_PS_GLUED_ASSIGN_RE.fullmatch(joined, lead) if glued
+                     else "$" in joined[lead:]):
+            return j, joined[lead:]
+        if not (joined[:1] in "[]" and joined.count("[") > joined.count("]")
+                and j + 1 < len(toks) and j - i < 7):
+            return None
         j += 1
         joined += toks[j]
-    lead = _PS_TYPE_WORD_RE.match(joined).end()
-    if lead and _PS_GLUED_ASSIGN_RE.fullmatch(joined, lead):
-        return j, joined[lead:]          # `$y[ 0]=cmd`: a target a space splits too
-    return None
 
 
-def _ps_assignment_operator(toks, i):
+def _ps_list_item(toks, s, head=None):
+    """An item of a list target from toks[s] (see _ps_statement_tail): a word holding a
+    `$`, perhaps after a run of type literals (`[int] $b`, see _ps_type_words_end), or a
+    type a space split glued to its variable (`[Dictionary[string,` `int]]$b`, see
+    _ps_split_target). head: the text to read for toks[s] (without the comma that leads
+    it). (The index where its type run ends, the index of its last word, the text read
+    for the word at the run's end), or None. Not when a word from the run's end opens with
+    an assignment operator: a resume reads that word, so a list scan stops there and never
+    rescans it (`=,$b, =,$b, ...` stays linear; type words hold no `=`)."""
+    k = _ps_type_words_end(toks, s, head)
+    kword = head if k == s and head is not None else toks[k]
+    e = k
+    if "$" not in kword:
+        found = _ps_split_target(toks, k, kword, False)
+        if found is None:
+            return None
+        e = found[0]
+    if _PS_ASSIGN_LEAD_RE.match(kword) or any(_PS_ASSIGN_LEAD_RE.match(toks[t])
+                                              for t in range(k + 1, e + 1)):
+        return None
+    return k, e, kword
+
+
+def _ps_assignment_operator(toks, i, target=False):
     """The first assignment operator from toks[i] on, as a word (`=`, `+=`) or leading one
-    (`=cmd`): (its index, the rest of its word), or None (see _ps_statement_tail)."""
+    (`=cmd`): (its index, the rest of its word), or None (see _ps_statement_tail). target:
+    also a word that holds a glued target right after a `]` (`Get-Date]$b=cmd`, the end
+    of a type literal the walk could not read): (its index, the target and its value)."""
     for k in range(i, len(toks)):
         op = _PS_ASSIGN_LEAD_RE.match(toks[k])
         if op:
             return k, toks[k][op.end():]
+        d = toks[k].find("]$") if target else -1
+        if d >= 0 and _PS_GLUED_ASSIGN_RE.fullmatch(toks[k], d + 1):
+            return k, toks[k][d + 1:]
     return None
 
 
@@ -1414,6 +1564,15 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
             k = next((k for k in range(idx + 1, len(toks)) if toks[k] in _PS_ASSIGN), None)
             if k is not None and k + 1 < len(toks):
                 rhs = _new_seg(toks[k + 1:], getattr(toks, "piped", False))
+                rhs.ps_script = True
+                rest.append(rhs)
+            # `$a, $b =cmd`: also the value glued to the first word an assignment operator
+            # opens (in addition: the reading above stays).
+            g = next((g for g in range(idx + 1, len(toks))
+                      if _PS_ASSIGN_LEAD_RE.match(toks[g])), None)
+            if g is not None and toks[g] not in _PS_ASSIGN:
+                rhs = _new_seg([toks[g][_PS_ASSIGN_LEAD_RE.match(toks[g]).end():]]
+                               + list(toks[g + 1:]), getattr(toks, "piped", False))
                 rhs.ps_script = True
                 rest.append(rhs)
         return out
