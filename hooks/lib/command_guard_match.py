@@ -274,9 +274,18 @@ _PS_DASH_NAME_RE = re.compile(r"-[a-z_][\w-]*", re.I)
 # A PowerShell tool statement may start with a variable, with member or index steps (see
 # _ps_statement_tail). No other scope prefix: `$alias:g`, `$function:g` and `${c:\f}` name
 # a provider's item, and assigning one defines a command or writes a file.
-_PS_VAR = (r"\$(?:\{[^{}$:]+\}|(?:(?:env|global|script|local|private|using):)?\w+|\?)"
-           r"(?:\.\w+|\[[^\]()]*\])*")
+_PS_VAR_NAME = r"\$(?:\{[^{}$:]+\}|(?:(?:env|global|script|local|private|using):)?\w+|\?)"
+_PS_VAR = _PS_VAR_NAME + r"(?:\.\w+|\[[^\]()]*\])*"
+_PS_VAR_NAME_RE = re.compile(_PS_VAR_NAME, re.I)
+_PS_VAR_RE = re.compile(_PS_VAR, re.I)
 _PS_VAR_WORD_RE = re.compile(_PS_VAR + r"(?:\+\+|--)?\}*", re.I)
+# A member step after an index, or one a variable names: `$b[ 0].c=cmd`, `$b.$c=cmd` (see
+# _ps_index_target).
+_PS_MEMBER_RE = re.compile(r"\.(?:\w+|\$\w+|\$\{[^{}]+\})")
+# Text glued after a target's steps that no operator, comma or end starts: a word, a
+# variable, a bracket, a quote, a space a quoted member name left (`$b[ 0].'c d'=cmd`)
+# or a static member's `::` (see _ps_index_target).
+_PS_STEP_JUNK_RE = re.compile(r"[\w$\[\]'\"`\s:]")
 # `$x=value`, one word: variable, operator, value.
 _PS_GLUED_ASSIGN_RE = re.compile("(" + _PS_VAR + r")((?:[-+*/%]|\?\?)?=)(.*)", re.I | re.S)
 # `key=value` in a hashtable; the value runs as a pipeline.
@@ -1019,6 +1028,12 @@ def _reasons_for(toks):
             r = "uninspectable command word (cmd variable expansion in command position)"
             if r not in out:
                 out.append(r)
+        # A PowerShell statement whose walk stopped at a target it could not read (see
+        # _ps_index_target): what the statement runs after it is not known. Fail closed.
+        if getattr(seg, "ps_unread", False):
+            r = "uninspectable command word (shell expansion in command position)"
+            if r not in out:
+                out.append(r)
         # Judge the command word under both readings of wrapper options (see
         # _WRAPPER_VALUE_SHORTS): a rule that fires on either one blocks.
         seen, rest = set(), []
@@ -1078,7 +1093,19 @@ def _ps_statement_tail(toks, script=False):
     itself as before (it calls this without script). Its early return needs a `$` first
     word, which the type and flow words and a `[` word without one are not, and the list
     walk is only open after them: so for the tool's own `$a, $b = ...`, this is None as
-    before."""
+    before.
+
+    A target whose steps the walk cannot read (see _ps_index_target) ends it: the tail is
+    that target's word and the words after it, as a _PsUnreadTail, whose segment is
+    refused."""
+    try:
+        return _ps_statement_walk(toks, script)
+    except _PsUnreadTarget as stop:
+        return _PsUnreadTail([stop.word] + list(toks[stop.index + 1:]))
+
+
+def _ps_statement_walk(toks, script):
+    """The walk of _ps_statement_tail (see there); raises _PsUnreadTarget."""
     if script and getattr(toks, "ps_script", False):
         if toks.ps_call:
             return None
@@ -1100,6 +1127,24 @@ def _ps_statement_tail(toks, script=False):
     # target; it is the tail, which _rules_at refuses there.
     ext = toks.expanding if script and getattr(toks, "ps_outer", False) else ()
     while True:
+        # `[int] $b[ 0]=cmd`, `return $b[$c[0]]=cmd`, `return [int]$b[ 0], $c=cmd`: a
+        # target whose steps _PS_VAR cannot read in one word (see _ps_index_target; one it
+        # cannot read at all is refused), read as its name and what follows its steps (a
+        # type glued before it goes: it reads nothing). Not the tool's statement's own first
+        # word, whose reading _rules_at's early return depends on (the tool's `$b[ 0]=cmd`
+        # stays an uninspectable command word); a script's is read (`$b[$i, 0]=cmd`, whose
+        # comma _rules_at takes for a list's: the reading with script only adds segments).
+        # Not past a word an outer shell expanded (see ext). The text read is no word of
+        # the payload: whether one opens with a quote says nothing of it (value_of_glue
+        # None).
+        lead = _PS_TYPE_WORD_RE.match(word).end() if word[:1] in "[]" else 0
+        indexed = (_ps_index_target(toks, i, word[lead:]) if (walked or i != start or script)
+                   and word[lead:lead + 1] == "$" else None)
+        if indexed:
+            if any(t in ext for t in range(i, indexed[0] + 1)):
+                return _ps_outer_tail(toks, i, word, ext)
+            i, word = indexed
+            value_of_glue = None
         glued = _PS_GLUED_ASSIGN_RE.fullmatch(word)
         if glued:
             if i in ext:
@@ -1201,7 +1246,8 @@ def _ps_statement_tail(toks, script=False):
             return None
         if flow and ("$" in word or word.startswith(",")):
             return []          # `return $a, $b`, `return ,$x`, `exit $LASTEXITCODE`: a value
-        if i in (toks.ps_quoted_value if value_of_glue else toks.ps_quoted):
+        if value_of_glue is not None and i in (toks.ps_quoted_value if value_of_glue
+                                               else toks.ps_quoted):
             return []
         return [word] + list(toks[i + 1:])
 
@@ -1217,9 +1263,9 @@ def _ps_list_scan(toks, i, word, j):
     `int]]$b=cmd`; `$b=[Dictionary[string,` ends in its value's comma). (The index of the
     last word read, (its index, the glued target and its value as one text) for that item
     or None.)"""
-    last, inner = None, -1
+    last, inner, cur = None, -1, (word if j == i else toks[j])
     while True:
-        piece = _ps_comma_item(word if j == i else toks[j]) if inner < j else None
+        piece = _ps_comma_item(cur) if inner < j else None
         nxt, head = (toks[j + 1] if j + 1 < len(toks) else None), None
         if piece:
             s, head, inner = j, piece, j
@@ -1237,7 +1283,11 @@ def _ps_list_scan(toks, i, word, j):
         if item is None:
             break
         k, j, kword = item
-        text = kword if j == k else toks[j]
+        # An item whose index a space split is read as one text (see _ps_list_item), and so
+        # is the rest of its last word (`$a, $b[ 0],$c=cmd`).
+        joined = j > k and kword[:1] == "$"
+        text = kword if j == k or joined else toks[j]
+        cur = text if joined else toks[j]
         last = ((j, text) if _PS_GLUED_ASSIGN_RE.fullmatch(text)
                 else _ps_typed_glued_target(toks, k, kword))
         if last:
@@ -1337,8 +1387,9 @@ def _ps_value_start(toks, i, word, glue, first=False):
         if k == i:
             # `return [int]$y=cmd`: a type glued to a glued target. Not from a statement's
             # first word holding a `$`, whose reading _rules_at's early return depends on.
-            found = _ps_typed_glued_target(toks, i, word)
-            if found and (flow or typed or not first or "$" not in word):
+            found = (_ps_typed_glued_target(toks, i, word)
+                     if flow or typed or not first or "$" not in word else None)
+            if found:
                 return found[0], found[1], True, flow, True
             return i, word, glue, flow, typed
         i, word, glue, typed = k, toks[k], False, True
@@ -1362,15 +1413,98 @@ def _ps_split_target(toks, i, word, glued):
     holding a `$`) is the one: PowerShell's type ends at the first `]` that closes it there
     (`[x, [int]$y=cmd` types `$y` as `[x, [int]`, and `cmd` is its value, not part of a
     longer type). (The index of the last word read, the text after the type), or None."""
-    joined, j = word, i
+    joined, j, tried = word, i, False
     while True:
         lead = _PS_TYPE_WORD_RE.match(joined).end()
         if lead and (_PS_GLUED_ASSIGN_RE.fullmatch(joined, lead) if glued
                      else "$" in joined[lead:]):
             return j, joined[lead:]
+        if glued and lead and not tried and joined[lead:lead + 1] == "$":
+            # `[int]$b[$c[0]]=cmd`: a target whose index _PS_VAR cannot read in one word
+            # (see _ps_index_target), tried once, where the type first ends at a `$`.
+            tried = True
+            indexed = _ps_index_target(toks, j, joined[lead:])
+            if indexed and _PS_GLUED_ASSIGN_RE.fullmatch(indexed[1]):
+                return indexed
         if not (joined[:1] in "[]" and joined.count("[") > joined.count("]")
                 and j + 1 < len(toks) and j - i < 7):
             return None
+        j += 1
+        joined += toks[j]
+
+
+class _PsUnreadTarget(Exception):
+    """Raised by _ps_index_target for a target whose steps it cannot read: the statement
+    walk refuses the target's word and the words after it (see _ps_statement_tail)."""
+
+    def __init__(self, index, word):
+        super().__init__(word)
+        self.index, self.word = index, word
+
+
+class _PsUnreadTail(list):
+    """A statement tail that starts at a target the walk could not read: its segment is
+    refused (ps_unread, see _ps_statement_tails and _reasons_for)."""
+
+
+def _ps_index_target(toks, i, word):
+    """A variable target from word (toks[i], or the text a walk reads for it) with steps
+    _PS_VAR cannot read in one word: an index a space splits (`$b[ 0]=cmd`, `$b[$i,`
+    `0]=cmd`), or one holding a nested index or a parenthesis (`$b[$c[0]]=cmd`,
+    `$b[(0)]=cmd`), or a member a variable names (`$b.$c=cmd`, `$b.${c}=cmd`). Its steps,
+    member names and indexes, are read from the variable's name on, an index ending at
+    the `]` that balances its `[`, across the words after it joined one at a time. (The
+    index of the last word read, the name with the text after the steps: `$b=cmd`, `$b`,
+    `$b, ...`), or None when _PS_VAR reads the word's steps (a word that is no such
+    target).
+
+    Raises _PsUnreadTarget, which the walk refuses, for such a target it cannot read: an
+    index still open at the end of the statement or before a word that opens with an
+    assignment operator; text glued after the steps that no operator, comma or end
+    starts (`$b[0]]=cmd`); and when toks[i] or a word after it held a bracket inside
+    quotes, or the segment has no record of that (ps_qbracket on _Seg is None: the words
+    were read quote-blind). The words have lost their quotes, so where such an index
+    ends is not known (`$h[ 'x]' ]=cmd`), and nor is the reading of a later target that
+    holds one. Not refused, but not read either (None, as before), in a quote-blind
+    segment of a line the strict pass also tokenized whole on one physical line
+    (ps_quote_covered on _Seg): the strict segment holds the same words with their
+    record, and is read or refused there. There is no cap on the words joined: a read
+    moves the walk past them and a refusal ends it, so each word is scanned once and
+    this stays linear."""
+    m = _PS_VAR_RE.match(word)
+    stop = word[m.end():m.end() + 1] if m else ""
+    if not (stop in ("[", "]") or stop == "." and _PS_MEMBER_RE.match(word, m.end())):
+        return None
+    qb = getattr(toks, "ps_qbracket", None)
+    if qb is None and getattr(toks, "ps_quote_covered", False):
+        return None
+    if qb is None or (qb and qb[-1] >= i):
+        raise _PsUnreadTarget(i, word)
+    name = _PS_VAR_NAME_RE.match(word).end()
+    joined, j, n, depth = word, i, name, 0
+    while True:
+        size = len(joined)
+        while n < size:
+            c = joined[n]
+            if c == "[":
+                depth += 1
+            elif depth:
+                if c == "]":
+                    depth -= 1
+            else:
+                member = _PS_MEMBER_RE.match(joined, n) if c == "." else None
+                if not member:
+                    break
+                n = member.end()
+                continue
+            n += 1
+        if not depth:
+            rest = joined[n:]
+            if _PS_STEP_JUNK_RE.match(rest):
+                raise _PsUnreadTarget(i, word)
+            return j, word[:name] + rest
+        if j + 1 >= len(toks) or _PS_ASSIGN_LEAD_RE.match(toks[j + 1]):
+            raise _PsUnreadTarget(i, word)
         j += 1
         joined += toks[j]
 
@@ -1392,6 +1526,15 @@ def _ps_list_item(toks, s, head=None):
         if found is None:
             return None
         e = found[0]
+    else:
+        # `$a, $b[ 0]=cmd`, `$a, [int]$b[ 0], $c=cmd`: steps _PS_VAR cannot read in one
+        # word (see _ps_index_target), read as the item's name and what follows its steps
+        # (a type glued before it goes).
+        lead = _PS_TYPE_WORD_RE.match(kword).end() if kword[:1] in "[]" else 0
+        indexed = (_ps_index_target(toks, k, kword[lead:])
+                   if kword[lead:lead + 1] == "$" else None)
+        if indexed:
+            e, kword = indexed
     if _PS_ASSIGN_LEAD_RE.match(kword) or any(_PS_ASSIGN_LEAD_RE.match(toks[t])
                                               for t in range(k + 1, e + 1)):
         return None
@@ -1451,7 +1594,8 @@ def _ps_hash_value(toks):
     return None
 
 
-def _ps_tail_segment(words, called=False, piped=False, expanding=frozenset(), src=None):
+def _ps_tail_segment(words, called=False, piped=False, expanding=frozenset(), src=None,
+                     qbracket=None):
     """words as a segment of the tool's payload. `. cmd` dot-invokes cmd, so the words
     are judged without the dot, and `. $y` is a call of $y, not an ordinary statement.
     A leading number goes too: in `$x=2>&1 rm -rf /` the 2 was a redirect's.
@@ -1459,7 +1603,8 @@ def _ps_tail_segment(words, called=False, piped=False, expanding=frozenset(), sr
     is not an ordinary statement (`'x' | . bash` feeds bash). expanding: the indexes of
     the words that hold a `$` the shell expands (see expanding on _Seg). src: a segment
     of a runner's pwsh script the words come from: the new segment is one of that
-    script's (ps_script, with its ps_outer and pipe), not of the tool's payload."""
+    script's (ps_script, with its ps_outer and pipe), not of the tool's payload.
+    qbracket: the ps_qbracket indexes of words (see _Seg), or None."""
     dot = words[0] == "." and len(words) > 1
     drop = dot or (words[0].isdigit() and len(words) > 1)
     seg = _new_seg(words[1:] if drop else words, piped or getattr(src, "piped", False))
@@ -1469,7 +1614,19 @@ def _ps_tail_segment(words, called=False, piped=False, expanding=frozenset(), sr
     else:
         seg.ps_script, seg.ps_outer = True, src.ps_outer
     seg.expanding = frozenset(e - drop for e in expanding if e >= drop)
+    seg.ps_qbracket = (None if qbracket is None
+                       else tuple(e - drop for e in qbracket if e >= drop))
     return seg
+
+
+def _suffix_qbracket(src, words):
+    """The ps_qbracket indexes of src (see _Seg) for words, which end as src does; None
+    when src has none."""
+    got = getattr(src, "ps_qbracket", None)
+    if got is None:
+        return None
+    k = len(src) - len(words)
+    return tuple(e - k for e in got if e >= k)
 
 
 def _suffix_expanding(src, words):
@@ -1506,14 +1663,19 @@ def _ps_statement_tails(segments, script=False):
                      else _ps_hash_value(toks))   # `. cmd args`: cmd is the command
             if value and value != ["$"]:
                 seg = _ps_tail_segment(value, toks.ps_call, toks.piped,
-                                       _suffix_expanding(toks, value), own)
+                                       _suffix_expanding(toks, value), own,
+                                       _suffix_qbracket(toks, value))
                 # `@{ a = $y = cmd }`: one more step
                 out.append(seg)
                 tails.append((_ps_statement_tail(seg, script), seg))
         for tail, src in tails:
             if tail and tail != ["$"]:
-                out.append(_ps_tail_segment(tail, expanding=_suffix_expanding(src, tail),
-                                            src=src if script else None))
+                seg = _ps_tail_segment(tail, expanding=_suffix_expanding(src, tail),
+                                       src=src if script else None,
+                                       qbracket=_suffix_qbracket(src, tail))
+                # A target the walk could not read: refused (see _reasons_for).
+                seg.ps_unread = isinstance(tail, _PsUnreadTail)
+                out.append(seg)
     return out
 
 
@@ -2349,8 +2511,9 @@ def _shell_words(s: str):
     """
     words, buf, has_word, state, ansi_cut = _Words(), [], False, "", False
     i, n = 0, len(s)
-    opens_quoted = value_quoted = False
+    opens_quoted = value_quoted = qbracket = False
     words.expanding = set()
+    words.qbracket = set()     # the words holding a `[` or `]` inside quotes
     dollar, dq_bs = False, -2   # see push(); dq_bs: where a lone backslash sat in a "..."
 
     def word():
@@ -2361,6 +2524,8 @@ def _shell_words(s: str):
     def push():
         if dollar:
             words.expanding.add(len(words))
+        if qbracket:
+            words.qbracket.add(len(words))
         words.append(word())
 
     while i < n:
@@ -2379,12 +2544,14 @@ def _shell_words(s: str):
                 if "\x00" in text:
                     text, ansi_cut = text.split("\x00", 1)[0], True
                 buf.append(text)
+                qbracket = qbracket or "[" in text or "]" in text
             continue
         elif state == "'":
             if c == "'":
                 state = ""
             else:
                 buf.append(c)
+                qbracket = qbracket or c in "[]"
         elif state == '"':
             if c == '"':
                 state = ""
@@ -2401,6 +2568,7 @@ def _shell_words(s: str):
                 elif c == "\\":
                     dq_bs = i
                 buf.append(c)
+                qbracket = qbracket or c in "[]"
         elif c == "\\":
             if i + 1 >= n:
                 raise ValueError("No escaped character")
@@ -2426,6 +2594,7 @@ def _shell_words(s: str):
             if buf or has_word:
                 push()
             buf, has_word, opens_quoted, value_quoted = [], False, False, False
+            qbracket = False
             dollar = False
         elif c in _OP_CHARS:
             if c == "`" or (c == "(" and buf and buf[-1] == "$"):
@@ -2434,6 +2603,7 @@ def _shell_words(s: str):
             if glued:
                 push()
             buf, has_word, opens_quoted, value_quoted = [], False, False, False
+            qbracket = False
             dollar = False
             j = i
             while j < n and s[j] in _OP_CHARS:
@@ -2475,7 +2645,12 @@ class _Seg(list):
     position, is or holds a method call's object, or comes at or after a group that is
     called or passed to a program runner. ps_foreach: it is a foreach header. ps_quoted,
     ps_quoted_value: the indexes of the words that open with a quote, and of those whose
-    assignment's value does. (The last five: see _ps_statement_tail.) expanding: the
+    assignment's value does. (The last five: see _ps_statement_tail.) ps_qbracket: the
+    indexes of the words that held a `[` or `]` inside quotes, or None when the words
+    were read quote-blind or the segment was made without them (see
+    _ps_index_target), in ascending order. ps_quote_covered: a quote-blind segment of a
+    line the strict pass tokenized whole on one physical line (see _ps_index_target).
+    ps_unread: a statement tail the walk refused (see _ps_statement_tails). expanding: the
     indexes of the words that hold a `$` the shell expands (see expanding on _Words), or
     a `$` at all when the words were read quote-blind; a PowerShell script in such a word
     is not the text pwsh gets: its segments are marked ps_outer, and a $ word in them is
@@ -2499,6 +2674,9 @@ class _Seg(list):
     ps_call = False
     ps_foreach = False
     ps_quoted = ps_quoted_value = frozenset()
+    ps_qbracket = None
+    ps_unread = False
+    ps_quote_covered = False
     expanding = frozenset()
     ps_outer = False
 
@@ -2571,6 +2749,7 @@ def _seg_suffix(seg, i, first):
     out.__dict__.update(vars(seg))
     out.redirs = list(getattr(seg, "redirs", ()))
     out.expanding = _suffix_expanding(seg, out)
+    out.ps_qbracket = _suffix_qbracket(seg, out)
     out.empties = tuple(e - i for e in getattr(seg, "empties", ()) if e > i)
     return out
 
@@ -2721,11 +2900,13 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
     exp = set()                            # see expanding on _Seg
     empties = []                           # see empties on _Seg
     expanding = getattr(words, "expanding", None)   # None: quote-blind words
+    qbracket = getattr(words, "qbracket", None)     # see ps_qbracket on _Seg
+    qb = set()
     latch = _Latch() if latch is None else latch
 
     def close(next_piped, fed=False, op=None, glued_op=False, real_op=False):
         nonlocal cur, redirs, herestr, piped, pending, call_next, arg_next, foreach_next
-        nonlocal quoted, quoted_value, exp, here_exp, heredoc_here, empties
+        nonlocal quoted, quoted_value, exp, here_exp, heredoc_here, empties, qb
         toks = cur + [w for target in herestr for w in ("-c", target)]
         # Each word's value: `$x=.` and `$x=sudo` hold a `.` and a `sudo`.
         values = [w.rsplit("=", 1)[-1] for w in cur]
@@ -2757,6 +2938,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             seg.ps_call = held or held_arg or bool(latch) or method
             seg.ps_foreach = foreach_next
             seg.ps_quoted, seg.ps_quoted_value = frozenset(quoted), frozenset(quoted_value)
+            seg.ps_qbracket = None if qbracket is None else tuple(sorted(qb))
             seg.empties = tuple(empties)
             # A here-string target follows its `-c` at the end of toks (see above).
             seg.expanding = frozenset(exp) | {len(cur) + 2 * j + 1
@@ -2787,6 +2969,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
         cur, redirs, herestr, pending = [], [], [], None
         here_exp, heredoc_here = [], False
         quoted, quoted_value = set(), set()
+        qb = set()
         exp = set()
         empties = []
 
@@ -2812,6 +2995,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
                             quoted.discard(len(cur))
                             exp.discard(len(cur))
                             quoted_value.discard(len(cur))
+                            qb.discard(len(cur))
                         pending = op
                     elif op == "(" and prev_op == "<":
                         close(False, fed=True)     # <(...): its output feeds this command
@@ -2846,6 +3030,8 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
                 quoted.add(len(cur))
             elif isinstance(word, _QuotedValueWord):
                 quoted_value.add(len(cur))
+            if qbracket is not None and k in qbracket:
+                qb.add(len(cur))
             if (k in expanding) if expanding is not None else ("$" in piece):
                 exp.add(len(cur))
             cur.append(piece)
@@ -3494,7 +3680,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
               piped: bool = False, lenient_on_error: bool = False,
               windows_paths: bool = True, ps_script: bool = False,
               ps_tool: bool = False, outer_expanded: bool = False,
-              heredoc: bool = False, cmd_script: bool = False, scan: bool = True):
+              heredoc: bool = False, cmd_script: bool = False, scan: bool = True,
+              ps_decoded: bool = False):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -3511,14 +3698,16 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     marked so, and also judged with cmd's command prefixes read away (see
     _cmd_prefix_variants). scan: bash text is also read as bash reads its command
     substitutions and comments (see _bash_substitutions); False for a reading that came
-    from one.
+    from one. ps_decoded: raw is a PowerShell payload with its escapes decoded (see
+    _powershell_segments): a line break an escape made is no statement's end, so its
+    quote-blind segments are ps_quote_covered (the raw text's own reading has its own).
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
                   lenient_on_error=lenient_on_error, windows_paths=windows_paths,
                   ps_script=ps_script, ps_tool=ps_tool, outer_expanded=outer_expanded,
-                  heredoc=heredoc, cmd_script=cmd_script, scan=scan)
+                  heredoc=heredoc, cmd_script=cmd_script, scan=scan, ps_decoded=ps_decoded)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
@@ -3551,6 +3740,11 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
         if words is None or len(physical) > 1 or words.subst:
+            # Only for a substitution on one line the strict pass read whole are these
+            # words also in a segment with a record of quoted brackets (see
+            # ps_quote_covered on _Seg), and in a reading with PowerShell's escapes
+            # decoded (ps_decoded), whose raw text is read too.
+            covered = ps_decoded or (words is not None and len(physical) == 1)
             # Physical lines, plus every continuation chain regardless of quote
             # state: a desync that leaves the scanner inside a quote also stops it
             # joining `git push \` + newline + `--force`, which bash still joins.
@@ -3561,6 +3755,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                     segs = list(_words_to_segments(words, latch=line_latch))
                     for toks in segs:
                         toks.ps_tool, toks.cmd_script = ps_tool, cmd_script
+                        toks.ps_quote_covered = covered
                     # Quote-blind words split a cmd runner's script at its & | && || as
                     # if they were the shell's: when the line holds a cmd runner (or Git
                     # Bash's start), each of its segments may be one of that script's
@@ -4242,7 +4437,7 @@ def _powershell_segments(raw: str):
         for reading in dict.fromkeys(readings):
             if reading != text:
                 segments += _segments(reading, shell="powershell", ps_slashes=False,
-                                      lenient_on_error=True, ps_tool=True)
+                                      lenient_on_error=True, ps_tool=True, ps_decoded=True)
     return segments
 
 
@@ -4288,7 +4483,8 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
                tuple(getattr(toks, "redirs", ())), getattr(toks, "ps_script", False),
                getattr(toks, "ps_tool", False), getattr(toks, "ps_call", False),
                getattr(toks, "ps_foreach", False), getattr(toks, "xargs_fed", False),
-               getattr(toks, "ps_outer", False), getattr(toks, "cmd_script", False))
+               getattr(toks, "ps_outer", False), getattr(toks, "cmd_script", False),
+               getattr(toks, "ps_unread", False))
         if key not in seen:
             seen.add(key)
             unique.append(toks)
