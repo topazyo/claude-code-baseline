@@ -117,6 +117,7 @@ line starts with one is blocked the same way.
 """
 from __future__ import annotations
 
+import bisect
 import functools
 import json
 import os
@@ -1137,7 +1138,7 @@ def _ps_statement_walk(toks, script):
         # Not past a word an outer shell expanded (see ext). The text read is no word of
         # the payload: whether one opens with a quote says nothing of it (value_of_glue
         # None).
-        lead = _PS_TYPE_WORD_RE.match(word).end() if word[:1] in "[]" else 0
+        lead = _PS_TYPE_WORD_RE.match(word).end() if word[:1] and word[:1] in "[]" else 0
         indexed = (_ps_index_target(toks, i, word[lead:]) if (walked or i != start or script)
                    and word[lead:lead + 1] == "$" else None)
         if indexed:
@@ -1470,17 +1471,30 @@ def _ps_index_target(toks, i, word):
     (ps_quote_covered on _Seg): the strict segment holds the same words with their
     record, and is read or refused there. There is no cap on the words joined: a read
     moves the walk past them and a refusal ends it, so each word is scanned once and
-    this stays linear."""
+    this stays linear.
+
+    Also refused: a word that ends in a member's `.` (`$b. c=cmd`, `$b[ 0]. c=cmd`:
+    PowerShell reads the name after the space), and steps _PS_VAR reads whole that may
+    hold a quoted bracket (`$h["x]" ]=cmd`: toks[i] held one, or there is no record of
+    that outside a covered segment), whose index may go on past the word."""
     m = _PS_VAR_RE.match(word)
-    stop = word[m.end():m.end() + 1] if m else ""
-    if not (stop in ("[", "]") or stop == "." and _PS_MEMBER_RE.match(word, m.end())):
+    if not m:
         return None
+    stop = word[m.end():m.end() + 1]
     qb = getattr(toks, "ps_qbracket", None)
-    if qb is None and getattr(toks, "ps_quote_covered", False):
+    covered = qb is None and getattr(toks, "ps_quote_covered", False)
+    name = _PS_VAR_NAME_RE.match(word).end()
+    if word[m.end():] == ".":
+        raise _PsUnreadTarget(i, word)
+    if not (stop in ("[", "]") or stop == "." and _PS_MEMBER_RE.match(word, m.end())):
+        if "[" in word[name:m.end()] and not covered and (
+                qb is None or _ps_qbracket_holds(qb, i)):
+            raise _PsUnreadTarget(i, word)
+        return None
+    if covered:
         return None
     if qb is None or (qb and qb[-1] >= i):
         raise _PsUnreadTarget(i, word)
-    name = _PS_VAR_NAME_RE.match(word).end()
     joined, j, n, depth = word, i, name, 0
     while True:
         size = len(joined)
@@ -1500,13 +1514,19 @@ def _ps_index_target(toks, i, word):
             n += 1
         if not depth:
             rest = joined[n:]
-            if _PS_STEP_JUNK_RE.match(rest):
+            if _PS_STEP_JUNK_RE.match(rest) or rest == ".":
                 raise _PsUnreadTarget(i, word)
             return j, word[:name] + rest
         if j + 1 >= len(toks) or _PS_ASSIGN_LEAD_RE.match(toks[j + 1]):
             raise _PsUnreadTarget(i, word)
         j += 1
         joined += toks[j]
+
+
+def _ps_qbracket_holds(qb, i):
+    """Whether the ps_qbracket indexes qb (ascending, see _Seg) hold i."""
+    k = bisect.bisect_left(qb, i)
+    return k < len(qb) and qb[k] == i
 
 
 def _ps_list_item(toks, s, head=None):
@@ -1530,7 +1550,8 @@ def _ps_list_item(toks, s, head=None):
         # `$a, $b[ 0]=cmd`, `$a, [int]$b[ 0], $c=cmd`: steps _PS_VAR cannot read in one
         # word (see _ps_index_target), read as the item's name and what follows its steps
         # (a type glued before it goes).
-        lead = _PS_TYPE_WORD_RE.match(kword).end() if kword[:1] in "[]" else 0
+        lead = (_PS_TYPE_WORD_RE.match(kword).end()
+                if kword[:1] and kword[:1] in "[]" else 0)
         indexed = (_ps_index_target(toks, k, kword[lead:])
                    if kword[lead:lead + 1] == "$" else None)
         if indexed:
@@ -3676,6 +3697,31 @@ def _ps_subexpressions(text: str, reading: str = "strict"):
     return bodies
 
 
+def _ps_strict_prefixes(strict):
+    """Every prefix of the strict segments of a logical line, keyed by (its length, a hash
+    of its words, built word by word), each with a segment and the length it is a prefix
+    of: built in one pass over the words, so linear (see _ps_strict_prefix)."""
+    out = {}
+    for seg in strict:
+        h = 0
+        for n, word in enumerate(seg, 1):
+            h = hash((h, word))
+            out.setdefault((n, h), (seg, n))
+    return out
+
+
+def _ps_strict_prefix(prefixes, toks):
+    """Whether the words of toks begin a strict segment (see _ps_strict_prefixes): looked up
+    by length and hash, then compared word for word (one comparison per segment)."""
+    if not prefixes or not toks:
+        return False
+    h = 0
+    for word in toks:
+        h = hash((h, word))
+    found = prefixes.get((len(toks), h))
+    return found is not None and list(found[0][:found[1]]) == list(toks)
+
+
 def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool = True,
               piped: bool = False, lenient_on_error: bool = False,
               windows_paths: bool = True, ps_script: bool = False,
@@ -3731,8 +3777,10 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             if not lenient_on_error:
                 raise                    # unbalanced quoting -> caller blocks
             words = None                 # judged piecewise only, below
+        strict = ()
         if words is not None:
-            segments.extend(_words_to_segments(words, split_words=False, latch=latch))
+            strict = list(_words_to_segments(words, split_words=False, latch=latch))
+            segments.extend(strict)
         # The piecewise pass: for a multi-line logical line, and for any line with a
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
@@ -3742,8 +3790,12 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # segment with a record of quoted brackets (see ps_quote_covered on _Seg). A
             # line the strict pass could not tokenize, or one over several physical
             # lines, is read here alone (a quote the strict pass took for a string's may
-            # be a comment's, or an escaped one: `"a`" b"`).
+            # be a comment's, or an escaped one: `"a`" b"`), but for a segment whose
+            # words begin a strict segment of the line (`"a` LF `b"; return $x[0]`,
+            # `$y = $x[0] -join "` LF `"`): that one holds them, at the same places,
+            # with their record (see _ps_strict_prefixes).
             covered = words is not None and len(physical) == 1
+            prefixes = _ps_strict_prefixes(strict) if not covered else {}
             # Physical lines, plus every continuation chain regardless of quote
             # state: a desync that leaves the scanner inside a quote also stops it
             # joining `git push \` + newline + `--force`, which bash still joins.
@@ -3754,7 +3806,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                     segs = list(_words_to_segments(words, latch=line_latch))
                     for toks in segs:
                         toks.ps_tool, toks.cmd_script = ps_tool, cmd_script
-                        toks.ps_quote_covered = covered
+                        toks.ps_quote_covered = covered or _ps_strict_prefix(prefixes, toks)
                     # Quote-blind words split a cmd runner's script at its & | && || as
                     # if they were the shell's: when the line holds a cmd runner (or Git
                     # Bash's start), each of its segments may be one of that script's
