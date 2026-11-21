@@ -37,7 +37,7 @@ FP_FLOOR = 1325
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4386
+BLOCK_FLOOR = 4389
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -9466,24 +9466,36 @@ _QB_FP_COST8BC = [
     ("dot-sourced pwsh three deep, past the depth limit", _DEEP8BC,
      "pwsh -c '. pwsh -c ''. pwsh -c ''''git status'''''''"),
 ]
-# Blocked on main too (by other readings or a refusal), pinned so no later reading loses them:
-# a $ word after a runner in a shell -c script, a --% line or an operator-glued comment before a
-# carrier, an assignment before a nested runner. (shell, label, text)
+# Blocked on main too, pinned with the reason that holds each, so no later reading loses them:
+# a $ word after a runner in a shell -c script (any spelling of -Command: the payload is read
+# lowercased), a --% line or an operator-glued comment before a carrier (the PowerShell tool
+# refuses those lines as unbalanced), an assignment before a nested runner.
+# (shell, label, reason, text)
+_UNBAL8BC = "unbalanced quoting"
+_EXP8BC = "shell expansion in command position"
 _PIN8BC = [
-    ("powershell", "a $ word after pwsh in a bash -c script", "bash -c 'pwsh -c $CMD'; # it's"),
-    ("bash", "a $ word after pwsh in a bash -c script",
+    ("powershell", "a $ word after pwsh in a bash -c script", _UNBAL8BC,
+     "bash -c 'pwsh -c $CMD'; # it's"),
+    ("bash", "a $ word after pwsh in a bash -c script", _EXP8BC,
      "pwsh -c 'bash -c '<DQ>'<DQ>'pwsh -c $CMD'<DQ>'<DQ>'; # it'<DQ>'<DQ>'s'"),
-    ("powershell", "a --% line before a carrier",
+    ("bash", "a $ word after pwsh -C in a bash -c script", _EXP8BC,
+     "pwsh -c 'bash -c '<DQ>'<DQ>'pwsh -C $CMD'<DQ>'<DQ>'; # it'<DQ>'<DQ>'s'"),
+    ("bash", "a $ word after pwsh -Command in a bash -c script", _EXP8BC,
+     "pwsh -c 'bash -c '<DQ>'<DQ>'pwsh -Command $CMD'<DQ>'<DQ>'; # it'<DQ>'<DQ>'s'"),
+    ("powershell", "a --% line before a carrier", _UNBAL8BC,
      "cmd /c --% echo it's<LF>Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
-    ("bash", "a --% line before a carrier",
+    ("bash", "a --% line before a carrier", _GP8BC,
      "pwsh -c 'cmd /c --% echo it'<DQ>'<DQ>'s<LF>Invoke-Command { pwsh -c ''& <DQ>gi<BT>u{74}<DQ>"
      " push --force'' }'"),
-    ("powershell", "a comment glued to = before a carrier",
+    ("bash", "a git --% line before a carrier", _GP8BC,
+     "pwsh -c 'git --% log it'<DQ>'<DQ>'s<LF>Invoke-Command { pwsh -c ''& <DQ>gi<BT>u{74}<DQ>"
+     " push --force'' }'"),
+    ("powershell", "a comment glued to = before a carrier", _UNBAL8BC,
      "$a=# it's<LF>Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
-    ("bash", "a comment glued to = before a carrier",
+    ("bash", "a comment glued to = before a carrier", _GP8BC,
      "pwsh -c '$a=# it'<DQ>'<DQ>'s<LF>Invoke-Command { pwsh -c ''& <DQ>gi<BT>u{74}<DQ> push"
      " --force'' }'"),
-    ("bash", "an assignment before a nested pwsh",
+    ("bash", "an assignment before a nested pwsh", _GP8BC,
      "pwsh -c <DQ>pwsh -c '<BS>$x = pwsh -c ''git push --force''' # it's<DQ>"),
 ]
 _BR_BLOCK8BC = [
@@ -9529,10 +9541,11 @@ PS_CASES += [
 ] + [
     (f"nested runners fp: {label}", _t8bc(p), A, ()) for label, p in _BR_ALLOW8BC
 ]
-PS_CASES += [(f"nested runners pin: {label}", _t8bc(t), B, ()) for sh, label, t in _PIN8BC
+PS_CASES += [(f"nested runners pin: {label}", _t8bc(t), B, ()) for sh, label, _r, t in _PIN8BC
              if sh == "powershell"]
-CASES += [(f"nested runners pin: {label}", _t8bc(t), B, ()) for sh, label, t in _PIN8BC
+CASES += [(f"nested runners pin: {label}", _t8bc(t), B, ()) for sh, label, _r, t in _PIN8BC
           if sh == "bash"]
+MUST_BLOCK += [(f"nested runners pin: {label}", _t8bc(t), sh, (), r) for sh, label, r, t in _PIN8BC]
 CASES += [
     (f"nested runners: quote-blind {label}", _qb8bc(s), B, ()) for label, _r, s in _QB_BLOCK8BC
 ] + [
@@ -9612,7 +9625,8 @@ STRUCT_CASES += [
     ("nested runners: a line of many runner starts is refused at the runner budget",
      lambda: [any("too long to inspect" in r for r in m.evaluate(_qb8bc(t), shell="bash"))
               for t in ("wsl bash -c pwsh -c " * 190 + "dir",
-                        "cmd /c b^ash " + "-c x, " * 560 + "dir")], [True, True]),
+                        "cmd /c b^ash " + "-c x, " * 560 + "dir",
+                        "sh -c " + "cmd -c " * 520 + "dir")], [True, True, True]),
 ]
 
 
