@@ -37,7 +37,7 @@ FP_FLOOR = 1312
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4315
+BLOCK_FLOOR = 4317
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -9134,6 +9134,9 @@ _RUNNER_BLOCK8AX = [
     # Text PowerShell expands to nothing between the two (measured: cmd gets `<BS>/s/q`).
     ("<BS>$null/s/q, PowerShell", "powershell", _RD8AX, "cmd /c rd <BS>$null/s/q"),
     ("an ANSI-C <BS>x5c, then /s", "bash", _RD8AX, "cmd //c rd //s //q build; echo $'<BS>x5c'/s"),
+    # Both the backslash and the slash spelled as ANSI-C escapes: no `<BS>` and `/` in the raw text.
+    ("an ANSI-C <BS>x5c<BS>x2f before s", "bash", _RD8AX, "cmd //c rd /q $'<BS>x5c<BS>x2fs'"),
+    ("an ANSI-C octal <BS>134<BS>57 before s", "bash", _RD8AX, "cmd //c rd /q $'<BS>134<BS>57s'"),
     ("an unset delayed variable between <BS> and /s", "bash", _RD8AX, "cmd //v:on //c 'rd <BS>!X!/s/q'"),
     ("the same, /s alone", "bash", _RD8AX, "cmd //v:on //c 'rd /q <BS>!X!/s'"),
     ("Git Bash's $USERPROFILE in the script", "bash", _RD8AX, 'cmd //c "rd /s /q $USERPROFILE"'),
