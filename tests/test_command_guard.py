@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1129
+FP_FLOOR = 1312
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 3855
+BLOCK_FLOOR = 4315
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 43
+REASON_FLOOR = 45
 
 
 def _str_value(node):
@@ -8920,6 +8920,468 @@ STRUCT_CASES += [
      lambda: _ratio8ah("powershell", "", "iex 'Get-Date'; ") < 3.0, True),
     ("timing: dense InvokeScript calls scale linearly (4 KB vs 2 KB, PowerShell)",
      lambda: _ratio8ah("powershell", "", "$e.InvokeScript('x'); ") < 3.0, True),
+]
+
+# Follow-up 8ax: cmd's own recursive deletes, rd/rmdir /s and del/erase /s, of a root, the
+# home or the current directory, read as cmd reads them: the name ends at a non-letter, a `/`
+# anywhere in a word opens a switch (only when every piece after it is a valid one), carets
+# and the delimiters , ; = are read away, and cmd's variables are read as the roots they
+# name. Each row is a cmd script: in a PowerShell `cmd /c '...'`, a Bash `cmd //c '...'`, and,
+# where PowerShell passes it to cmd as written, the PowerShell tool's bare `cmd /c ...`.
+# `<BS>` is a backslash, `<IDSP>` U+3000, `<NB>` U+00A0.
+_RD8AX = "(cmd rd /s)"
+_DEL8AX = "(cmd del /s)"
+
+
+def _t8ax(text):
+    return (text.replace("<BS>", chr(92)).replace("<IDSP>", chr(0x3000))
+            .replace("<NB>", chr(0xA0)))
+
+
+def _forms8ax(text):
+    """(suffix, payload, shell) for each form a cmd script row is judged in."""
+    t = _t8ax(text)
+    out = [(" (cmd /c '', PowerShell)", "cmd /c '" + t.replace("'", "''") + "'", "powershell"),
+           (" (cmd //c '', bash)", "cmd //c '" + t.replace("'", "'" + '"' + "'" + '"' + "'") + "'",
+            "bash")]
+    if not any(c in t for c in ",;&@()$|<>" + '"'):
+        out.append((" (cmd /c, PowerShell)", "cmd /c " + t, "powershell"))
+    return out
+
+
+_BLOCK8AX = [
+    # Targets: cmd's variables (a modifier can cut the home to its drive's root), drive roots,
+    # the current directory, long paths, an admin share.
+    ("the home", _RD8AX, "rd /s /q %USERPROFILE%"),
+    ("the home, a trailing <BS>", _RD8AX, "rd /s /q %userprofile%<BS>"),
+    ("the home, a substring modifier", _RD8AX, "rd /s /q %USERPROFILE:~0%"),
+    ("the home cut to its drive's root", _RD8AX, "rd /s /q %USERPROFILE:~0,3%"),
+    ("the home, a substitution modifier", _RD8AX, "rd /s /q %USERPROFILE:a=b%"),
+    ("HOMEDRIVE and HOMEPATH", _RD8AX, "rd /s /q %HOMEDRIVE%%HOMEPATH%"),
+    ("SystemDrive and HOMEPATH", _RD8AX, "rd /s /q %SystemDrive%%HOMEPATH%"),
+    ("HOMEPATH", _RD8AX, "rd /s /q %HOMEPATH%"),
+    ("HOME", _RD8AX, "rd /s /q %HOME%"),
+    ("the system drive's root", _RD8AX, "rd /s /q %SystemDrive%<BS>"),
+    ("the system drive", _RD8AX, "rd /s /q %SystemDrive%"),
+    ("HOMEDRIVE", _RD8AX, "rd /s /q %HOMEDRIVE%"),
+    ("CD", _RD8AX, "rd /s /q %CD%"),
+    ("__CD__", _RD8AX, "rd /s /q %__CD__%"),
+    ("a drive's root", _RD8AX, "rd /s /q C:<BS>"),
+    ("a drive", _RD8AX, "rd /s /q C:"),
+    ("another drive's root", _RD8AX, "rd /s /q D:<BS>"),
+    ("the current drive's root", _RD8AX, "rd /s /q <BS>"),
+    ("the current directory", _RD8AX, "rd /s /q ."),
+    ("the parent", _RD8AX, "rd /s /q .."),
+    ("the grandparent", _RD8AX, "rd /s /q ..<BS>.."),
+    ("a long-path root", _RD8AX, "rd /s /q <BS><BS>?<BS>C:<BS>"),
+    ("a device-path root", _RD8AX, "rd /s /q <BS><BS>.<BS>C:<BS>"),
+    ("an admin share", _RD8AX, "rd /s /q <BS><BS>localhost<BS>c$"),
+    ("one of two targets", _RD8AX, "rd /s /q build %USERPROFILE%"),
+    ("rmdir", _RD8AX, "rmdir /s /q %USERPROFILE%"),
+    ("upper case", _RD8AX, "RD /S /Q %USERPROFILE%"),
+    # Switch spellings: glued, after the target, glued to it, no /q (a piped y answers).
+    ("switches glued to the name", _RD8AX, "rd/s/q %USERPROFILE%"),
+    ("glued switches", _RD8AX, "rd /s/q %USERPROFILE%"),
+    ("/q/s", _RD8AX, "rd /q/s %USERPROFILE%"),
+    ("switches after the target", _RD8AX, "rd %USERPROFILE% /s /q"),
+    ("/s glued to the target", _RD8AX, "rd /q %USERPROFILE%/s"),
+    ("/s/q glued to the target", _RD8AX, "rd %USERPROFILE%/s/q"),
+    ("/s glued to a root's <BS>", _RD8AX, "rd /q C:<BS>/s"),
+    ("/s glued after a path of <BS>s", _RD8AX, "rd /q ..<BS>../s"),
+    ("/s glued to a long-path root", _RD8AX, "rd /q <BS><BS>?<BS>C:<BS>/s"),
+    ("no /q", _RD8AX, "rd /s %USERPROFILE%"),
+    ("comma-joined switches, a modifier holding a comma", _RD8AX, "rd /s,/q %USERPROFILE:~0,3%"),
+    ("the same, switches last", _RD8AX, "rd %USERPROFILE:~0,3% /s,/q"),
+    # A `<BS>` right before the switches: the current drive's root (segments read `//s`).
+    ("the current drive's root glued to /s", _RD8AX, "rd /q <BS>/s"),
+    ("the current drive's root glued to /s/q", _RD8AX, "rd <BS>/s/q"),
+    ("a second target: the root glued to /s", _RD8AX, "rd /q build <BS>/s"),
+    # Windows resolves `..` as text, whatever the name before it holds.
+    ("a $ name, then ..", _RD8AX, "rd /s /q C:<BS>$x<BS>.."),
+    ("a $ name in the home, then ..", _RD8AX, "rd /s /q %USERPROFILE%<BS>$x<BS>.."),
+    ("a $ name here, then ..", _RD8AX, "rd /s /q .<BS>$x<BS>.."),
+    ("a ~ name, then ..", _RD8AX, "rd /s /q C:<BS>~x<BS>.."),
+    ("an unset variable's name, then ..", _RD8AX, "rd /s /q C:<BS>%nope%<BS>.."),
+    # More spellings of the home, the root and the current directory.
+    ("a drive, then HOMEPATH", _RD8AX, "rd /s /q C:%HOMEPATH%"),
+    ("a variable cut to its drive's root", _RD8AX, "rd /s /q %TEMP:~0,3%"),
+    ("a variable rewritten to the home", _RD8AX, "rd /s /q %APPDATA:<BS>AppData<BS>Roaming=%"),
+    ("the profile folder of USERNAME", _RD8AX, "rd /s /q C:<BS>Users<BS>%USERNAME%"),
+    ("the same on the system drive", _RD8AX, "rd /s /q %SystemDrive%<BS>Users<BS>%USERNAME%"),
+    ("the same on the current drive", _RD8AX, "rd /s /q <BS>Users<BS>%USERNAME%"),
+    ("the drive's current directory", _RD8AX, "rd /s /q %=C:%"),
+    ("the home, a trailing dot", _RD8AX, "rd /s /q %USERPROFILE%."),
+    ("a drive, a trailing dot", _RD8AX, "rd /s /q C:."),
+    ("CD, a trailing dot", _RD8AX, "rd /s /q %CD%."),
+    # Redirections, Unicode spaces, a piped answer, a loop's literal target.
+    ("a redirection glued to the name", _RD8AX, "rd>nul /s /q C:<BS>"),
+    ("a redirection first", _RD8AX, ">nul rd /s /q C:<BS>"),
+    ("U+3000 between the words", _RD8AX, "rd<IDSP>/s<IDSP>/q<IDSP>C:<BS>"),
+    ("U+00A0 after the name", _RD8AX, "rd<NB>/s /q C:<BS>"),
+    ("a piped y answers the prompt", _RD8AX, "echo y| rd /s C:<BS>"),
+    ("a literal target in a loop's body", _RD8AX, "for %i in (1) do rd /s /q C:<BS>"),
+    ("the name ended by a colon", _RD8AX, "rd: /s /q C:<BS>"),
+    # A modified variable anywhere in the word: its value may be any part of a path.
+    ("a variable cut to a drive letter, then :<BS>", _RD8AX, "rd /s /q %TEMP:~0,1%:<BS>"),
+    ("a drive, then a variable cut to a <BS>", _RD8AX, "rd /s /q C:%TEMP:~2,1%"),
+    ("SystemDrive, then a variable cut to a <BS>", _RD8AX, "rd /s /q %SystemDrive%%TEMP:~2,1%"),
+    ("delayed: a variable cut to a drive letter", _RD8AX, "rd /s /q !TEMP:~0,1!:<BS>"),
+    ("delayed: a drive, then a variable cut to a <BS>", _RD8AX, "rd /s /q C:!TEMP:~2,1!"),
+    ("cut <BS>s around .., then /s", _RD8AX, "rd /q x%SystemRoot:~2,1%..%SystemRoot:~2,1%/s"),
+    # A name holding `:` before `..` (measured: `t<BS>x:<BS>..` is t).
+    ("a drive-shaped name, then ..", _RD8AX, "rd /s /q C:<BS>x:<BS>.."),
+    ("a name holding a colon, then ..", _RD8AX, "rd /s /q C:<BS>x:y<BS>.."),
+    ("a quoted root, then /s (cmd drops the quotes)", _RD8AX, 'rd /q "C:<BS>"/s'),
+    # Two cut variables: any modified variable other than the known ones is refused.
+    ("an emptied variable before the home", _RD8AX, "rd /s /q %CD:~0,0%%USERPROFILE%"),
+    ("an emptied variable after the home", _RD8AX, "rd /s /q %USERPROFILE%%X:~0,0%"),
+    ("an emptied variable before a root", _RD8AX, "rd /s /q %PATH:~0,0%C:<BS>"),
+    # A known variable cut too: refused like any modified variable.
+    ("HOMEDRIVE cut to its letter, then :<BS>", _RD8AX, "rd /s /q %HOMEDRIVE:~0,1%:<BS>"),
+    ("SystemDrive cut to its letter, then :<BS>", _RD8AX, "rd /s /q %SystemDrive:~0,1%:<BS>"),
+    ("delayed: HOMEDRIVE cut to its letter", _RD8AX, "rd /s /q !HOMEDRIVE:~0,1!:<BS>"),
+    ("__CD__ cut to its letter, then :<BS>", _RD8AX, "rd /s /q %__CD__:~0,1%:<BS>"),
+    ("the drive's hidden current directory, cut", _RD8AX, "rd /s /q %=C::~0,1%:<BS>"),
+    ("delayed: the hidden current directory, cut", _RD8AX, "rd /s /q !=C::~0,1!:<BS>"),
+    ("a drive, then the hidden current directory cut to a <BS>", _RD8AX, "rd /s /q C:%=C::~2,1%"),
+    # An admin share leading the word is its drive, also before a variable.
+    ("an admin share, then HOMEPATH", _RD8AX, "rd /s /q <BS><BS>localhost<BS>c$%HOMEPATH%"),
+    ("an admin share, then USERNAME's profile", _RD8AX,
+     "rd /s /q <BS><BS>127.0.0.1<BS>c$<BS>Users<BS>%USERNAME%"),
+    ("a long-path UNC admin share, then HOMEPATH", _RD8AX,
+     "rd /s /q <BS><BS>?<BS>UNC<BS>localhost<BS>c$%HOMEPATH%"),
+    # A long-path or device prefix before a variable (measured: `<BS><BS>?<BS>%CD%<BS>t` deletes t).
+    ("a long-path prefix before the home", _RD8AX, "rd /s /q <BS><BS>?<BS>%USERPROFILE%"),
+    ("a long-path prefix before CD", _RD8AX, "rd /s /q <BS><BS>?<BS>%CD%"),
+    ("a device prefix before SystemDrive", _RD8AX, "rd /s /q <BS><BS>.<BS>%SystemDrive%<BS>"),
+    ("a long-path prefix before HOMEDRIVE and HOMEPATH", _RD8AX,
+     "rd /s /q <BS><BS>?<BS>%HOMEDRIVE%%HOMEPATH%"),
+    # A drive with no <BS> after it: that drive's current directory (measured: `C:*`, `C:.<BS>*`).
+    ("a drive's current directory, a trailing dot", _RD8AX, "rd /s /q C:."),
+    ("a ( glued to the name", _RD8AX, "rd( /s /q C:<BS>"),
+    ("a ( glued to the name and the switch", _RD8AX, "rd(/s /q C:<BS>"),
+    # Name spellings and cmd's prefixes.
+    ("a caret in the name", _RD8AX, "r^d /s /q C:<BS>"),
+    ("a caret after the name", _RD8AX, "rd^ /s /q C:<BS>"),
+    ("a caret in the switch", _RD8AX, "rd /^s /q C:<BS>"),
+    ("commas", _RD8AX, "rd,/s,/q,C:<BS>"),
+    ("a semicolon", _RD8AX, "rd;/s /q C:<BS>"),
+    ("an equals sign", _RD8AX, "rd=/s /q C:<BS>"),
+    ("the name ended by a dot", _RD8AX, "rd. /s /q"),
+    ("the name ended by .<BS>", _RD8AX, "rd.<BS> /s /q"),
+    ("the name ended by <BS>", _RD8AX, "rd<BS> /s /q"),
+    ("@", _RD8AX, "@rd /s /q C:<BS>"),
+    ("call", _RD8AX, "call rd /s /q C:<BS>"),
+    ("start /b", _RD8AX, "start /b rd /s /q C:<BS>"),
+    ("if exist", _RD8AX, "if exist C:<BS> rd /s /q C:<BS>"),
+    ("after &", _RD8AX, "echo hi & rd /s /q C:<BS>"),
+    ("after &&", _RD8AX, "echo hi && rd /s /q %CD%"),
+    # del and erase: a directory or an all-files pattern.
+    ("del, a drive's files", _DEL8AX, "del /s /q C:<BS>*"),
+    ("del, *.*", _DEL8AX, "del /s /q C:<BS>*.*"),
+    ("del, a drive's root", _DEL8AX, "del /s /q C:<BS>"),
+    ("del, the home", _DEL8AX, "del /s /q %USERPROFILE%"),
+    ("del, the home's files", _DEL8AX, "del /s /q %USERPROFILE%<BS>*"),
+    ("del /f", _DEL8AX, "del /f /s /q C:<BS>*"),
+    ("del without /q", _DEL8AX, "del /s C:<BS>*"),
+    ("del, switches glued to the name", _DEL8AX, "del/s/q C:<BS>*"),
+    ("del, upper case", _DEL8AX, "del /S /Q C:<BS>*"),
+    ("del, switches last", _DEL8AX, "del C:<BS>* /s /q"),
+    ("erase", _DEL8AX, "erase /s /q C:<BS>*"),
+    ("del, every file here", _DEL8AX, "del /s /q *"),
+    ("del, *.* here", _DEL8AX, "del /s /q *.*"),
+    ("del, the current directory", _DEL8AX, "del /s /q ."),
+    ("del /p", _DEL8AX, "del /p /s C:<BS>*"),
+    ("del with an attribute switch", _DEL8AX, "del /a:h /s /q C:<BS>*"),
+    ("del with a glued attribute switch", _DEL8AX, "del /ah /s /q C:<BS>*"),
+    ("del, the current drive's files", _DEL8AX, "del /s /q <BS>*"),
+    ("del, the current drive's *.*", _DEL8AX, "del /s /q <BS>*.*"),
+    ("del, ?*", _DEL8AX, "del /s /q C:<BS>?*"),
+    ("del, comma-joined switches", _DEL8AX, "del /q,/s C:<BS>*"),
+    ("del, /s glued to the target", _DEL8AX, "del /q C:<BS>*/s"),
+    ("del, __CD__ and *", _DEL8AX, "del /s /q %__CD__%*"),
+    ("del, the current drive's root glued to /s/q", _DEL8AX, "del <BS>/s/q"),
+    ("del, a $ name, then ..", _DEL8AX, "del /s /q C:<BS>$x<BS>..<BS>*"),
+    # Every all-files pattern (measured: each deletes every file).
+    ("del, ?*.*", _DEL8AX, "del /s /q ?*.*"),
+    ("del, a drive's ?*.*", _DEL8AX, "del /s /q C:<BS>?*.*"),
+    ("del, *.*.*", _DEL8AX, "del /s /q *.*.*"),
+    ("del, *.?*", _DEL8AX, "del /s /q *.?*"),
+    ("del, ????????.???", _DEL8AX, "del /s /q ????????.???"),
+    ("del, the home's ????????.???", _DEL8AX, "del /s /q %USERPROFILE%<BS>????????.???"),
+    ("del, **", _DEL8AX, "del /s /q **"),
+    ("del, *?", _DEL8AX, "del /s /q *?"),
+    ("del, a variable cut to a drive's root, then *.*", _DEL8AX, "del /s /q %TEMP:~0,3%*.*"),
+    ("del, a drive's current directory", _DEL8AX, "del /s /q C:*"),
+    ("del, a drive's current directory, .<BS>*", _DEL8AX, "del /s /q C:.<BS>*"),
+    ("del, another drive's *.*", _DEL8AX, "del /s /q D:*.*"),
+    ("del, SystemDrive's current directory", _DEL8AX, "del /s /q %SystemDrive%*"),
+    ("del, the home cut to a drive, then *", _DEL8AX, "del /s /q %USERPROFILE:~0,3%*"),
+    ("del, a ( glued to the name", _DEL8AX, "del( /s /q C:<BS>*"),
+]
+# Payloads judged as they are: what bash or PowerShell put in the script before cmd ran it,
+# Git Bash's //s, delayed expansion, and other runners.
+_RUNNER_BLOCK8AX = [
+    ("Git Bash's //s", "bash", _RD8AX, "cmd //c rd //s //q C:<BS><BS>"),
+    ("Git Bash's $USERPROFILE", "bash", _RD8AX, 'cmd //c rd //s //q "$USERPROFILE"'),
+    ("Git Bash's ${USERPROFILE:0:3}", "bash", _RD8AX, 'cmd //c rd //s //q "${USERPROFILE:0:3}"'),
+    # The root glued to /s with quotes between (the shell removes them): `<BS>/s` to cmd.
+    ("<BS> and /s split by bash quotes", "bash", _RD8AX, "cmd //c 'rd <BS>''/s/q'"),
+    ("<BS> and /s split by double quotes", "bash", _RD8AX, 'cmd //c "rd <BS><BS>""/s/q"'),
+    ("<BS> and /s split by mixed quotes", "bash", _RD8AX, "cmd //c 'rd <BS>'" + '"/s/q"'),
+    ("<BS> spelled in an ANSI-C string", "bash", _RD8AX, "cmd //c rd $'<BS><BS>'/s/q"),
+    ("<BS> and /s split by cmd's quotes", "powershell", _RD8AX, "cmd /c 'rd \"<BS>\"/s /q'"),
+    # Text PowerShell expands to nothing between the two (measured: cmd gets `<BS>/s/q`).
+    ("<BS>$null/s/q, PowerShell", "powershell", _RD8AX, "cmd /c rd <BS>$null/s/q"),
+    ("an ANSI-C <BS>x5c, then /s", "bash", _RD8AX, "cmd //c rd //s //q build; echo $'<BS>x5c'/s"),
+    ("an unset delayed variable between <BS> and /s", "bash", _RD8AX, "cmd //v:on //c 'rd <BS>!X!/s/q'"),
+    ("the same, /s alone", "bash", _RD8AX, "cmd //v:on //c 'rd /q <BS>!X!/s'"),
+    ("Git Bash's $USERPROFILE in the script", "bash", _RD8AX, 'cmd //c "rd /s /q $USERPROFILE"'),
+    ("PowerShell's $env:HOMEPATH on a drive", "powershell", _RD8AX, "cmd /c rd /s /q C:$env:HOMEPATH"),
+    ("PowerShell's $env:USERNAME's profile", "powershell", _RD8AX,
+     "cmd /c rd /s /q C:<BS>Users<BS>$env:USERNAME"),
+    ("bash's $HOME", "bash", _RD8AX, 'cmd //c "rd /s /q $HOME"'),
+    ("bash's $HOME, //s", "bash", _RD8AX, 'cmd //c rd //s //q "$HOME"'),
+    ("bash's ~", "bash", _RD8AX, "cmd //c rd //s //q ~"),
+    ("MSYS_NO_PATHCONV", "bash", _RD8AX, "MSYS_NO_PATHCONV=1 cmd /c rd /s /q C:<BS><BS>"),
+    ("cmd.exe, del //s", "bash", _DEL8AX, "cmd.exe //c del //s //q 'C:<BS>*'"),
+    ("delayed expansion", "bash", _RD8AX, "cmd //v:on //c 'rd /s /q !USERPROFILE!'"),
+    ("delayed expansion, a modifier", "bash", _RD8AX, 'cmd //c "rd /s /q !USERPROFILE:~0!"'),
+    ("wsl cmd.exe", "bash", _RD8AX, "wsl cmd.exe /c rd /s /q 'C:<BS>'"),
+    ("a cmd script in a substitution", "bash", _RD8AX, 'echo "$(cmd //c rd //s //q C:<BS><BS>)"'),
+    ("pwsh 7's ~", "powershell", _RD8AX, "cmd /c rd /s /q ~"),
+    ("PowerShell's $HOME", "powershell", _RD8AX, "cmd /c rd /s /q $HOME"),
+    ("PowerShell's $env:USERPROFILE", "powershell", _RD8AX, "cmd /c rd /s /q $env:USERPROFILE"),
+    ("a quoted $env:USERPROFILE", "powershell", _RD8AX,
+     'cmd /c "rd /s /q `"$env:USERPROFILE`""'),
+    ("--%", "powershell", _RD8AX, "cmd --% /c rd /s /q %USERPROFILE%"),
+    ("& cmd", "powershell", _RD8AX, "& cmd /c rd /s /q C:<BS>"),
+    ("cmd.exe, del *.*", "powershell", _DEL8AX, "cmd.exe /c del /s /q C:<BS>*.*"),
+    ("pwsh -c, then cmd", "powershell", _RD8AX, 'pwsh -c "cmd /c rd /s /q C:<BS>"'),
+]
+_ALLOW8AX = [
+    ("a build directory", "rd /s /q build"),
+    (".<BS>build", "rd /s /q .<BS>build"),
+    ("under TEMP", "rd /s /q %TEMP%<BS>x"),
+    ("under the home", "rd /s /q %USERPROFILE%<BS>proj<BS>build"),
+    ("a drive path", "rd /s /q C:<BS>tmp<BS>x"),
+    ("a folder under Users", "rd /s /q C:<BS>Users<BS>me<BS>proj"),
+    ("a last name q after a non-switch name", "rd /s /q C:<BS>Users<BS>me<BS>q"),
+    ("a last name s after a non-switch name", "rd /s /q C:<BS>Users<BS>me<BS>s"),
+    ("an unknown variable", "rd /s /q %X%"),
+    ("under APPDATA", "rd /s /q %APPDATA%<BS>x"),
+    ("a one-letter folder at the root", "rd /s /q <BS>x"),
+    ("comma-joined switches, a build directory", "rd /q,/s node_modules"),
+    ("no /s", "rd C:<BS>x"),
+    ("no /s, /q", "rd /q C:<BS>x"),
+    ("no /s, the home", "rd %USERPROFILE%"),
+    ("del, a pattern under a folder", "del /s /q build<BS>*.obj"),
+    ("del, a pattern under a drive's folder", "del /s /q C:<BS>tmp<BS>*.log"),
+    ("del, a narrower pattern in the home", "del /s /q %USERPROFILE%<BS>*.log"),
+    ("del, a pattern here", "del /s /q *.pyc"),
+    ("del, .<BS>*.pyc", "del /s /q .<BS>*.pyc"),
+    ("del, a pattern in the parent", "del /s /q ..<BS>*.log"),
+    ("del, a folder", "del /s /q build"),
+    ("del, .<BS>build", "del /s /q .<BS>build"),
+    ("del, a folder in the home", "del /s /q %USERPROFILE%<BS>proj"),
+    ("del, a file", "del /s /q foo.txt"),
+    ("del, a name s under a folder", "del /s /q build<BS>s"),
+    ("del without /s", "del /q C:<BS>*"),
+    ("del without /s, the home", "del /q %USERPROFILE%<BS>*"),
+    ("del /as is the attribute", "del /as /q *"),
+    ("del, one file", "del foo.txt"),
+    ("echo", "echo rd /s /q C:<BS>"),
+    ("echo of del", "echo del /s /q C:<BS>*"),
+    ("dir /s", "dir /s C:<BS>"),
+    ("/sq, which cmd refuses", "rd /sq C:<BS>"),
+    ("/s:x, which cmd refuses", "rd /s:x /q C:<BS>"),
+    ("a quote glued to the name, which cmd does not run", 'rd"x" /s /q C:<BS>'),
+    ("a $ name at a root", "rd /s /q C:<BS>$x"),
+    ("a ~ name at a root", "rd /s /q C:<BS>~x"),
+    ("del, a folder whose name starts like /a", "del /s /q .<BS>assets"),
+    ("del, the parent's apps", "del /s /q ..<BS>apps"),
+    ("del, a drive's artifacts", "del /s /q C:<BS>artifacts"),
+    ("a folder in USERNAME's profile", "rd /s /q C:<BS>Users<BS>%USERNAME%<BS>proj"),
+    ("rd1 is no command", "rd1 /s /q C:<BS>"),
+    ("rd_ is no command", "rd_ /s /q C:<BS>"),
+    ("rd- is no command", "rd- /s /q C:<BS>"),
+    ("three trailing dots name another folder", "rd /s /q t..."),
+    ("a drive's folder ending in !", "rd /s /q C:<BS>proj!"),
+    ("a folder on a drive, relative to its current directory", "rd /s /q C:build"),
+    ("del, a pattern on a drive, relative", "del /s /q C:build<BS>*.obj"),
+    ("a folder under SystemDrive", "rd /s /q %SystemDrive%<BS>build"),
+    ("rd) is no command", "rd) /s /q C:<BS>"),
+    ("a colon in a last name", "rd /s /q %TEMP%<BS>x:y"),
+]
+_RUNNER_ALLOW8AX = [
+    ("Git Bash's //s, a build directory", "bash", "cmd //c rd //s //q build"),
+    ("Git Bash, a pattern under a folder", "bash", "cmd //c del //s //q 'build<BS>*.obj'"),
+    ("PowerShell ends the statement at ;", "powershell", "cmd /c rd;/s /q C:<BS>"),
+    # The gate for `<BS>/` reads only escapes that can spell a backslash, not `<BS>n`.
+    ("Git Bash's //s, an ANSI-C newline elsewhere", "bash", "cmd //c rd //s //q build; echo $'done<BS>n'"),
+    ("Git Bash's //s, a quoted path", "bash", 'cmd //c rd //s //q "C:<BS>proj<BS>build"'),
+    ("a long-path prefix on an ordinary folder", "powershell", "cmd /c 'rd /s /q <BS><BS>?<BS>C:<BS>proj<BS>build'"),
+    ("a folder on an admin share", "powershell", "cmd /c 'rd /s /q <BS><BS>localhost<BS>c$<BS>proj'"),
+    ("a share's folder", "powershell", "cmd /c 'rd /s /q <BS><BS>srv<BS>share<BS>x'"),
+]
+# Accepted costs: blocked, though cmd would not delete a root here.
+_FP_COST8AX = [
+    ("a folder named s at a root, read as /s", _RD8AX, "rd /s /q C:<BS>s"),
+    ("a folder named s here, read as /s", _RD8AX, "rd /q .<BS>s"),
+    ('a quoted "/s", which cmd reads as a path', _RD8AX, 'rd "/s" /q C:<BS>'),
+    ("/s beside a switch cmd refuses", _RD8AX, "rd /s/x C:<BS>"),
+    ("*. (extensionless files only)", _DEL8AX, "del /s /q *."),
+    ("a path on a cut variable (any modified variable is refused)", _RD8AX,
+     "rd /s /q %TEMP:~0,3%<BS>proj"),
+    ("a folder named q here, read as /q", _RD8AX, "rd /s /q .<BS>q"),
+    ("del, a folder named all here, read as the attribute switch", _DEL8AX, "del /s /q .<BS>all"),
+]
+# Known limits: a loop's variable, a variable's switches, other system folders, a script
+# file, Start-Process (8z).
+_LIMIT8AX = [
+    ("a for loop's variable", "for /d %i in (*) do rd /s /q %i"),
+    ("switches from a variable", "rd %O% C:<BS>"),
+    ("SystemRoot", "rd /s /q %SystemRoot%"),
+    ("ProgramFiles", "rd /s /q %ProgramFiles%"),
+    ("a batch file", "x.bat"),
+    # A sibling folder named USERNAME is the home only on a default profile layout; a last
+    # `<BS>%USERNAME%` is not read as the home everywhere (`D:<BS>backups<BS>%USERNAME%`).
+    ("the home through a sibling folder", "rd /s /q %PUBLIC%<BS>..<BS>%USERNAME%"),
+]
+# Accepted costs outside cmd: the rule reads every text (no other shell has these commands), so
+# a name like s under a root reads as /s in bash's rmdir and PowerShell's rd/del alias too.
+_RUNNER_FP_COST8AX = [
+    ("bash rmdir of a folder named s here", "bash", _RD8AX, "rmdir ./s"),
+    ("bash rmdir of a folder named s in the home", "bash", _RD8AX, "rmdir ~/s"),
+    ("PowerShell rd of a folder named s here", "powershell", _RD8AX, "rd .<BS>s"),
+    ("PowerShell del of a file named s here", "powershell", _DEL8AX, "del .<BS>s"),
+    # Any `<BS>...` then `/` in one word turns on the `<BS>/s` reading for the whole payload, which
+    # then reads Git Bash's `//s` words as the root and /s.
+    ("Git Bash's //s beside a word mixing <BS> and /", "bash", _RD8AX,
+     "cmd //c rd //s //q build && echo \"C:<BS>proj/x\""),
+    ("Git Bash's //s, a target mixing <BS> and /", "bash", _RD8AX, "cmd //c rd //s //q 'C:<BS>proj/x'"),
+]
+_RUNNER_LIMIT8AX = [
+    ("Start-Process", "powershell", "Start-Process cmd -ArgumentList '/c rd /s /q %USERPROFILE%'"),
+    ("cmd reading a file", "bash", "cmd < x.bat"),
+    ("a computed argument", "powershell", "cmd /c rd ('<BS>'+'/s/q')"),
+    ("a subexpression between <BS> and /s", "powershell", "cmd /c rd <BS>$()/s/q"),
+    ("a subexpression between <BS> and /s, quoted", "powershell", 'cmd /c "rd <BS>$()/s/q"'),
+    ("a backslash the shell computes", "powershell", '$b = [char]92; cmd /c "rd /q $b/s"'),
+]
+PS_CASES += [
+    (f"cmd delete: {_t8ax(label)}{sfx}", t, B, ())
+    for label, _r, cmd in _BLOCK8AX for sfx, t, sh in _forms8ax(cmd) if sh == "powershell"
+] + [
+    (f"cmd delete: {label}", _t8ax(cmd), B, ()) for label, sh, _r, cmd in _RUNNER_BLOCK8AX
+    if sh == "powershell"
+] + [
+    (f"cmd delete fp: {_t8ax(label)}{sfx}", t, A, ())
+    for label, cmd in _ALLOW8AX for sfx, t, sh in _forms8ax(cmd) if sh == "powershell"
+] + [
+    (f"cmd delete fp: {label}", _t8ax(cmd), A, ()) for label, sh, cmd in _RUNNER_ALLOW8AX
+    if sh == "powershell"
+] + [
+    (f"fp cost: cmd delete: {label}{sfx}", t, B, ())
+    for label, _r, cmd in _FP_COST8AX for sfx, t, sh in _forms8ax(cmd) if sh == "powershell"
+] + [
+    (f"known limit: cmd delete: {label}{sfx}", t, A, ())
+    for label, cmd in _LIMIT8AX for sfx, t, sh in _forms8ax(cmd) if sh == "powershell"
+] + [
+    (f"known limit: cmd delete: {label}", _t8ax(cmd), A, ()) for label, sh, cmd in _RUNNER_LIMIT8AX
+    if sh == "powershell"
+] + [
+    (f"fp cost: cmd delete: {label}", _t8ax(cmd), B, ()) for label, sh, _r, cmd in _RUNNER_FP_COST8AX
+    if sh == "powershell"
+]
+CASES += [
+    (f"cmd delete: {_t8ax(label)}{sfx}", t, B, ())
+    for label, _r, cmd in _BLOCK8AX for sfx, t, sh in _forms8ax(cmd) if sh == "bash"
+] + [
+    (f"cmd delete: {label}", _t8ax(cmd), B, ()) for label, sh, _r, cmd in _RUNNER_BLOCK8AX
+    if sh == "bash"
+] + [
+    (f"cmd delete fp: {_t8ax(label)}{sfx}", t, A, ())
+    for label, cmd in _ALLOW8AX for sfx, t, sh in _forms8ax(cmd) if sh == "bash"
+] + [
+    (f"cmd delete fp: {label}", _t8ax(cmd), A, ()) for label, sh, cmd in _RUNNER_ALLOW8AX
+    if sh == "bash"
+] + [
+    (f"fp cost: cmd delete: {label}{sfx}", t, B, ())
+    for label, _r, cmd in _FP_COST8AX for sfx, t, sh in _forms8ax(cmd) if sh == "bash"
+] + [
+    (f"known limit: cmd delete: {label}{sfx}", t, A, ())
+    for label, cmd in _LIMIT8AX for sfx, t, sh in _forms8ax(cmd) if sh == "bash"
+] + [
+    (f"known limit: cmd delete: {label}", _t8ax(cmd), A, ()) for label, sh, cmd in _RUNNER_LIMIT8AX
+    if sh == "bash"
+] + [
+    (f"fp cost: cmd delete: {label}", _t8ax(cmd), B, ()) for label, sh, _r, cmd in _RUNNER_FP_COST8AX
+    if sh == "bash"
+]
+MUST_BLOCK += [
+    (f"cmd delete: {_t8ax(label)}{sfx}", t, sh, (), reason)
+    for label, reason, cmd in _BLOCK8AX + _FP_COST8AX for sfx, t, sh in _forms8ax(cmd)
+] + [
+    (f"cmd delete: {label}", _t8ax(cmd), sh, (), reason)
+    for label, sh, reason, cmd in _RUNNER_BLOCK8AX + _RUNNER_FP_COST8AX
+]
+STRUCT_CASES += [
+    ("cmd delete: a word read as cmd reads it (switches, targets)",
+     lambda: [m._cmd_delete(n, _t8ax(w).replace(chr(92), "/").lower().split()) for n, w in (
+         ("rd", "/s /q c:"), ("rd", "/q c:/s"), ("rd", "/q ../../s"), ("rd", "/q c:/users/me/s"),
+         ("rd", "/s/q build"), ("rd", "//s //q c:/"), ("rd", "//s //q build"), ("rd", "/sq c:/"),
+         ("rd", "/q,/s c:/"), ("rd", "/s,/q %userprofile:~0,3%"), ("del", "/as /q *"),
+         ("del", "/s /q *.*"), ("del", "/s /q *.pyc"), ("del", "/a:h,/s c:/*"), ("rd", "/f /s c:/"),
+         ("rd", "/s /q /"), ("rd", "/s /q /x"))],
+     # `rd /f /s c:/`: an invalid switch word makes cmd refuse; one word's switches are not
+     # checked against another's, which only adds a block.
+     [True, True, True, False, False, True, False, False, True, True, False, True, False, True,
+      True, True, False]),
+    ("cmd delete: cmd's variables read as the roots they name",
+     lambda: [m._cmd_root_target(w) for w in (
+         "%userprofile%", "%userprofile%/", "%userprofile%/x", "%userprofile:~0,3%",
+         "userprofile!", "!userprofile!", "%homedrive%%homepath%", "%systemdrive%%homepath%",
+         "%homepath%", "%home%", "%systemdrive%", "%homedrive%/", "%cd%", "%__cd__%",
+         "%__cd__%*", "%__cd__%x", "%cd%x", "%temp%", "%systemroot%", "c:/*.*", "*.*", "c:/x",
+         "/", "/x", "/*", "c:/x/..")],
+     [True, True, False, True, True, True, True, True, True, True, True, True, True, True,
+      True, False, False, False, False, True, True, False, True, False, True, True]),
+    ("cmd delete: the name ends at a non-letter, past carets and @",
+     lambda: [bool(m.evaluate(_t8ax("cmd /c '" + w + " /s /q C:<BS>'"), shell="powershell"))
+              for w in ("rd", "rd.", "rd/q", "r^d", "@rd", "rdx", "rd_x", "erase", "eras", "rmdir",
+                        "del", "dele")],
+     [True, True, True, True, True, False, False, True, False, True, True, False]),
+    ("timing: a long switch or delimiter word is linear (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(lambda t: m._cmd_delete("rd", [t]), u) < 3.0
+              for u in ("/s", "x/", ",/s", "/^s", "/", "%cd:~0,")], [True] * 6),
+    ("timing: cmd's variable patterns are linear (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(lambda t: m._cmd_root_target(t), u) < 3.0
+              for u in ("%homedrive:", "!userprofile:", "%cd:a=", "*.*/", "%%")], [True] * 5),
+    ("timing: dense cmd deletes scale linearly (4 KB vs 2 KB, PowerShell)",
+     lambda: _ratio8ah("powershell", "", "cmd /c 'rd /s/q,/q build & del /s /q x<BS>*.o' ; ") < 3.0,
+     True),
+    ("timing: dense cmd deletes scale linearly (4 KB vs 2 KB, bash)",
+     lambda: _ratio8ah("bash", "", "cmd //c 'rd /s/q build'; ") < 3.0, True),
+    ("timing: many modified variables in a word scale linearly (4 KB vs 2 KB, PowerShell)",
+     lambda: _ratio8ah("powershell", "cmd /c 'rd /s /q x", "%a:~0,1%") < 3.0, True),
+    ("timing: the <BS>/ gate and ANSI-C scans are linear (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(lambda t: m._CMD_GATE_RE.search(t), u) < 3.0
+              for u in (chr(92), chr(92) + "x", chr(92) + "$")]
+     + [_pattern_ratio8as(lambda t: list(m._ANSI_C_RE.finditer(t)), u) < 3.0
+        for u in ("$'", "$'" + chr(92) + "x", "'" + chr(92))], [True] * 6),
+    ("timing: a long path of one-letter names scales linearly (4 KB vs 2 KB, PowerShell)",
+     lambda: _ratio8ah("powershell", "cmd /c 'rd /q x", _t8ax("<BS>s")) < 3.0, True),
+    ("cmd delete: more spellings of a root, the home or the current directory",
+     lambda: [m._cmd_root_target(w) for w in (
+         "c:%homepath%", "c:$env:homepath", "%temp:~0,3%", "%temp:~0,3%/x", "c:/users/%username%",
+         "/users/%username%", "c:/users/$env:username", "c:/users/%username%/x", "%=c:%",
+         "%userprofile%.", "c:.", "t.", "t...", "?*.*", "*.*.*", "????????.???", "*.pyc",
+         "c:/$x/..", "%userprofile%/$x/..", "$x/..", "c:/~x/..", "$userprofile", "$homedrive$homepath",
+         "$systemdrive/")],
+     # `%temp:~0,3%/x`: any modified variable is refused (its value may be any part of a path).
+     [True, True, True, True, True, True, True, False, True, True, True, False, False, True,
+      True, True, False, True, True, True, True, True, True, True]),
 ]
 
 

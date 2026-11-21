@@ -69,7 +69,8 @@ time, so it reports the edit as unchecked with exit 2.
   Blocks a curated set of destructive / unapproved shell commands: `rm -rf /`
   and friends (including drive roots such as `C:/`, `/c` and `/mnt/c`, `../..`,
   the current directory as `~+` or `$PWD`, and a path that reaches a root through
-  `..` or a glob such as `/**`), `git push --force` (including `+refspec` forms), `git push --mirror`
+  `..` or a glob such as `/**`), cmd's `rd /s` and `del /s` of a root, the home or
+  the current directory (`rd /s /q %USERPROFILE%`, `del /s /q C:\*`), `git push --force` (including `+refspec` forms), `git push --mirror`
   and `--prune`, deleting a remote `main`, `master` or `HEAD`, `git reset
   --hard`, dangerous SQL (`drop/truncate table`, `delete from`), remote fetch
   via `curl`/`wget` (including scheme-less hosts, since both default to HTTP;
@@ -130,10 +131,15 @@ Two limits, stated plainly:
    while its module is off, so with `onFailure: "block"` a scope-guard that
    cannot start, or runs past its 10 s timeout, blocks every Write/Edit.
 2. **command-guard's blocklist is POSIX command names, plus PowerShell's
-   `Remove-Item`.** It inspects a PowerShell payload, and it reads `Remove-Item`
+   `Remove-Item` and cmd's `rd` and `del`.** It inspects a PowerShell payload, and it reads `Remove-Item`
    and its aliases (`ri`, `rm`, `del`, `erase`, `rd`, `rmdir`) as PowerShell
    binds their parameters: a recursive delete of a root, home or current-location
-   target, or of targets piped in, is refused. Code run from a string
+   target, or of targets piped in, is refused. In a script handed to cmd it reads
+   `rd`/`rmdir` and `del`/`erase` as cmd reads them, with cmd's variables for the
+   home, the system drive and the current directory (`%USERPROFILE%`, `%CD%`):
+   `/s` into such a target, or `del /s` of every file there (`C:\*`, `*.*`), is
+   refused; `del /s` of a narrower pattern (`%USERPROFILE%\*.log`) is a targeted
+   delete and allowed, as `rm -rf ~/*.log` is. Code run from a string
    (`Invoke-Expression`/`iex`, `[scriptblock]::Create`, `InvokeScript`,
    `NewScriptBlock`, `AddScript`) is read as a script when it is a literal and
    refused when it is computed or piped in. It does not know other cmdlet verbs
@@ -193,8 +199,9 @@ limit — not a bug. Read it before you rely on any of the above.
   settings made outside the command (`git config`, `GIT_CONFIG_*` variables),
   deleting a remote branch under any name other than `main`, `master` or `HEAD`
   (only server-side branch protection that binds admins stops that), cmd
-  built-ins (`rd /s`, `del`), `wsl --unregister`, and a script file run by
-  `pwsh -File` or `Start-Process`.
+  built-ins beyond `rd /s` and `del /s` of a root, the home or the current
+  directory (a `for` loop's `rd /s`, `robocopy /mir`), `wsl --unregister`, and a
+  script file run by `pwsh -File` or `Start-Process`.
 - **A mod can override a deny rule and a guard's block.** A Claude Code mod (on
   by default since v2.1.287) answers after the `PreToolUse` hooks, and — unless the
   machine has managed settings or the session's credential is a Team or Enterprise

@@ -421,6 +421,57 @@ _PARENT_ONLY_RE = re.compile(r"^\.\.(?:/\.\.)*$")
 # everywhere: no bash meaning of them takes -r or a PowerShell parameter.
 _PS_REMOVE_ITEM = frozenset({"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"})
 _PS_REMOVE_ITEM_GATED = frozenset({"ri", "rm"})
+# cmd's own deletes (see _cmd_delete): rd/rmdir /s remove a directory tree, del/erase /s delete
+# what a pattern matches in its directory and in every one below it. cmd ends an internal
+# command's name at the first character that is not a letter, digit, `_` or `-` (`rd/s/q x`,
+# `rd.\x`, `rd\x`, `rd,x`, `rd:` and `rd(` all run rd; `rd"x"`, `rd1`, `rd_` and `rd-` do
+# not), and the rest of the word is its first argument.
+_CMD_DELETE_RE = re.compile(r"(rd|rmdir|del|erase)(?![0-9a-z_-])")
+# The text between the `/`s of a switch word, as each command accepts it; cmd refuses the whole
+# command for any other (`/sq`, `/s:x`, an empty one). del's /a takes the attribute letters cmd
+# accepts (measured: a d h i l o r s v x and -), glued or after a `:` (`/as` is the attribute,
+# not /s; `/assets` is refused).
+_CMD_RD_SWITCH_RE = re.compile(r"[sq]")
+_CMD_DEL_SWITCH_RE = re.compile(r"[pfsq]|a:?[-adhilorsvx]*")
+# cmd's variables naming the home, the system drive or the current directory, at the start of a
+# word: `%x%`, or `!x!` under delayed expansion (the tokenizer drops a word-leading `!`, leaving
+# `x!`), with an optional `:~n,m` / `:a=b` modifier, which can cut the value to a root
+# (`%USERPROFILE:~0,3%` is `C:\`). Each is read as the root PowerShell's spelling of it is (see
+# _PS_HOME_RE and its neighbours). %__CD__% ends in a `\`, so a word may go on right after it.
+_CMD_VAR = "(?:%{0}(?::[^%]*)?%|!?{0}(?::[^!]*)?!)"
+_CMD_DRIVE_VAR = _CMD_VAR.format("(?:systemdrive|homedrive)")
+# The home: also a drive letter before HOMEPATH (`C:%HOMEPATH%`), a profile folder named by
+# USERNAME (`C:\Users\%USERNAME%`, PowerShell's `$env:USERNAME`), and the spellings bash or
+# PowerShell leave for cmd unexpanded or expand themselves (Git Bash inherits USERPROFILE).
+_CMD_USERNAME = "(?:" + _CMD_VAR.format("username") + "|[$]env:username|[$][{]env:username[}]|[$]username)"
+_CMD_HOMEPATH = ("(?:" + _CMD_VAR.format("homepath")
+                 + "|[$]env:homepath|[$][{]env:homepath[}]|[$]homepath)")
+_CMD_HOME_RE = re.compile(
+    "^(?:(?:" + _CMD_DRIVE_VAR + "|[a-z]:)?" + _CMD_HOMEPATH + "|"
+    + _CMD_VAR.format("(?:userprofile|home)") + "|(?:" + _CMD_DRIVE_VAR + "|[a-z]:)?/users/"
+    + _CMD_USERNAME + "|[$]userprofile|[$][{]userprofile(?:[:?#%/=+-][^}]*)?[}]"
+    "|[$]homedrive[$]homepath)(?=/|$)")
+# Not only before a `/`: `%SystemDrive%*` is drive-relative (see _cmd_root_target).
+_CMD_SYSTEM_DRIVE_RE = re.compile("^(?:" + _CMD_DRIVE_VAR
+                                  + "|[$](?:systemdrive|homedrive)(?![0-9a-z_]))")
+# The current directory: %CD%, and %=C:%, the current directory cmd keeps per drive.
+_CMD_CWD_RE = re.compile("^" + _CMD_VAR.format("(?:cd|=[a-z]:)") + "(?=/|$)")
+_CMD_CWD_SLASH_RE = re.compile("^" + _CMD_VAR.format("__cd__"))
+# Any other variable with cmd's modifier (`:~n,m`, `:a=b`), anywhere in the word: a value cut or
+# rewritten to anything (`%TEMP:~0,3%` is `C:\`, `C:%TEMP:~2,1%` is `C:\`). A `!` form may lead
+# the word without its first `!` (the tokenizer drops it). The name may be `=C:` (the hidden
+# per-drive current directory, see _CMD_CWD_RE).
+_CMD_MODIFIED_VAR_RE = re.compile("%(?:=[a-z]:|[^%:/]+)(?::~[^%]*|:[^%=]*=[^%]*)%"
+                                  "|(?:^|!)(?:=[a-z]:|[^!:/%]+)(?::~[^!]*|:[^!=]*=[^!]*)!")
+# A `(` glued to the name: cmd runs the command (measured: `rd( /s /q t` deletes t), where the
+# bash reading ends the segment at it.
+_CMD_NAME_PAREN_RE = re.compile("(?i)(^|[ " + chr(9) + "&|;,=@(])(rd|rmdir|del|erase)[(]")
+# A last component made only of * ? and . with a wildcard: an all-files pattern, read as `*`
+# (measured: `?*.*`, `*.*.*`, `*.?*`, `????????.???` each delete every file; `*.` and `?.?`
+# fewer, an accepted cost).
+_CMD_ALL_FILES_RE = re.compile(r"(^|/)(?=[.]*[*?])[*?.]+$")
+# A path name led by `$` or `~` (see _cmd_root_target).
+_CMD_SIGIL_NAME_RE = re.compile("(^|/)[$~]")
 # Remove-Item's parameter names and aliases (7.6 and 5.1, the common parameters included),
 # each mapped to its parameter. A parameter word binds every parameter it is a prefix of;
 # PowerShell refuses an ambiguous or unknown one, so nothing runs.
@@ -759,6 +810,123 @@ def _ps_remove_item(args, piped: bool, defaults: bool = False):
     own = (any(p.strip() for p in paths)
            and not any(_PS_PIPED_ITEM_RE.search(a.lower()) for a in args))
     return root, recursive and piped and not own
+
+
+def _cmd_root_target(word: str) -> bool:
+    """A target word of cmd's rd or del that names a root, the home or the current directory:
+    cmd's variable spellings of them (_CMD_HOME_RE and its neighbours) read as PowerShell's
+    are, any other variable with a modifier refused (its value can be any part of a path), a
+    drive with no `\\` after it read on that drive's current directory and on its root, an
+    all-files pattern as `*`, then a
+    drive path as _is_danger_target reads it, and any other word as _ps_root_target reads a
+    Remove-Item target (`\\`, `.`, `..`, `*`, `~`, long-path prefixes, admin shares, and what
+    bash or PowerShell put there before cmd ran: `$HOME`, `$env:USERPROFILE`). A word led by
+    one `/` is a path from the current drive's root (a `\\` read as `/`: cmd takes a real `/`
+    for a switch), so it is read on a drive, not as Git Bash's drive `/x` (`\\x` is no root,
+    `\\` is). Also read with its trailing dots and spaces removed: Windows drops them from the
+    last name (measured: `rd /s /q t.` deletes t)."""
+    # Any variable with a modifier, a known one too, anywhere: its value is cut or rewritten to
+    # anything, alone or with another (`%A:~0,2%%B:~2,1%` and `%HOMEDRIVE:~0,1%:\` are `C:\`).
+    # Fail closed. (A known variable with a modifier names a root, the home or the cwd anyway.)
+    if _CMD_MODIFIED_VAR_RE.search(word):
+        return True
+    # Also without a long-path or device prefix and with an admin share read as its drive,
+    # before cmd's variables are read (`\\?\%CD%` names the current directory: measured,
+    # `\\?\%CD%\t` deletes t; `\\host\c$%HOMEPATH%` is the home).
+    plain = _CMD_ADMIN_SHARE_RE.sub(r"\1:", _PS_LONG_PATH_RE.sub(_ps_long_path, word, count=1),
+                                    count=1)
+    for w in dict.fromkeys(v for x in (word, plain) for v in (x, x.rstrip(". ") or x)):
+        t = "c:" + w if w.startswith("/") and not w.startswith("//") else w
+        t = _CMD_HOME_RE.sub("$home", t, count=1)
+        t = _CMD_SYSTEM_DRIVE_RE.sub("c:", t, count=1)
+        t = _CMD_CWD_RE.sub("$pwd", t, count=1)
+        t = _CMD_CWD_SLASH_RE.sub("$pwd/", t, count=1)
+        # A drive with no `\` after it is relative to that drive's current directory: the
+        # current one (`C:*`, `C:.\*`), or the drive's root when none was set (`D:*`).
+        cands = [t]
+        if t[1:2] == ":" and t[:1].isalpha() and t[2:3] not in ("", "/"):
+            cands += [t[2:], t[:2] + "/" + t[2:]]
+        for c in cands:
+            if _cmd_root_target_read(_CMD_ALL_FILES_RE.sub(r"\1*", c, count=1)):
+                return True
+    return False
+
+
+def _cmd_root_target_read(t: str) -> bool:
+    """_cmd_root_target's test of one reading t (cmd's variables already read)."""
+    # Also with every `$`- or `~`-led name a plain one: for cmd they are ordinary characters,
+    # and Windows resolves `..` as text (`C:\$x\..` is `C:\`, whether $x exists or not),
+    # where _collapse_parents keeps such a name (its value is unknown to bash).
+    # The first name is kept in one reading: it may be the root a variable was read as
+    # (`%USERPROFILE%\$x\..` is `$home/$x/..`), or a drive; after it, a `:` is an ordinary
+    # character too (measured: `t\x:\..` is t).
+    head, sep, rest = t.partition("/")
+    plain = head + sep + _CMD_SIGIL_NAME_RE.sub(r"\1_", rest).replace(":", "_")
+    for c in dict.fromkeys((t, plain, _CMD_SIGIL_NAME_RE.sub(r"\1_", t))):
+        # A drive path is judged as it is: cmd has no PSDrives, whose reading (`HKCU:\x` as
+        # `/x`) would take `C:\x` for Git Bash's drive x:.
+        if (_is_danger_target(c) if c[1:2] == ":" and c[:1].isalpha()
+                else _ps_root_target(c)):
+            return True
+    return False
+
+
+def _cmd_delete(name: str, words) -> bool:
+    """Does cmd's rd/rmdir or del/erase (name) with these argument words recurse (a /s switch)
+    into a root, the home or the current directory (_cmd_root_target)? Read as cmd reads them:
+    a `/` opens a switch anywhere in a word, so `t/s` is the target t and /s, and `/s/q` two
+    switches; cmd runs the command only when every piece after that `/` is a switch it accepts,
+    so only a run of such pieces ending the word is read as switches, and the text before each
+    of its `/`s as a target (`c:/users/s`: `c:/users` and /s). A word's `/` may be a `\\` (the
+    segments read it so), so every word is also a target as it is, but for one made only of
+    switches in either reading (`/s/q`, Git Bash's `//s`), which gives no target at all: its
+    `/x` would be read as Git Bash's drive x:, so every switch word would name a root. But
+    `\\/s` (the current drive's root, then /s) reads as Git Bash's `//s`: when the payload
+    holds a `\\` right before a `/` (_Command.backslash_switch), the text before such a word's
+    switches is a target too (`/`). Each word is also read with
+    its runs of `/` collapsed: Git Bash hands cmd `//s` as `/s`. /q is not needed: with it
+    absent, a `y` piped in answers the prompt. del deletes what its target matches in the
+    target's directory and in every one below it: all files for a directory or an all-files
+    pattern (`C:\\`, `%CD%`, `C:\\*`, `*.*`), which are refused; a narrower pattern
+    (`%USERPROFILE%\\*.log`, `*.pyc`) is a targeted delete, as the rm rule reads `rm -rf
+    ~/*.log`. Every misreading adds a target or a switch, so it can only add a block."""
+    valid = _CMD_RD_SWITCH_RE if name in ("rd", "rmdir") else _CMD_DEL_SWITCH_RE
+    recursive, targets = False, []
+    subs = []
+    for w in words:
+        w = w.replace("^", "").lower()
+        # Also each part between cmd's delimiters, read here and not only in the delimiter
+        # reading of the whole text: that one also cuts a variable's modifier (`/s,/q
+        # %USERPROFILE:~0,3%`: cmd expands the variable first, then splits).
+        subs += [w] + (re.split("[,;=]", w) if any(c in w for c in ",;=") else [])
+    for w in dict.fromkeys(subs):
+        readings = list(dict.fromkeys((w, re.sub("/+", "/", w))))
+        found, switch_word = [], False
+        for r in readings:
+            # The `/` that opens the switches is the first of a run of valid switches ending
+            # the word, or a later one (the earlier ones may be `\`: `../../s` is `..\..`
+            # and /s). The target is the text before it: the shortest is judged, as a later
+            # `/` only adds a one-letter name to it, which makes no root of a non-root (and
+            # judging every one would be quadratic in the word).
+            pieces = r.split("/")
+            # Any /s is a recursion, valid run or not: a switch the tables miss costs a block,
+            # never the /s (`rd /s/x C:\`, which cmd refuses, is blocked).
+            recursive = recursive or "s" in pieces[1:]
+            j = len(pieces)
+            while j > 1 and valid.fullmatch(pieces[j - 1]):
+                j -= 1
+            if j < len(pieces):
+                switch_word = switch_word or (j == 1 and not pieces[0])
+                found.append("/".join(pieces[:j]))
+        if not switch_word:
+            targets += readings + found
+        elif _Command.backslash_switch:
+            targets += found          # `\/s`: the `\` (now `/`) before the switches
+        if _Command.backslash_switch:
+            # `\$null/s` (PowerShell), `\!x!/s` with x unset (cmd): the text expands to
+            # nothing before the delete runs.
+            targets += [_CMD_EXPANDED_TEXT_RE.sub("", f) for f in found if "$" in f or "!" in f]
+    return recursive and any(_cmd_root_target(t) for t in targets if t)
 
 
 def _wrapper_assignment(base: str, t: str, consume=True) -> bool:
@@ -1984,6 +2152,17 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
             out.append("recursive delete with targets piped in "
                        "(Remove-Item -Recurse, unknown scope)")
 
+    # cmd's rd /s and del /s, read as cmd reads them (see _cmd_delete), in every text: no
+    # other shell has these commands, and PowerShell's binds /s as a path, never a recursion.
+    word = toks[idx].replace("^", "").lower().lstrip("@")
+    m = _CMD_DELETE_RE.match(word)
+    if m and _cmd_delete(m.group(1), ([word[m.end():]] if m.end() < len(word) else [])
+                         + list(args)):
+        if m.group(1) in ("rd", "rmdir"):
+            out.append("recursive delete of a root/cwd/home target (cmd rd /s)")
+        else:
+            out.append("recursive delete of a root/cwd/home target (cmd del /s)")
+
     # Invoke-Expression runs its Command as code: a literal one is read (see _runner_rests);
     # one fed from the pipe, or computed, cannot be read (the `| sh` and `eval $x` cases).
     if _ps_is_iex(name) and (getattr(toks, "ps_tool", False)
@@ -2456,7 +2635,8 @@ def _cmd_texts(words):
     $x"`, is unquoted by /c); each of those with an empty "" or '' kept as a word (an `if`
     operand: `if "" equ "" x`); each of all those with its ^ escapes removed; and each of all
     those with cmd's , = ' and Unicode spaces read as cmd reads them (_CMD_DELIMS:
-    `call,git ...`, `echo ' & x & '`, `call<NBSP>git ...`)."""
+    `call,git ...`, `echo ' & x & '`, `call<NBSP>git ...`); and each of those holding a ;
+    with it a space too (_CMD_SEMI_AS_SPACE: `rd;/s /q x`)."""
     texts = [" ".join(words)]
     if any(not w or any(c.isspace() for c in w) for w in words[1:]):
         texts.append(" ".join(words[:1] + ['"' + w + '"' if not w or any(
@@ -2466,7 +2646,9 @@ def _cmd_texts(words):
     texts += [t.replace('""', '"_"').replace("''", "_") for t in texts
               if '""' in t or "''" in t]
     texts += [t.replace("^", "") for t in texts]
-    return texts + [t.translate(_CMD_DELIMS) for t in texts]
+    texts += [p for p in (_CMD_NAME_PAREN_RE.sub(r"\1\2 ", t) for t in texts) if p not in texts]
+    delims = [t.translate(_CMD_DELIMS) for t in texts]
+    return texts + delims + [t.translate(_CMD_SEMI_AS_SPACE) for t in delims if ";" in t]
 
 
 def _runner_scripts(toks):
@@ -2560,8 +2742,13 @@ def _lenient_runner(toks, outer_expanded=False, ps=None):
         variants = [words]
         if kind == "cmd":
             variants.append([w.replace("^", "") for w in words])
+            # A `(` glued to a delete's name (see _CMD_NAME_PAREN_RE).
+            variants += [_CMD_NAME_PAREN_RE.sub(r"\1\2 ", " ".join(v)).split() for v in list(variants)
+                         if "(" in " ".join(v)]
             # cmd's , = ' and Unicode spaces (see _CMD_DELIMS), as _runner_scripts reads them.
-            variants += [" ".join(v).translate(_CMD_DELIMS).split() for v in list(variants)]
+            delims = [" ".join(v).translate(_CMD_DELIMS) for v in list(variants)]
+            variants += [d.split() for d in delims]
+            variants += [d.translate(_CMD_SEMI_AS_SPACE).split() for d in delims if ";" in d]
         for v in variants:
             seg = _new_seg(v, getattr(toks, "piped", False))
             # Quote-blind: any $ word counts as one the shell expands (see expanding).
@@ -3456,6 +3643,26 @@ def _ps_dash_readings(text: str) -> list:
 # nothing (read as /, so `"a\"` closes its string as it does for cmd).
 _CMD_DELIMS = str.maketrans({",": " ", "=": " ", "'": None, chr(92): "/",
                              **dict.fromkeys(_PS_SPACES, " ")})
+# That reading again with ; a space as well: the segment the bash reading ends at a ; loses
+# the words after it, which cmd hands the command (`rd;/s /q x` is rd's /s, see _cmd_delete).
+# Added to the reading above, never in its place: that one's segments stay judged.
+_CMD_SEMI_AS_SPACE = str.maketrans({";": " "})
+# What _Command.backslash_switch reads the payload without: cmd's caret, and the quotes a shell
+# or cmd removes before the delete runs.
+_CMD_GATE_DROP = str.maketrans(dict.fromkeys("^'`" + chr(34)))
+# A `\` and then a `/` in one word, whatever stands between them (`\$null/s`, `\$('')/s`:
+# PowerShell expands it to nothing). No match runs past the next `\`, so the scan is linear.
+_CMD_GATE_RE = re.compile(re.escape(chr(92)) + "[^ " + "".join(map(chr, range(9, 14)))
+                          + re.escape(chr(92)) + "/]*/")
+# A bash ANSI-C string ($'...') whose escapes could spell a backslash: `\\`, `\x5c`, `\134`,
+# `\u005c`, `\U0000005c`, a control escape. Text escapes (`\n`, `\t`) cannot.
+_ANSI_C_RE = re.compile("[$]'(?:[^'" + re.escape(chr(92)) + "]|" + re.escape(chr(92)) + ".)*'")
+# Text a shell or cmd may expand to nothing in a cmd argument: a `$` and the rest of its path
+# name (PowerShell), an unset `!x!` (cmd's delayed expansion); see _cmd_delete.
+_CMD_EXPANDED_TEXT_RE = re.compile("[$][^/]*|![^!/]*!")
+# A drive's admin share leading a word, whatever follows the `$` (`c$%HOMEPATH%`).
+_CMD_ADMIN_SHARE_RE = re.compile("^//[^/]+/([a-z])[$]")
+_ANSI_C_BACKSLASH_RE = re.compile(re.escape(chr(92)) + "(?:" + re.escape(chr(92)) + "|[xuUc0-7])")
 
 # Characters after which a `#` starts a bash comment (it must start a word).
 _COMMENT_AFTER = set(" \t\n;&|()<>")
@@ -4386,9 +4593,13 @@ class _Command:
     """The whole payload of this evaluate() call: what an alias defined anywhere in it may
     be fed by (see _expand_scripts). ps_defaults: the payload names
     $PSDefaultParameterValues, which can give Remove-Item -Recurse without the word (set by
-    evaluate() while it judges, see _ps_remove_item)."""
+    evaluate() while it judges, see _ps_remove_item). backslash_switch: the payload holds a
+    `\\` right before a `/` (carets read away), which cmd reads as a path's `\\` and then a
+    switch (`rd /q \\/s` is the drive's root and /s); a segment reads it as Git Bash's `//s`
+    (see _cmd_delete)."""
     raw = ""
     ps_defaults = False
+    backslash_switch = False
 
 
 @functools.lru_cache(maxsize=4096)
@@ -5266,6 +5477,13 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     # A backtick inside a variable's braced name is an escape PowerShell reads away; either
     # half of the name, or any route to a variable by a computed name (see _PS_DEFAULTS_RE).
     _Command.ps_defaults = bool(_PS_DEFAULTS_RE.search(raw.lower().replace("`", "")))
+    # The quotes the shells and cmd remove may stand between the two (`'\''/s`, `"\"/s`), and so
+    # may text a shell expands to nothing (`\$null/s`); a bash ANSI-C string can spell the
+    # backslash (`$'\x5c'/s`).
+    _Command.backslash_switch = bool(
+        _CMD_GATE_RE.search(raw.translate(_CMD_GATE_DROP))
+        or ("$'" in raw and any(_ANSI_C_BACKSLASH_RE.search(m.group(0))
+                                for m in _ANSI_C_RE.finditer(raw))))
     try:
         for toks in unique:
             for r in _reasons_for(toks):
@@ -5273,6 +5491,7 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
                     reasons.append(r)
     finally:
         _Command.ps_defaults = False
+        _Command.backslash_switch = False
 
     # extraPatterns are documented as case-insensitive SUBSTRING matches. Test them
     # against both the tokenized form (quotes removed, so an ${IFS}-spliced pattern

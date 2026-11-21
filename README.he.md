@@ -31,7 +31,7 @@
 
 ---
 
-<!-- he-sync: what-this-does-not-protect-against sha256=daeafb18ef7f48d4 -->
+<!-- he-sync: what-this-does-not-protect-against sha256=5a3cecf1de3cd111 -->
 ## ממה ה-baseline הזה לא מגן
 
 <sub>[המקור באנגלית](README.md#what-this-does-not-protect-against)</sub>
@@ -61,7 +61,8 @@
   הרצה שפשוט לא נמצא ברשימה — כל אלה עוברים בלי בדיקה. אותו דבר נכון להגדרות git שנקבעו
   מחוץ לפקודה (`git config`, משתני `GIT_CONFIG_*`), למחיקה של ענף מרוחק בכל שם שאינו
   `main`, `master` או `HEAD` (את זה עוצרת רק הגנת ענפים (branch protection) בצד השרת,
-  ורק אם היא חלה גם על מנהלי מערכת), לפקודות המובנות של cmd (`rd /s`, `del`),
+  ורק אם היא חלה גם על מנהלי מערכת), לפקודות המובנות של cmd מעבר ל-`rd /s` ול-`del /s`
+  של שורש, של תיקיית הבית או של התיקייה הנוכחית (`rd /s` בתוך לולאת `for`, `robocopy /mir`),
   ל-`wsl --unregister`, ולקובץ סקריפט שמורץ דרך `pwsh -File` או `Start-Process`.
 - **mod יכול לעקוף כלל deny וחסימה של מעקה.** mod של Claude Code (מופעל כברירת
   מחדל מגרסה v2.1.287) עונה אחרי ה-hooks של `PreToolUse`, ואם במחשב אין הגדרות מנוהלות
