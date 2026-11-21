@@ -37,7 +37,7 @@ FP_FLOOR = 1325
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4389
+BLOCK_FLOOR = 4390
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -9482,6 +9482,10 @@ _PIN8BC = [
      "pwsh -c 'bash -c '<DQ>'<DQ>'pwsh -C $CMD'<DQ>'<DQ>'; # it'<DQ>'<DQ>'s'"),
     ("bash", "a $ word after pwsh -Command in a bash -c script", _EXP8BC,
      "pwsh -c 'bash -c '<DQ>'<DQ>'pwsh -Command $CMD'<DQ>'<DQ>'; # it'<DQ>'<DQ>'s'"),
+    # Main allows this one: a runner in the line's own shell -c script gets the quote-blind
+    # expansion record (--command is no -c bundle, so no bare $CMD suffix judges it).
+    ("bash", "a $ word after pwsh --command in a bash -c script", _EXP8BC,
+     "pwsh -c 'bash -c '<DQ>'<DQ>'pwsh --command $CMD'<DQ>'<DQ>'; # it'<DQ>'<DQ>'s'"),
     ("powershell", "a --% line before a carrier", _UNBAL8BC,
      "cmd /c --% echo it's<LF>Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
     ("bash", "a --% line before a carrier", _GP8BC,

@@ -2746,6 +2746,16 @@ def _lenient_level_extras(r):
     return out
 
 
+def _lenient_suffix(words, piped):
+    """A shell -c suffix of quote-blind words as a segment to read for runners, with the
+    quote-blind expansion record (any $ word counts as one the shell expands, see expanding
+    on _Seg), so a runner in it whose words hold a $ is outer-expanded (`bash -c 'pwsh
+    --command $CMD'`), as the strict pass reads the same script."""
+    seg = _new_seg(words, piped)
+    seg.expanding = frozenset(k for k, w in enumerate(seg) if "$" in w)
+    return seg
+
+
 def _lenient_reads(toks, outer_expanded=False, ps=None):
     """In a quote-blind segment: (_lenient_inline's segments, the segments of every Windows
     runner's command and of the runners and shell -c scripts nested in those). Quote-blind
@@ -2772,8 +2782,8 @@ def _lenient_reads(toks, outer_expanded=False, ps=None):
     for s in inline:                # read for runners below: main did not (see above)
         _RunnerBudget.charge(len(" ".join(s)))
     # (segment, outer, ps, covered): covered when its suffixes were all read already.
-    todo = [(toks, outer_expanded, ps, True)] + [(_new_seg(s, piped), outer_expanded, False, True)
-                                                for s in inline]
+    todo = [(toks, outer_expanded, ps, True)] + [(_lenient_suffix(s, piped), outer_expanded, False,
+                                                 True) for s in inline]
     runs, seen = [], set()
     for level in range(1, _MAX_INLINE_DEPTH + 2):
         found = []
@@ -2803,7 +2813,7 @@ def _lenient_reads(toks, outer_expanded=False, ps=None):
                 if (tuple(s), outer) not in tails:
                     tails.add((tuple(s), outer))
                     _RunnerBudget.charge(len(" ".join(s)))
-                    s = _new_seg(s, getattr(x, "piped", False))
+                    s = _lenient_suffix(s, getattr(x, "piped", False))
                     runs.append(s)
                     todo.append((s, outer, False, True))
 
