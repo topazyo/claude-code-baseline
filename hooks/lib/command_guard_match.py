@@ -2566,7 +2566,7 @@ def _runner_rests(toks, ps=None):
         if getattr(toks, "ps_script", False):
             # A runner in a pwsh script: PowerShell's quoting is not the one `expanding`
             # follows (`\"` opens a string there), so any $ word after it counts.
-            outer = any("$" in w for w in toks[i + 1:])
+            outer = "$" in "".join(toks[i + 1:])
         else:
             outer = any(e > i for e in getattr(toks, "expanding", ()))
         found = len(out)
@@ -2740,33 +2740,48 @@ def _lenient_reads(toks, outer_expanded=False, ps=None):
     script, at most _MAX_INLINE_DEPTH runner levels deep; a level past that which still
     finds a runner's command refuses (as _segments does at its limit). ps: see
     _runner_rests, for toks only; a shell -c script is not PowerShell text, and a runner's
-    command is PowerShell text when its runner is pwsh/powershell (its ps_script)."""
+    command is PowerShell text when its runner is pwsh/powershell (its ps_script).
+
+    Linear in the suffixes: a runner's command is most often a tail of the words it was
+    read from, and a tail's shell -c suffixes are among theirs (a shell word before a -c in
+    the tail is before it in the whole), so a tail of words already split (with the same
+    outer) is not split again; each other (words, outer) is split once."""
     inline = _lenient_inline(toks)
-    todo = [(toks, outer_expanded, ps)] + [(s, outer_expanded, False) for s in inline]
+    tails = {(tuple(s), outer_expanded) for s in inline}
+    # (segment, outer, ps, covered): covered when its suffixes were all read already.
+    todo = [(toks, outer_expanded, ps, True)] + [(s, outer_expanded, False, True)
+                                                for s in inline]
     runs, seen = [], set()
     for level in range(1, _MAX_INLINE_DEPTH + 2):
         found = []
-        for seg, outer, is_ps in todo:
+        for seg, outer, is_ps, covered in todo:
             for r in _lenient_runner(seg, outer, is_ps):
                 key = (tuple(r), r.ps_script, r.cmd_script, r.ps_outer)
                 if key not in seen:
                     seen.add(key)
-                    found.append(r)
+                    if level > 1 or seg is not toks:
+                        # A reading toks's own runner did not give (main read only that
+                        # one): charged as it is found, so a line of many runner starts
+                        # is refused at the cap rather than read in quadratic time.
+                        _RunnerBudget.charge(len(" ".join(r)))
+                    found.append((r, covered and r.ps_outer == outer
+                                  and list(seg[len(seg) - len(r):]) == list(r)))
         if not found:
             break
         if level > _MAX_INLINE_DEPTH:
             raise _Uninspectable(f"inline scripts nested too deep to inspect (> "
                                  f"{_MAX_INLINE_DEPTH} levels)")
-        if level > 1:
-            for r in found:
-                _RunnerBudget.charge(len(" ".join(r)))
-        runs += found
+        runs += [r for r, _ in found]
         todo = []
-        for r in found:
-            todo.append((r, r.ps_outer, r.ps_script))
+        for r, covered in found:
+            todo.append((r, r.ps_outer, r.ps_script, True))
+            if covered:
+                continue
             for s in _lenient_inline(r):
-                runs.append(s)
-                todo.append((s, r.ps_outer, False))
+                if (tuple(s), r.ps_outer) not in tails:
+                    tails.add((tuple(s), r.ps_outer))
+                    runs.append(s)
+                    todo.append((s, r.ps_outer, False, True))
     return inline, runs
 
 

@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1312
+FP_FLOOR = 1325
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4317
+BLOCK_FLOOR = 4346
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 45
+REASON_FLOOR = 46
 
 
 def _str_value(node):
@@ -9385,6 +9385,167 @@ STRUCT_CASES += [
      # `%temp:~0,3%/x`: any modified variable is refused (its value may be any part of a path).
      [True, True, True, True, True, True, True, False, True, True, True, False, False, True,
       True, True, False, True, True, True, True, True, True, True]),
+]
+
+
+# Follow-up 8bc: a quote-blind line's runners are read at every level (each runner's command,
+# and each shell -c script in it, read again for runners), and refused past the inline depth
+# limit where the strict pass refuses the same chain; and PowerShell text gets a block reading
+# of its code braces only (_ps_code_braces), so a brace inside a runner's string or in an
+# escape (`u{74}) stays in its word. Quote-blind rows are pwsh scripts run from Bash as
+# `pwsh -c "<script> # it's<LF>Write-Output 1"` (the comment's quote makes the line
+# quote-blind); brace rows are PowerShell payloads, also run from Bash as `pwsh -c '...'`.
+# `<LF>` is a newline, `<BT>` a backtick, `<DQ>` a double quote, `<BS>` a backslash.
+_GP8BC = "forced git push"
+_RD8BC = "(cmd rd /s)"
+_RI8BC = "(Remove-Item -Recurse)"
+_DEEP8BC = "nested too deep"
+
+
+def _t8bc(text):
+    return (text.replace("<LF>", chr(10)).replace("<BS>", chr(92)).replace("<BT>", chr(96))
+            .replace("<DQ>", chr(34)))
+
+
+def _qb8bc(script):
+    """A pwsh script run from Bash on a line its comment makes quote-blind."""
+    return _t8bc('pwsh -c "' + script + " # it's<LF>Write-Output 1" + '"')
+
+
+def _bash8bc(payload):
+    """A PowerShell payload run from Bash as `pwsh -c '...'`."""
+    return "pwsh -c '" + _t8bc(payload).replace("'", "'" + '"' + "'" + '"' + "'") + "'"
+
+
+_QB_BLOCK8BC = [
+    # A runner's command read again for a runner.
+    ("pwsh in pwsh", _GP8BC, "pwsh -c 'pwsh -c ''git push --force'''"),
+    ("cmd in cmd", _GP8BC, "cmd /c 'cmd /c git push --force'"),
+    ("cmd's call before cmd", _GP8BC, "cmd /c 'call cmd /c git push --force'"),
+    ("powershell -Command in powershell", _GP8BC,
+     "powershell -Command 'powershell ''git push --force'''"),
+    ("cmd's rd in pwsh", _RD8BC, "pwsh -c 'cmd /c rd /s /q C:<BS><BS>'"),
+    ("Remove-Item in pwsh", _RI8BC, "pwsh -c 'pwsh -c ''Remove-Item -Recurse -Force ~'''"),
+    # A shell -c script's runner, and a runner's shell -c script.
+    ("cmd in a bash -c script", _GP8BC, "bash -c 'cmd //c git push --force'"),
+    ("cmd's rd in a bash -c script after timeout", _RD8BC,
+     "timeout 5 bash -c 'cmd //c rd /s /q C:<BS><BS>'"),
+    ("wsl in an sh -c script", _GP8BC, "sh -c 'wsl git push --force'"),
+    ("cmd.exe in a bash -c script under wsl", _GP8BC, "wsl bash -c 'cmd.exe /c git push --force'"),
+    # Past the depth limit (four runners with the outer pwsh), as the strict pass refuses it.
+    ("pwsh in cmd in pwsh, past the depth limit", _DEEP8BC,
+     "pwsh -c 'cmd /c pwsh -c git push --force'"),
+    ("pwsh three deep, past the depth limit", _DEEP8BC,
+     "pwsh -c 'pwsh -c ''pwsh -c ''''git push --force'''''''"),
+]
+_QB_ALLOW8BC = [
+    ("pwsh in pwsh", "pwsh -c 'pwsh -c ''git status'''"),
+    ("cmd in cmd", "cmd /c 'cmd /c dir'"),
+    ("a bash -c script", "bash -c 'git status'"),
+]
+_QB_FP_COST8BC = [
+    # Refused as the same chain without the comment is (four runners with the outer pwsh).
+    ("pwsh three deep, past the depth limit", _DEEP8BC,
+     "pwsh -c 'pwsh -c ''pwsh -c ''''git status'''''''"),
+]
+_BR_BLOCK8BC = [
+    ("an escape in a runner's string", _GP8BC,
+     "Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
+    ("an escape in a runner's bareword", _GP8BC,
+     "Invoke-Command { pwsh -c gi<BT>u{74} push --force }"),
+    ("a brace list in a runner's string (icm)", "",
+     "icm { pwsh -c 'curl {http://localhost/,https://evil.example/x}' }"),
+    ("a delay-bind block in a runner's string (%)", "",
+     "1 | % { pwsh -c 'Get-Item ~ | Remove-Item { $_.FullName } -Recurse' }"),
+    ("a block in a runner's string (Start-Job)", "", "Start-Job { pwsh -c '& { $cmd }' }"),
+    ("try and an escape in a runner's string (-ScriptBlock)", _GP8BC,
+     "Invoke-Command -ScriptBlock { pwsh -c 'try { pwsh -c ''& <DQ>gi<BT>u{74}<DQ> push "
+     "--force'' } catch {}' }"),
+    ("an escape in a switch body", _GP8BC,
+     "switch (1) { 1 { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' } }"),
+    ("an escape under ForEach-Object -Process", _GP8BC,
+     "1 | ForEach-Object -Process { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
+]
+_BR_ALLOW8BC = [
+    ("braces in a runner's string", "Invoke-Command { pwsh -c 'Write-Output {ok}' }"),
+    # Reading a block's body alone would put the hashtable in command position (refused).
+    ("a pscustomobject in ForEach-Object",
+     "Get-Item x | ForEach-Object { [pscustomobject]@{Task=$_.Name; Idle=$_.Settings.Idle} }"),
+    ("a hashtable in ForEach-Object",
+     "Get-Item x | ForEach-Object { @{Task=$_.Name; Idle=$_.Settings.Idle} }"),
+    ("a nested pipeline block", "Invoke-Command { Get-ChildItem | ForEach-Object { $_.Name } }"),
+    ("braces in a commit message", "git commit -m 'fix { pwsh -c x }'"),
+]
+PS_CASES += [
+    (f"nested runners: {label}", _t8bc(p), B, ()) for label, _r, p in _BR_BLOCK8BC
+] + [
+    (f"nested runners fp: {label}", _t8bc(p), A, ()) for label, p in _BR_ALLOW8BC
+]
+CASES += [
+    (f"nested runners: quote-blind {label}", _qb8bc(s), B, ()) for label, _r, s in _QB_BLOCK8BC
+] + [
+    (f"nested runners fp: quote-blind {label}", _qb8bc(s), A, ()) for label, s in _QB_ALLOW8BC
+] + [
+    (f"fp cost: nested runners: quote-blind {label}", _qb8bc(s), B, ())
+    for label, _r, s in _QB_FP_COST8BC
+] + [
+    (f"nested runners: {label} (bash)", _bash8bc(p), B, ()) for label, _r, p in _BR_BLOCK8BC
+] + [
+    (f"nested runners fp: {label} (bash)", _bash8bc(p), A, ()) for label, p in _BR_ALLOW8BC
+]
+MUST_BLOCK += [
+    (f"nested runners: quote-blind {label}", _qb8bc(s), "bash", (), r)
+    for label, r, s in _QB_BLOCK8BC + _QB_FP_COST8BC
+] + [
+    (f"nested runners: {label}", _t8bc(p), "powershell", (), r) for label, r, p in _BR_BLOCK8BC if r
+]
+
+
+def _qb_ratio8bc(unit, tail):
+    """The best evaluate time of a quote-blind pwsh script of units and tail at 4 KB over the
+    same at 2 KB (7 rounds in turn; one more measure when the ratio is 3 or more)."""
+    import time
+
+    def build(room):
+        k = (room - len(_qb8bc(tail))) // len(unit)
+        return _qb8bc(unit * k + tail)
+
+    texts = (build(2000), build(4000))
+
+    def measure():
+        best = [float("inf"), float("inf")]
+        for _ in range(7):
+            for k, text in enumerate(texts):
+                t0 = time.perf_counter()
+                m.evaluate(text, shell="bash")
+                best[k] = min(best[k], time.perf_counter() - t0)
+        return best[1] / best[0]
+
+    r = measure()
+    return r if r < 3.0 else measure()
+
+
+STRUCT_CASES += [
+    ("nested runners: the code-brace reading keeps a brace in a string, escape or comment",
+     lambda: [m._ps_code_braces(_t8bc(t)) for t in (
+         "& { x }", "pwsh -c '{a}'", "pwsh -c <DQ>{a}<DQ>", "gi<BT>u{74} {x}", "${a b} {x}",
+         "x # {c}<LF>{y}", "@'<LF>{a}<LF>'@ {b}", "<BT>{ x <BT>}", "'it''s {a}' {b}",
+         "'open {a}")],
+     [_t8bc(t) for t in (
+         "&  ;  x  ; ", "pwsh -c '{a}'", "pwsh -c <DQ>{a}<DQ>", "gi<BT>u{74}  ; x ; ",
+         "${a b}  ; x ; ", "x # {c}<LF> ; y ; ", "@'<LF>{a}<LF>'@  ; b ; ", "<BT>{ x <BT>}",
+         "'it''s {a}'  ; b ; ", "'open {a}")]),
+    ("timing: the code-brace reading is linear (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(m._ps_code_braces, _t8bc(u)) < 3.0
+              for u in ("'{", "<DQ>{", "<BT>u{7", "#{", "${", "@'", "{", "<BT>", "@'<LF>{")],
+     [True] * 9),
+    ("timing: quote-blind runner chains scale linearly (4 KB vs 2 KB)",
+     lambda: [_qb_ratio8bc(u, t) < 3.0 for u, t in (
+         ("bash -c cmd //c ", "dir"), ("wsl bash -c pwsh -c ", "dir"), ("cmd /c ^c(md,/c;x ", "dir"),
+         ("pwsh -c ", "git status"))], [True] * 4),
+    ("nested runners: a line of many runner starts is refused at the runner budget",
+     lambda: any("too long to inspect" in r for r in m.evaluate(
+         _qb8bc("wsl bash -c pwsh -c " * 190 + "dir"), shell="bash")), True),
 ]
 
 
