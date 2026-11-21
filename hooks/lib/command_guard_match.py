@@ -2731,41 +2731,60 @@ def _ps_skip_block_words(toks, i):
     return i
 
 
+def _lenient_level_extras(r):
+    """The statement tails of a pwsh command a quote-blind level found (see _lenient_reads):
+    what its statements run after a dot-source, a flow word or an `=` (`. pwsh -c ...`,
+    `return pwsh -c ...`, `$x = pwsh -c ...`), as the strict pass reads a pwsh script's
+    statements (_ps_statement_tails), so a runner there is read at the next level."""
+    if not getattr(r, "ps_script", False):
+        return []
+    out = []
+    for t in _ps_statement_tails([r], script=True):
+        t.ps_script, t.ps_outer = True, getattr(r, "ps_outer", False)
+        t.piped = t.piped or getattr(r, "piped", False)
+        out.append(t)
+    return out
+
+
 def _lenient_reads(toks, outer_expanded=False, ps=None):
     """In a quote-blind segment: (_lenient_inline's segments, the segments of every Windows
     runner's command and of the runners and shell -c scripts nested in those). Quote-blind
     words are flat, so a runner's command holds a nested runner's words in place (`pwsh -c
     pwsh -c git ...`, `bash -c cmd //c ...`, `wsl bash -c ...`): each level's segments are
-    read again (_lenient_runner, _lenient_inline), as the strict pass expands a runner's
-    script, at most _MAX_INLINE_DEPTH runner levels deep; a level past that which still
-    finds a runner's command refuses (as _segments does at its limit). ps: see
+    read again (_lenient_runner, _lenient_inline, and a pwsh command's statement tails,
+    _lenient_level_extras, for runners), as the strict pass expands a runner's script, at most
+    _MAX_INLINE_DEPTH runner levels deep counted from this line; a level past that which
+    still finds a runner's command refuses (as _segments does at its limit). ps: see
     _runner_rests, for toks only; a shell -c script is not PowerShell text, and a runner's
     command is PowerShell text when its runner is pwsh/powershell (its ps_script).
 
-    Linear in the suffixes: a runner's command is most often a tail of the words it was
-    read from, and a tail's shell -c suffixes are among theirs (a shell word before a -c in
-    the tail is before it in the whole), so a tail of words already split (with the same
-    outer) is not split again; each other (words, outer) is split once."""
+    Bounded: a runner's command is most often a tail of the words it was read from, and a
+    tail's shell -c suffixes are among theirs (a shell word before a -c in the tail is before
+    it in the whole), so a tail of words already split (with the same outer) is not split
+    again; each other (words, outer) is split once; and every reading this adds (all but
+    toks's own runner's, which main read too) is charged to _RunnerBudget as it is found, so
+    a line of many runner starts is refused at the cap instead of read in quadratic time."""
+    piped = getattr(toks, "piped", False)
     inline = _lenient_inline(toks)
     tails = {(tuple(s), outer_expanded) for s in inline}
     # (segment, outer, ps, covered): covered when its suffixes were all read already.
-    todo = [(toks, outer_expanded, ps, True)] + [(s, outer_expanded, False, True)
+    todo = [(toks, outer_expanded, ps, True)] + [(_new_seg(s, piped), outer_expanded, False, True)
                                                 for s in inline]
     runs, seen = [], set()
     for level in range(1, _MAX_INLINE_DEPTH + 2):
         found = []
         for seg, outer, is_ps, covered in todo:
             for r in _lenient_runner(seg, outer, is_ps):
-                key = (tuple(r), r.ps_script, r.cmd_script, r.ps_outer)
-                if key not in seen:
-                    seen.add(key)
-                    if level > 1 or seg is not toks:
-                        # A reading toks's own runner did not give (main read only that
-                        # one): charged as it is found, so a line of many runner starts
-                        # is refused at the cap rather than read in quadratic time.
-                        _RunnerBudget.charge(len(" ".join(r)))
-                    found.append((r, covered and r.ps_outer == outer
-                                  and list(seg[len(seg) - len(r):]) == list(r)))
+                key = (tuple(r), r.ps_script, r.cmd_script, r.ps_outer, getattr(r, "piped", False))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if level > 1 or seg is not toks:
+                    # A reading main did not take (main read toks's own runner only):
+                    # charged as found (see above).
+                    _RunnerBudget.charge(len(" ".join(r)))
+                found.append((r, covered and r.ps_outer == outer
+                              and list(seg[len(seg) - len(r):]) == list(r)))
         if not found:
             break
         if level > _MAX_INLINE_DEPTH:
@@ -2773,15 +2792,32 @@ def _lenient_reads(toks, outer_expanded=False, ps=None):
                                  f"{_MAX_INLINE_DEPTH} levels)")
         runs += [r for r, _ in found]
         todo = []
+
+        def split(x, outer):
+            """x's shell -c suffixes: judged, and read for runners at the next level."""
+            for s in _lenient_inline(x):
+                if (tuple(s), outer) not in tails:
+                    tails.add((tuple(s), outer))
+                    _RunnerBudget.charge(len(" ".join(s)))
+                    s = _new_seg(s, getattr(x, "piped", False))
+                    runs.append(s)
+                    todo.append((s, outer, False, True))
+
         for r, covered in found:
             todo.append((r, r.ps_outer, r.ps_script, True))
-            if covered:
-                continue
-            for s in _lenient_inline(r):
-                if (tuple(s), r.ps_outer) not in tails:
-                    tails.add((tuple(s), r.ps_outer))
-                    runs.append(s)
-                    todo.append((s, r.ps_outer, False, True))
+            if not covered:
+                split(r, r.ps_outer)
+            # Its statement tails are read for runners at the next level, not judged: on a
+            # quote-blind line a statement's expression is no command (main judges none).
+            for t in _lenient_level_extras(r):
+                key = (tuple(t), "tail", t.ps_outer, getattr(t, "piped", False))
+                if key in seen:
+                    continue
+                seen.add(key)
+                _RunnerBudget.charge(len(" ".join(t)))
+                if list(r[len(r) - len(t):]) != list(t) or t.ps_outer != r.ps_outer:
+                    split(t, t.ps_outer)
+                todo.append((t, t.ps_outer, True, True))
     return inline, runs
 
 
@@ -2897,20 +2933,39 @@ def _ps_block_statements(text: str) -> str:
 
 
 _PS_VAR_BRACE_RE = re.compile(r"\$\{[^{}]*\}")
-
-
 def _ps_code_braces(text: str) -> str:
     """The block reading (_ps_block_statements) of the braces PowerShell reads as code only:
-    one inside a "..." or '...' string, a here-string, a ${...} variable, a # comment or a
-    backtick escape (`` `u{74} ``, in a string or a bareword) stays as it is, so the string
-    or escape keeps its value: `Invoke-Command { pwsh -c '& "gi`u{74}" ...' }` reads as
-    the runner and its whole script. An added reading (a scanner mistake here only loses
-    this reading); no quote character changes."""
+    one inside a "..." or '...' string (a "..." string's $( ) followed as code to its `)`, so
+    a string in it does not end the outer one), a here-string (its `@'` or `@"` after any
+    non-word character: `$h=@'`), a ${...} variable, a <# #> or # comment or a backtick
+    escape (`` `u{74} ``, in a string or a bareword) stays as it is, so the string or escape
+    keeps its value: `Invoke-Command { pwsh -c '& "gi`u{74}" ...' }` reads as the runner and
+    its whole script. An added reading (a scanner mistake here only loses this reading); no
+    quote character changes."""
     out, i, n = [], 0, len(text)
+    stack = []                 # inside a "..." string: ["dq"], and ["sub", depth] for its $( )
     at_word_start = True
     while i < n:
         c = text[i]
-        if (c == "@" and at_word_start and i + 1 < n and text[i + 1] in "\"'"):
+        if stack and stack[-1][0] == "dq":
+            if c == "`":
+                j = min(n, i + 2)
+            elif c == "$" and text.startswith("(", i + 1):
+                stack.append(["sub", 0])
+                j = i + 2
+            elif c in _PS_DQ:
+                if i + 1 < n and text[i + 1] in _PS_DQ:
+                    j = i + 2
+                else:
+                    stack.pop()
+                    j = i + 1
+            else:
+                j = i + 1
+            out.append(text[i:j])
+            i, at_word_start = j, False
+            continue
+        if (c == "@" and i + 1 < n and text[i + 1] in "\"'"
+                and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))):
             eol = text.find("\n", i)
             if eol != -1 and not text[i + 2:eol].strip():
                 end = _ps_here_string_end(text, eol + 1, text[i + 1] + "@")
@@ -2918,17 +2973,28 @@ def _ps_code_braces(text: str) -> str:
                 out.append(text[i:j])
                 i, at_word_start = j, False
                 continue
+        if c == "<" and text.startswith("<#", i):
+            end = text.find("#>", i + 2)
+            j = n if end == -1 else end + 2
+            out.append(text[i:j])
+            i = j
+            continue
         if c == "#" and at_word_start:
             eol = text.find("\n", i)
             j = n if eol == -1 else eol
             out.append(text[i:j])
             i = j
             continue
-        if c in _PS_DQ or c in _PS_SQ:
+        if c in _PS_SQ:
             quoted = _ps_quoted(text, i, False)
             j = n if quoted is None else quoted[1]
             out.append(text[i:j])
             i, at_word_start = j, False
+            continue
+        if c in _PS_DQ:
+            stack.append(["dq"])
+            out.append(c)
+            i, at_word_start = i + 1, False
             continue
         if c == "$":
             m = _PS_VAR_BRACE_RE.match(text, i)
@@ -2941,7 +3007,17 @@ def _ps_code_braces(text: str) -> str:
             out.append(text[i:j])
             i, at_word_start = j, False
             continue
-        out.append(" ; " if c in "{}" else c)
+        if stack:                                        # code in a string's $( )
+            if c == "(":
+                stack[-1][1] += 1
+            elif c == ")":
+                if stack[-1][1]:
+                    stack[-1][1] -= 1
+                else:
+                    stack.pop()
+            out.append(c)
+        else:
+            out.append(" ; " if c in "{}" else c)
         at_word_start = c in " \t\r\n;|&(){}"
         i += 1
     return "".join(out)
