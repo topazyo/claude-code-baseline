@@ -2761,12 +2761,16 @@ def _lenient_reads(toks, outer_expanded=False, ps=None):
     Bounded: a runner's command is most often a tail of the words it was read from, and a
     tail's shell -c suffixes are among theirs (a shell word before a -c in the tail is before
     it in the whole), so a tail of words already split (with the same outer) is not split
-    again; each other (words, outer) is split once; and every reading this adds (all but
+    again; each other (words, outer) is split once; and every reading this keeps (all but
     toks's own runner's, which main read too) is charged to _RunnerBudget as it is found, so
-    a line of many runner starts is refused at the cap instead of read in quadratic time."""
+    a line of many runner starts is refused at the cap instead of read in quadratic time;
+    so is each of toks's own shell -c suffixes, which this reads for runners (main judged
+    them only)."""
     piped = getattr(toks, "piped", False)
     inline = _lenient_inline(toks)
     tails = {(tuple(s), outer_expanded) for s in inline}
+    for s in inline:                # read for runners below: main did not (see above)
+        _RunnerBudget.charge(len(" ".join(s)))
     # (segment, outer, ps, covered): covered when its suffixes were all read already.
     todo = [(toks, outer_expanded, ps, True)] + [(_new_seg(s, piped), outer_expanded, False, True)
                                                 for s in inline]
@@ -2933,6 +2937,8 @@ def _ps_block_statements(text: str) -> str:
 
 
 _PS_VAR_BRACE_RE = re.compile(r"\$\{[^{}]*\}")
+# Blanks to the end of the line, the line break included (a here-string opener's rest).
+_PS_BLANK_TO_EOL_RE = re.compile(r"[^\S\n]*\n")
 def _ps_code_braces(text: str) -> str:
     """The block reading (_ps_block_statements) of the braces PowerShell reads as code only:
     one inside a "..." or '...' string (a "..." string's $( ) followed as code to its `)`, so
@@ -2966,9 +2972,9 @@ def _ps_code_braces(text: str) -> str:
             continue
         if (c == "@" and i + 1 < n and text[i + 1] in "\"'"
                 and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))):
-            eol = text.find("\n", i)
-            if eol != -1 and not text[i + 2:eol].strip():
-                end = _ps_here_string_end(text, eol + 1, text[i + 1] + "@")
+            blank = _PS_BLANK_TO_EOL_RE.match(text, i + 2)
+            if blank:
+                end = _ps_here_string_end(text, blank.end(), text[i + 1] + "@")
                 j = n if end == -1 else end + 2
                 out.append(text[i:j])
                 i, at_word_start = j, False

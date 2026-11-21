@@ -37,7 +37,7 @@ FP_FLOOR = 1325
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4364
+BLOCK_FLOOR = 4386
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -9400,6 +9400,7 @@ _GP8BC = "forced git push"
 _RD8BC = "(cmd rd /s)"
 _RI8BC = "(Remove-Item -Recurse)"
 _DEEP8BC = "nested too deep"
+_RF8BC = "(rm -rf)"
 
 
 def _t8bc(text):
@@ -9441,6 +9442,11 @@ _QB_BLOCK8BC = [
     ("a dot-source before pwsh", _GP8BC, "pwsh -c '. pwsh -c ''git push --force'''"),
     ("a dot-source before cmd", _GP8BC, "pwsh -c '. cmd /c git push --force'"),
     ("return before pwsh", _GP8BC, "pwsh -c 'return pwsh -c ''git push --force'''"),
+    ("return before iex", _GP8BC, "pwsh -c 'return iex ''git push --force'''"),
+    # cmd's carets read away at each level: the bash -c script read again.
+    ("a caret-spelled bash in cmd", _GP8BC, "cmd /c 'b^ash -c ''cmd //c git push --force'''"),
+    ("a caret-spelled bash in cmd in pwsh", _RF8BC, "pwsh -c 'cmd /c b^ash -c rm -rf ~'"),
+    ("a caret-spelled bash in cmd in cmd", _RF8BC, "cmd /c 'cmd /c b^ash -c rm -rf ~'"),
     # Past the depth limit (four runners with the outer pwsh), as the strict pass refuses it.
     ("pwsh in cmd in pwsh, past the depth limit", _DEEP8BC,
      "pwsh -c 'cmd /c pwsh -c git push --force'"),
@@ -9456,6 +9462,29 @@ _QB_FP_COST8BC = [
     # Refused as the same chain without the comment is (four runners with the outer pwsh).
     ("pwsh three deep, past the depth limit", _DEEP8BC,
      "pwsh -c 'pwsh -c ''pwsh -c ''''git status'''''''"),
+    # The same depth reached through dot-sourced statements (their tails count levels too).
+    ("dot-sourced pwsh three deep, past the depth limit", _DEEP8BC,
+     "pwsh -c '. pwsh -c ''. pwsh -c ''''git status'''''''"),
+]
+# Blocked on main too (by other readings or a refusal), pinned so no later reading loses them:
+# a $ word after a runner in a shell -c script, a --% line or an operator-glued comment before a
+# carrier, an assignment before a nested runner. (shell, label, text)
+_PIN8BC = [
+    ("powershell", "a $ word after pwsh in a bash -c script", "bash -c 'pwsh -c $CMD'; # it's"),
+    ("bash", "a $ word after pwsh in a bash -c script",
+     "pwsh -c 'bash -c '<DQ>'<DQ>'pwsh -c $CMD'<DQ>'<DQ>'; # it'<DQ>'<DQ>'s'"),
+    ("powershell", "a --% line before a carrier",
+     "cmd /c --% echo it's<LF>Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
+    ("bash", "a --% line before a carrier",
+     "pwsh -c 'cmd /c --% echo it'<DQ>'<DQ>'s<LF>Invoke-Command { pwsh -c ''& <DQ>gi<BT>u{74}<DQ>"
+     " push --force'' }'"),
+    ("powershell", "a comment glued to = before a carrier",
+     "$a=# it's<LF>Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
+    ("bash", "a comment glued to = before a carrier",
+     "pwsh -c '$a=# it'<DQ>'<DQ>'s<LF>Invoke-Command { pwsh -c ''& <DQ>gi<BT>u{74}<DQ> push"
+     " --force'' }'"),
+    ("bash", "an assignment before a nested pwsh",
+     "pwsh -c <DQ>pwsh -c '<BS>$x = pwsh -c ''git push --force''' # it's<DQ>"),
 ]
 _BR_BLOCK8BC = [
     ("an escape in a runner's string", _GP8BC,
@@ -9468,6 +9497,12 @@ _BR_BLOCK8BC = [
      "1 | % { pwsh -c 'Get-Item ~ | Remove-Item { $_.FullName } -Recurse' }"),
     ("a block in a runner's string (Start-Job)", "shell expansion in command position",
      "Start-Job { pwsh -c '& { $cmd }' }"),
+    ("an escape in a runner's double-quoted string", _GP8BC,
+     "Invoke-Command { pwsh -c <DQ>& 'gi<BT>u{74}' push --force<DQ> }"),
+    ("an escape after a braced variable", _GP8BC,
+     "${a}=1; Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
+    ("an escape after a doubled double quote", _GP8BC,
+     "Write-Output <DQ>a<DQ><DQ>'b<DQ>; Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
     # The scanner follows a glued here-string (its apostrophe is not a string's).
     ("an escape after a glued here-string", _GP8BC,
      "$h=@'<LF>it's<LF>'@<LF>Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"),
@@ -9494,6 +9529,10 @@ PS_CASES += [
 ] + [
     (f"nested runners fp: {label}", _t8bc(p), A, ()) for label, p in _BR_ALLOW8BC
 ]
+PS_CASES += [(f"nested runners pin: {label}", _t8bc(t), B, ()) for sh, label, t in _PIN8BC
+             if sh == "powershell"]
+CASES += [(f"nested runners pin: {label}", _t8bc(t), B, ()) for sh, label, t in _PIN8BC
+          if sh == "bash"]
 CASES += [
     (f"nested runners: quote-blind {label}", _qb8bc(s), B, ()) for label, _r, s in _QB_BLOCK8BC
 ] + [
@@ -9561,17 +9600,19 @@ STRUCT_CASES += [
     ("timing: the code-brace reading is linear (16 KB vs 8 KB)",
      lambda: [_pattern_ratio8as(m._ps_code_braces, _t8bc(u)) < 3.0
               for u in ("'{", "<DQ>{", "<BT>u{7", "#{", "${", "@'", "{", "<BT>", "@'<LF>{",
-                        " @''", " @''<LF>", "<#{", "<DQ>$(", "<DQ>$((")],
-     [True] * 14),
+                        " @''", " @''<LF>", "<#{", "<DQ>$(", "<DQ>$((", "@''",
+                        "@'" + " " * 30 + "x")],
+     [True] * 16),
     ("timing: quote-blind runner chains scale linearly (4 KB vs 2 KB)",
      lambda: [_qb_ratio8bc(u, t, h) < 3.0 for u, t, h in (
          ("bash -c cmd //c ", "dir", ""), ("wsl bash -c pwsh -c ", "dir", ""),
          ("cmd /c ^c(md,/c;x ", "dir", ""), ("pwsh -c ", "git status", ""),
          ("-c x, ", "dir", "cmd /c b^ash "), ("-c x, ", "dir", "cmd /c cmd /c b^ash "),
-         ("pwsh -c '. ", "dir", ""))], [True] * 7),
+         ("pwsh -c '. ", "dir", ""), ("cmd -c ", "dir", "sh -c "))], [True] * 8),
     ("nested runners: a line of many runner starts is refused at the runner budget",
-     lambda: any("too long to inspect" in r for r in m.evaluate(
-         _qb8bc("wsl bash -c pwsh -c " * 190 + "dir"), shell="bash")), True),
+     lambda: [any("too long to inspect" in r for r in m.evaluate(_qb8bc(t), shell="bash"))
+              for t in ("wsl bash -c pwsh -c " * 190 + "dir",
+                        "cmd /c b^ash " + "-c x, " * 560 + "dir")], [True, True]),
 ]
 
 
