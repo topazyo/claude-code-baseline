@@ -133,9 +133,13 @@ Two limits, stated plainly:
    `Remove-Item`.** It inspects a PowerShell payload, and it reads `Remove-Item`
    and its aliases (`ri`, `rm`, `del`, `erase`, `rd`, `rmdir`) as PowerShell
    binds their parameters: a recursive delete of a root, home or current-location
-   target, or of targets piped in, is refused. It does not know other cmdlet
-   verbs (`Invoke-WebRequest`, `Invoke-Expression`), nor a target the command
-   computes (`(Resolve-Path ~)`, `$x`). Those are covered by the deny rules only,
+   target, or of targets piped in, is refused. Code run from a string
+   (`Invoke-Expression`/`iex`, `[scriptblock]::Create`, `InvokeScript`,
+   `NewScriptBlock`, `AddScript`) is read as a script when it is a literal and
+   refused when it is computed or piped in. It does not know other cmdlet verbs
+   (`Invoke-WebRequest`), nor a target the command computes (`(Resolve-Path ~)`,
+   `$x`), nor a command or type reached without its name (a new alias, `[type]`
+   built from strings). Those are covered by the deny rules only,
    which is a coarser floor than the Bash side gets. "The hook fired" does not
    mean "the command was understood".
 
