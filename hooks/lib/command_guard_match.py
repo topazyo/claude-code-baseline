@@ -107,13 +107,14 @@ group around one word and every { } read away, so
 _ps_unescape, _PS_SPACES, _ps_dash_readings, _ps_ungroup and _powershell_segments); a
 pipeline continued after a `|` that ends a line, and a literal list's group (`('a','~')`),
 are each also read as one line / without the group (_PS_PIPE_EOL_RE, _PS_LIST_GROUP_RE);
-more than one dash before `=` is refused. Limits: a $( )
-subexpression holding a nested "..." string is scanned as if the inner quote closed
-the outer string (the context-free reading still decodes every escape in it); --%
-(stop-parsing) is not modelled, so the text after it is judged decoded as well as
-raw, and the raw readings give what the program receives there (for cmd, the text
-after it is also read as the script cmd gets: _ps_stop_parsing_cmd_scripts); and PowerShell
-cmdlets are matched by the deny-list only, except Remove-Item and its aliases, read as
+more than one dash before `=` is refused. Each of these readings also runs on the text one
+PowerShell lexer normalizes it to (_ps_lex, _ps_normalize: comments read away and here-strings
+read as one-line strings exactly where pwsh's tokenizer opens them, a "..." string read with its
+$( ) whole, the words after --% (stop-parsing) as literal strings), so an older scanner's own
+rule for where a comment or a string opens cannot hide a command. The raw readings stay: they
+also judge the text after --% decoded, and give what the program receives there (for cmd, the
+text after it is also read as the script cmd gets: _ps_stop_parsing_cmd_scripts). Limits:
+PowerShell cmdlets are matched by the deny-list only, except Remove-Item and its aliases, read as
 PowerShell binds their parameters (see _ps_remove_item; a target it computes, such as
 `(Resolve-Path ~)` or `$x`, and a call through a new alias are not read), and code run
 from a string: Invoke-Expression's (`iex`) Command, bound as PowerShell binds it, and the
@@ -2685,6 +2686,10 @@ def _ps_script_texts(text: str, nest: int = 0) -> tuple:
     levels deep at most _MAX_INLINE_DEPTH. Memoized (evaluate() clears it): a script's text
     comes down once per reading of each level above it."""
     texts = _ps_dash_readings(text)
+    # ...and of the text as one lexer reads it (see _ps_normalize), when it differs.
+    norm = _ps_normalize(text)
+    if norm != text:
+        texts += [t for t in _ps_dash_readings(norm) if t not in texts]
     plain = list(texts)
     texts += [_ps_ungroup(t) for t in plain]
     texts += [_ps_block_statements(t) for t in plain if "{" in t or "}" in t]
@@ -5470,6 +5475,514 @@ def _ps_unescape(text: str, legacy: bool = False) -> str:
     return "".join(out)
 
 
+# Follow-up 8bk: one PowerShell lexer (_ps_lex) and the text it normalizes to
+# (_ps_normalize), read as an added reading of every PowerShell payload and script. The older
+# scanners (_ps_unescape, _ps_code_braces, _ps_subexpressions) each decide by their own rule
+# where a comment, a block comment or a here-string opens, and a text that one of them reads
+# differently from pwsh shifts every quote after it. pwsh opens one only where a new token
+# starts, which depends on the token before it and on the mode: a bareword runs on through
+# `@'`, `<#` and `#` (`a=@'` is one word, `x<#` too), while after a blank, `;,|&(){}`, a whole
+# string, a `-name:` parameter, a member access, a number (comments only) or an operator in
+# an expression a new token starts (`$h=@'`, `(1)#c`, `-p:<#c#>`, `1#c`). A command name's
+# $( ) is literal text to its matching parenthesis; a backtick-newline inside a word is an
+# escaped newline, not a line continuation; an argument that is exactly --% makes the rest of
+# its line verbatim (to a | or && outside a "..." span). Measured against pwsh 7's tokenizer
+# over the recorded commands and generated texts (guard-lab examples/8bk, lexdiff.py).
+
+_PS_LEX_WS = frozenset(" \t\x0b\x0c" + _PS_SPACES)
+_PS_LEX_QUOTES = frozenset(_PS_SQ | _PS_DQ)
+_PS_LEX_DASH = frozenset("-" + _PS_DASHES)
+_PS_LEX_MAX_DEPTH = 32
+_PS_LEX_KEYWORDS = frozenset((
+    "if elseif else while for foreach switch do until try catch finally trap function filter "
+    "workflow param begin process end clean dynamicparam return throw exit break continue data "
+    "class enum using configuration hidden static").split())
+_PS_LEX_UNARY = frozenset("not bnot split join isplit csplit".split())
+_PS_LEX_VAR_RE = re.compile(r"\$(?:[\w:]+|[?^$])")
+_PS_LEX_NUM_RE = re.compile(r"(?:0x[0-9a-f]+|0b[01]+|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)"
+                         r"(?:ul|us|uy|un|[dlnusy])?(?:kb|mb|gb|tb|pb)?", re.I)
+_PS_LEX_NUM_END = frozenset(";|&,(){}]#<>=+-*/%!.\r\n" + _PS_DASHES) | _PS_LEX_WS
+_PS_LEX_WORD_RE = re.compile(r"[\w\-.\\/:~" + _PS_DASHES + r"]*")
+_PS_LEX_PARAM_RE = re.compile(r"[-" + _PS_DASHES + r"][\w?]*:?")
+_PS_LEX_BLANK_EOL_RE = re.compile(r"[ \t]*(?:\r\n|\n)")
+_PS_LEX_REDIR_RE = re.compile(r"[\d*]?>>?(?:&[12])?")
+_PS_LEX_MEMBER_RE = re.compile(r"(?:\.|::)\w+")
+
+
+def _ps_lex_escape_end(t, i):
+    """Index after the backtick escape at t[i] (a backtick)."""
+    if i + 1 < len(t) and t[i + 1] == "u":
+        m = _PS_UNICODE_RE.match(t, i + 1)
+        if m:
+            return m.end()
+    return min(len(t), i + 2)
+
+
+def _ps_lex_number_end(t, i, n):
+    """End of the number literal at t[i], or -1 when pwsh reads the text there as a bareword
+    (a number runs into anything but a terminator: `1a`, `1$x`, `1'x'`, `` 1`a ``)."""
+    m = _PS_LEX_NUM_RE.match(t, i, n)
+    if m and (m.end() >= n or t[m.end()] in _PS_LEX_NUM_END):
+        return m.end()
+    return -1
+
+
+def _ps_lex_param_end(t, i, n):
+    """(end, colon) of the parameter token at t[i] (a dash): it runs like a bareword to a
+    blank, line break, ;,|&(){} or quote, and a `:` ends it (`-a=<#c#>` is one token, `-p:`
+    ends one). A backtick-newline ends it after the backtick (`-p`` then a new line)."""
+    j = i + 1
+    while j < n:
+        d = t[j]
+        if d in _PS_LEX_WS or d in "\r\n;,|&(){}" or d in _PS_LEX_QUOTES:
+            return j, False
+        if d == ":":
+            return j + 1, True
+        if d == "`":
+            if j + 1 < n and t[j + 1] in "\r\n":
+                return j + 1, False
+            j = _ps_lex_escape_end(t, j)
+            continue
+        j += 1
+    return n, False
+
+
+def _ps_lex_here_end(t, j, closers, n):
+    """(body end, string end) of a here-string whose body starts at j: the first line
+    starting with one of closers followed by @; (-1, -1) if none before n."""
+    while j < n:
+        if t[j] in closers and t.startswith("@", j + 1) and j + 2 <= n:
+            body_end = j - 1 if j > 0 and t[j - 1] == "\n" else j
+            if body_end > 0 and t[body_end - 1] == "\r":
+                body_end -= 1
+            return body_end, j + 2
+        k = t.find("\n", j, n)
+        if k < 0:
+            break
+        j = k + 1
+    return -1, -1
+
+
+def _ps_lex_dq_parts(t, i, bound, string, depth, literal=False):
+    """Children of a "..." string's content from i (string=True: a lone quote ends it) or of a
+    @"..."@ body (to bound): ("text", a, b) and ("sub", a, b, nodes). Returns (children, index
+    of the closing quote, or bound)."""
+    children, seg, j = [], i, i
+    while j < bound:
+        d = t[j]
+        if d == "`":
+            j = min(bound, _ps_lex_escape_end(t, j))
+            continue
+        if string and d in _PS_DQ:
+            if j + 1 < bound and t[j + 1] in _PS_DQ:
+                j += 2
+                continue
+            break
+        if d == "$" and t[j + 1:j + 2] in ("$", "?", "^"):
+            j += 2                                # $$ $? $^: a variable, then text
+            continue
+        if d == "$" and t.startswith("(", j + 1) and literal:
+            k, depth_p = j + 2, 1               # in a command name: literal to its matching paren
+            while k < bound and depth_p:
+                depth_p += {"(": 1, ")": -1}.get(t[k], 0)
+                k += 1
+            j = k
+            continue
+        if d == "$" and t.startswith("(", j + 1):
+            if seg < j:
+                children.append(("text", seg, j))
+            nodes, k = _ps_lex_code(t, j + 2, ")", depth + 1, bound)
+            close = k + 1 if k < bound else bound
+            children.append(("sub", j, close, nodes))
+            j = seg = close
+            continue
+        j += 1
+    if seg < j:
+        children.append(("text", seg, j))
+    return children, j
+
+
+def _ps_lex_code(t, i, closer, depth, n=None):
+    """Nodes of PowerShell code from i up to an unmatched closer (")" for a $( ) body, None at
+    the top) or n. Returns (nodes, index of the closer or n)."""
+    if depth > _PS_LEX_MAX_DEPTH:
+        raise _Uninspectable(f"PowerShell text nested too deep to read (> {_PS_LEX_MAX_DEPTH} levels)")
+    n = len(t) if n is None else n
+    nodes = []
+    code = [i]                      # start of the pending code span
+
+    def put(kind, a, b, *extra):
+        if code[0] < a:
+            nodes.append(("code", code[0], a))
+        nodes.append((kind, a, b) + extra)
+        code[0] = b
+
+    stack = []                      # open groups: [closer, mode to restore, boundary after, hashtable]
+    mode = None                     # None statement start, "cmd" in a command, "expr"
+    bnd = True                      # an opener here starts a new token
+    num = False                     # just after a number (no here-string)
+    name = False                    # inside a command name's bareword (its $( ) is literal)
+    pcolon = False                  # just after a `-name:` parameter
+    while i < n:
+        c = t[i]
+        if bnd:
+            name = False
+        pc, pcolon = pcolon, False
+        if mode == "cmd" and bnd and not pc and (c == "-" or (c == "`" and t.startswith("-", i + 1))):
+            # the stop-parsing token: an argument that is exactly --% (escapes read away)
+            j, val = i, []
+            while j < n and t[j] not in _PS_LEX_WS and t[j] not in "\r\n;,|&(){}":
+                if t[j] == "`" and j + 1 < n:
+                    j += 1
+                val.append(t[j])
+                j += 1
+            if "".join(val) == "--%":
+                k, quoted = j, False             # | and && end it outside a "..." span
+                while k < n and t[k] not in "\r\n" and (quoted or (
+                        t[k] != "|" and not t.startswith("&&", k))):
+                    quoted ^= t[k] in _PS_DQ
+                    k += 1
+                put("verb", j, k)
+                i = k
+                continue
+        if c in _PS_LEX_WS:
+            i, bnd, num, pcolon = i + 1, True, False, pc     # `-p: --%`: still the value
+            continue
+        if c in "\r\n":
+            i, bnd, num, mode = i + 1, True, False, None
+            continue
+        if c == "`":
+            if bnd and i + 1 < n and t[i + 1] in "\r\n":
+                i += 3 if t.startswith("\r\n", i + 1) else 2
+                continue                   # a line continuation (mid-word: an escaped newline)
+            if bnd and i + 1 < n and t[i + 1] in _PS_LEX_WS:
+                i += 2                     # an escaped blank at a token start: a blank
+                continue
+            i = min(n, _ps_lex_escape_end(t, i))
+            if mode is None:
+                mode, name = "cmd", True
+            bnd = num = False
+            continue
+        if bnd and c == "#":
+            j = i
+            while j < n and t[j] not in "\r\n":
+                j += 1
+            put("lc", i, j)
+            i = j
+            continue
+        if bnd and t.startswith("<#", i):
+            j = t.find("#>", i + 2, n)
+            if j < 0:
+                put("open", i, n)
+                i = n
+                continue
+            put("bc", i, j + 2)
+            i = j + 2
+            continue
+        if c == "@" and bnd and not num and i + 1 < n and t[i + 1] in _PS_LEX_QUOTES:
+            m = _PS_LEX_BLANK_EOL_RE.match(t, i + 2, n)
+            if m:
+                closers = _PS_SQ if t[i + 1] in _PS_SQ else _PS_DQ
+                body_a = m.end()
+                body_b, end = _ps_lex_here_end(t, body_a, closers, n)
+                if end < 0:
+                    put("open", i, n)
+                    i = n
+                    continue
+                if t[i + 1] in _PS_SQ:
+                    put("hsq", i, end, body_a, body_b)
+                else:
+                    children, _ = _ps_lex_dq_parts(t, body_a, body_b, False, depth)
+                    put("hdq", i, end, body_a, body_b, children)
+                i, bnd, num = end, True, False
+                if mode is None:
+                    mode = "expr"
+                continue
+        if c in _PS_SQ:
+            j = i + 1
+            while j < n:
+                if t[j] in _PS_SQ:
+                    if j + 1 < n and t[j + 1] in _PS_SQ:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            if j >= n:
+                put("open", i, n)
+                i = n
+                continue
+            put("sq", i, j + 1)
+            if mode is None:
+                mode = "expr"
+            i, num = j + 1, False          # bnd kept: a string at a token start ends one
+            continue
+        if c in _PS_DQ:
+            children, j = _ps_lex_dq_parts(t, i + 1, n, True, depth, name and not bnd)
+            if j >= n:
+                put("open", i, n)
+                i = n
+                continue
+            put("dq", i, j + 1, children)
+            if mode is None:
+                mode = "expr"
+            i, num = j + 1, False
+            continue
+        if c == "$" and t.startswith("(", i + 1) and name:
+            # a command name's $( ) is literal text to its matching paren (nothing else counts)
+            j, depth_p = i + 2, 1
+            while j < n and depth_p:
+                depth_p += {"(": 1, ")": -1}.get(t[j], 0)
+                j += 1
+            i = j
+            continue
+        if c == "$" and t.startswith("(", i + 1):
+            # mid-bareword (`a$(1)<#c#>`) the bareword goes on after it
+            stack.append([")", mode if mode is not None else "expr", bnd, False])
+            i, mode, bnd, num = i + 2, None, True, False
+            continue
+        if c == "$" and (t.startswith("{", i + 1) or _PS_LEX_VAR_RE.match(t, i, n)):
+            at = bnd
+            if t.startswith("{", i + 1):
+                j = i + 2
+                while j < n and t[j] != "}":
+                    j += 2 if t[j] == "`" else 1
+                i = min(n, j + 1)
+            else:
+                i = _PS_LEX_VAR_RE.match(t, i, n).end()
+            if mode is None:
+                mode = "expr"
+            num = False
+            if mode != "cmd":
+                bnd = True
+                continue
+            # an argument: `$x` and `${x}` run on as a bareword; a member access, an index
+            # or a method call at a token start makes it an expression ending a token
+            chain = False
+            if at:
+                while True:
+                    m = _PS_LEX_MEMBER_RE.match(t, i, n)
+                    if not m:
+                        break
+                    i, chain = m.end(), True
+                if t.startswith("[", i) or (chain and t.startswith("(", i)):
+                    stack.append(["]" if t[i] == "[" else ")", mode, True, False])
+                    i, mode, bnd = i + 1, None, True
+                    continue
+            bnd = chain
+            continue
+        if c == "@" and t[i + 1:i + 2] in ("(", "{"):
+            stack.append([")" if t[i + 1] == "(" else "}", mode if mode is not None else "expr",
+                          True, t[i + 1] == "{"])
+            i, mode, bnd, num = i + 2, None, True, False
+            continue
+        if c in "({":
+            stack.append([")" if c == "(" else "}", mode if mode is not None else "expr", True, False])
+            i, mode, bnd, num = i + 1, None, True, False
+            continue
+        if c == "[" and mode != "cmd":
+            i, mode, bnd, num = i + 1, "expr", True, False      # an index or a type literal
+            continue
+        if c in ")}]":
+            if stack and stack[-1][0] == c:
+                _, mode, bnd, _ = stack.pop()
+                i, num = i + 1, False
+                continue
+            if c == closer and not stack:
+                break
+            i, num = i + 1, False
+            if c == "]" and mode is None:
+                mode, bnd = "cmd", True                  # `]` first: arguments follow
+                continue
+            bnd = bnd or mode == "expr"
+            continue
+        if c == ";":
+            i, mode, bnd, num = i + 1, None, True, False
+            continue
+        if c == "|":
+            i += 2 if t.startswith("||", i) else 1
+            mode, bnd, num = None, True, False
+            continue
+        if c == "&":
+            if t.startswith("&&", i):
+                i, mode = i + 2, None
+            elif mode is None:
+                i, mode = i + 1, "cmd"
+            else:
+                i, mode = i + 1, None
+            bnd, num = True, False
+            continue
+        if c == ",":
+            i, bnd, num = i + 1, True, False
+            continue
+        if stack and stack[-1][3] and c == "=" and mode != "expr":
+            i, mode, bnd, num = i + 1, None, True, False         # a hashtable's key = value
+            continue
+        if mode != "cmd" and (c == ">" or (c in "0123456789*" and t[i + 1:i + 2] == ">")):
+            m = _PS_LEX_REDIR_RE.match(t, i, n)             # a redirection first: `>x cmd`
+            i, mode, bnd, num = max(m.end() if m else 0, i + 1), "cmd", True, False
+            continue
+        if mode is None:
+            if c == "!" and (t[i + 1:i + 2].isalpha() or t[i + 1:i + 2] in ("_", ".", ":", "\\", "/", "~", "=")):
+                mode, bnd, num, name = "cmd", False, False, True    # `!a`: a bareword
+                i += 1
+                continue
+            if c.isdigit() or (c == "." and t[i + 1:i + 2].isdigit()):
+                j = _ps_lex_number_end(t, i, n)
+                if j < 0:
+                    mode, bnd, num, name = "cmd", False, False, True   # a bareword: read on below
+                    continue
+                i, mode, bnd, num = j, "expr", True, True
+                continue
+            if c in _PS_LEX_DASH or c in "+!":
+                nx = t[i + 1:i + 2]
+                if nx.isdigit() or (nx == "." and t[i + 2:i + 3].isdigit()):
+                    j = _ps_lex_number_end(t, i + 1, n)
+                    if j >= 0:
+                        i, mode, bnd, num = (i + 1 if c == "!" else j), "expr", True, c != "!"
+                    else:                                       # `+1$x`: a bareword
+                        mode, bnd, num, name = "cmd", False, False, True
+                    continue
+                if nx == "=":                                   # `+=x`: a bareword
+                    mode, bnd, num, name = "cmd", False, False, True
+                    continue
+            if c in "+!":
+                i, mode, bnd, num = i + 1, "expr", True, False
+                continue
+            if c in _PS_LEX_DASH:
+                m = _PS_LEX_PARAM_RE.match(t, i, n)
+                name = m.group(0)[1:].rstrip(":").lower()
+                if len(m.group(0)) == 1 or name in _PS_LEX_UNARY:
+                    i, mode, bnd, num = m.end(), "expr", True, False
+                    continue
+                # a parameter first: what follows is read as arguments
+                # (a leading `-p:` takes no value: a --% after it stops parsing)
+                i, colon = _ps_lex_param_end(t, i, n)
+                mode, bnd, num = "cmd", colon, False
+                continue
+            if c == "." and (i + 1 >= n or t[i + 1] in _PS_LEX_WS or t[i + 1] in "$({&"
+                             or t[i + 1] in _PS_LEX_QUOTES):
+                i, mode, bnd = i + 1, "cmd", True
+                continue
+            j = max(_PS_LEX_WORD_RE.match(t, i, n).end(), i + 1)
+            word = t[i:j].lower()
+            i, num = j, False
+            if word in _PS_LEX_KEYWORDS:
+                mode, bnd = None, True
+            else:
+                mode, bnd, name = "cmd", False, True
+            continue
+        if mode == "expr":
+            if (c == "=" or (c in "+-*/%" + _PS_DASHES and t[i + 1:i + 2] == "=")
+                    or t.startswith("??=", i)):
+                i += 3 if t.startswith("??=", i) else (1 if c == "=" else 2)
+                mode, bnd, num = None, True, False
+                continue
+            if c.isdigit():
+                j = _ps_lex_number_end(t, i, n)
+                if j >= 0:
+                    i, bnd, num = j, True, True
+                    continue
+            if c.isalnum() or c == "_":
+                while i < n and (t[i].isalnum() or t[i] == "_"):
+                    i += 1
+            else:
+                i += 1
+            bnd, num = True, False
+            continue
+        # mode == "cmd": an argument
+        if bnd and c in _PS_LEX_DASH and (t[i + 1:i + 2].isalpha() or t[i + 1:i + 2] in ("_", "?")):
+            i, bnd = _ps_lex_param_end(t, i, n)
+            num = False
+            pcolon = bnd
+            continue
+        if bnd and (c == ">" or (c in "0123456789*" and t[i + 1:i + 2] == ">")):
+            m = _PS_LEX_REDIR_RE.match(t, i, n)
+            i = m.end() if m and m.end() > i else i + 1
+            bnd, num = True, False                       # a token starts after a redirection
+            continue
+        i, bnd, num = i + 1, False, False
+    if code[0] < i:
+        nodes.append(("code", code[0], i))
+    return nodes, i
+
+
+def _ps_lex(text):
+    return _ps_lex_code(text, 0, None, 0)[0]
+
+
+def _ps_lex_esc(s):
+    """Text of a $( ) body as it sits inside a "..." string for an older scanner: each
+    backtick and each double-quote character doubled, so the string's decoded value is s."""
+    return "".join(ch * 2 if ch == "`" or ch in _PS_DQ else ch for ch in s)
+
+
+def _ps_lex_emit_dq(t, children, out, here):
+    for ch in children:
+        if ch[0] == "text":
+            if here:
+                i = ch[1]
+                while i < ch[2]:
+                    if t[i] == "`":
+                        j = min(ch[2], _ps_lex_escape_end(t, i))
+                        out.append(t[i:j])
+                        i = j
+                        continue
+                    out.append(t[i] * 2 if t[i] in _PS_DQ else t[i])
+                    i += 1
+            else:
+                out.append(t[ch[1]:ch[2]])
+        else:
+            inner = []
+            _ps_lex_emit(t, ch[3], inner)
+            esc = _ps_lex_esc("".join(inner))
+            if len(esc) > 2 * _MAX_INSPECT_LEN:
+                # each nesting level doubles its quotes and backticks: refuse, never grow
+                raise _Uninspectable("PowerShell text nested too deep to read (its quotes "
+                                     "double at each level)")
+            out.append("$(" + esc + (")" if t[ch[2] - 1:ch[2]] == ")" else ""))
+
+
+def _ps_lex_emit(t, nodes, out):
+    for node in nodes:
+        k = node[0]
+        if k == "code":
+            # as it is: every older scanner opens a comment, block comment or here-string at a
+            # word start, which is a token start the lexer has read (mid-word openers that the
+            # wider rules of _ps_code_braces / _ps_subexpressions / the POSIX reading open stay:
+            # escaping them made POSIX read the escapes as substitutions, measured as FPs)
+            out.append(t[node[1]:node[2]])
+        elif k in ("lc", "bc"):
+            out.append(" ")
+        elif k == "sq":
+            # ASCII delimiters (pwsh closes one at a typographic quote, POSIX does not)
+            out.append("'" + t[node[1] + 1:node[2] - 1] + "'")
+        elif k == "dq":
+            out.append('"')
+            _ps_lex_emit_dq(t, node[3], out, False)
+            out.append('"')
+        elif k == "hsq":
+            body = t[node[3]:node[4]]
+            out.append(" '" + "".join(c * 2 if c in _PS_SQ else c for c in body) + "'")
+        elif k == "hdq":
+            out.append(' "')
+            _ps_lex_emit_dq(t, node[5], out, True)
+            out.append('"')
+        elif k == "verb":
+            # verbatim text (pwsh passes it to the program as it is): each blank-separated word
+            # as a '...' string of its exact characters, so no reader expands, escapes or
+            # opens anything in it and the words stay words
+            out.append(" " + " ".join("'" + "".join(c * 2 if c in _PS_SQ else c for c in w) + "'"
+                                      for w in t[node[1]:node[2]].split()))
+        else:                                            # "open": as it is
+            out.append(t[node[1]:node[2]])
+
+
+def _ps_normalize(text):
+    out = []
+    _ps_lex_emit(text, _ps_lex(text), out)
+    return "".join(out)
+
+
 def _ps_unescape_everywhere(text: str, legacy: bool = False) -> str:
     """Every backtick escape decoded, whatever quoting or comment _ps_unescape()
     believes it is in, and backtick-newline read as a continuation: a backstop
@@ -5532,7 +6045,7 @@ def _ps_stop_parsing_cmd_scripts(raw: str):
     return list(dict.fromkeys(out))
 
 
-def _powershell_segments(raw: str):
+def _powershell_segments(raw: str, normalized: bool = False):
     """Every segment evaluate() judges for a PowerShell payload: the readings below of
     the raw text and, when it holds one of _PS_SPACES, the same readings of the text
     with each of them a space, as PowerShell reads them outside a string; when it holds
@@ -5540,9 +6053,17 @@ def _powershell_segments(raw: str):
     of them or only one before `=` (_ps_dash_readings); and the same
     again with PowerShell's grouping read away (_ps_ungroup: `git reset ("--hard")`,
     `& ('git') ...`, `& {...}`), so a grouped value is judged as the argument or command
-    word it becomes. The raw readings stay, so this only adds segments. Raises as
-    _segments() does."""
+    word it becomes. The raw readings stay, so this only adds segments. Unless normalized,
+    the same readings again of the text _ps_normalize() gives (comments and here-strings read
+    as pwsh's tokenizer reads them), when it differs; that text's own strict reading is
+    lenient (a line it cannot tokenize is read piecewise: the raw text's stays strict and
+    refuses). Raises as _segments() does."""
     segments = []
+    if not normalized:
+        norm = _ps_normalize(raw)
+        if norm != raw:
+            _RunnerBudget.charge(len(norm))
+            segments += _powershell_segments(norm, normalized=True)
     # Each $( ) subexpression's body, judged as a payload of its own (see
     # _ps_subexpressions): inside a "..." string no other reading sees it as code.
     if "$(" in raw:
@@ -5587,7 +6108,8 @@ def _powershell_segments(raw: str):
             segments += _segments(_PS_BLOCK_COMMENT_RE.sub(" ", text), shell="powershell",
                                   lenient_on_error=True, ps_tool=True)
     for text in dict.fromkeys(texts):
-        segments += _segments(text, shell="powershell", ps_tool=True)
+        segments += _segments(text, shell="powershell", ps_tool=True,
+                              lenient_on_error=normalized)
         # PowerShell reads `\` as a path separator, but a script it hands to bash
         # (`bash -c "git push \` + newline + `--force"`) reads it as an escape or a
         # line continuation. Judge the POSIX reading too and add its segments; a line
