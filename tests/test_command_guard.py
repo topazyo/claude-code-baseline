@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1400
+FP_FLOOR = 1410
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4590
+BLOCK_FLOOR = 4608
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -9649,7 +9649,8 @@ STRUCT_CASES += [
 # and --% tails holding command-like text. Placeholders as in 8bc, <LSQ> <RSQ> <LDQ> <RDQ> for
 # the typographic quotes U+2018 U+2019 U+201C U+201D, and <NEL> <LS> <PS> for U+0085, U+2028 and
 # U+2029 (blanks to pwsh), <NBSP> <EMSP> for U+00A0 and U+2003, <MVS> for U+180E (part of a word to
-# pwsh 7, a blank to Windows PowerShell on .NET Framework 4 to 4.5.2).
+# pwsh 7, a blank to Windows PowerShell on .NET Framework 4 to 4.5.2), <CR> a lone carriage return,
+# <U663> an Arabic-Indic digit three, <KELVIN> the Kelvin sign U+212A.
 _RF8BK = "(rm -rf)"
 _GP8BK = "forced git push"
 _RUN_RF8BK = "pwsh -c 'bash -c ''rm -rf /'''"
@@ -9661,7 +9662,8 @@ def _t8bk(text):
     return (_t8bc(text).replace("<LSQ>", chr(0x2018)).replace("<RSQ>", chr(0x2019))
             .replace("<LDQ>", chr(0x201C)).replace("<RDQ>", chr(0x201D))
             .replace("<NEL>", chr(0x85)).replace("<LS>", chr(0x2028)).replace("<PS>", chr(0x2029))
-            .replace("<NBSP>", chr(0xA0)).replace("<EMSP>", chr(0x2003)).replace("<MVS>", chr(0x180E)))
+            .replace("<NBSP>", chr(0xA0)).replace("<EMSP>", chr(0x2003)).replace("<MVS>", chr(0x180E))
+            .replace("<CR>", chr(13)).replace("<U663>", chr(0x663)).replace("<KELVIN>", chr(0x212A)))
 
 
 def _raises8bk(fn, text):
@@ -9829,6 +9831,20 @@ _DESYNC8BK = [
      "echo a,$x::@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
     ("a <BT>u escape before a parameter's backtick and a quote (5.1)", _GP8BK,
      "echo x<BT>u{74}-p<BT>'x' ; " + _RUN_GP8BK + " ; 'y'"),
+    # clean is a command to 5.1 (a keyword to pwsh 7.3+): its --% stops parsing there. A variable's name
+    # takes ? (`$x?.y`), a braced variable's member takes :: after it, and pwsh 7's ?. is member access:
+    # each ends a token, so the # after it opens a comment over the quote.
+    ("clean, a command to 5.1, then --%", _GP8BK, "clean --% '<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a static member after a braced variable's member", _GP8BK,
+     "echo ${x}.y::z#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a ? in a variable's name, then a member", _GP8BK, "echo $x?.y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a ? in a variable's name, then an index", _GP8BK, "echo $x?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("two ? in a variable's name, then a member", _GP8BK, "echo $x??.y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional member after a member", _GP8BK, "echo $x?.y?.z#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional member after a plain member", _GP8BK, "echo $x.y?.z#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional member after a group", _GP8BK, "echo (1)?.y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A hashtable's bare key ends a token: the <# after it opens a comment.
+    ("a block comment after a hashtable's bare key", _GP8BK, "@{a<#'#>=1}<LF>" + _RUN_GP8BK + "<LF>#'"),
 ]
 # Live on main from Bash only (the tool's strict POSIX reading of the payload refuses these as
 # unbalanced quoting, there and here): an escaped line break in a "..." here-string keeps the
@@ -9889,6 +9905,11 @@ _ALLOW8BK = [
     ("0x and a real comment", "0x # rm -rf /"),
     ("a variable's static member and a real comment", "echo $x::y # git push --force"),
     ("a <BT>u escape in a word", "echo x<BT>u{74}y"),
+    ("clean with a real comment", "clean # git push --force"),
+    ("a ? variable's member and a real comment", "echo $x?.y # git push --force"),
+    ("a keyword glued to a word and a real comment", "return#c # rm -rf /"),
+    ("a hashtable's key, a comment and a value", "@{a<#c#>=1} # git push --force"),
+    ("a hashtable value glued to a comment opener", "@{a=b<#c#>}"),
 ]
 # From Bash only: the PowerShell tool refuses these on main too (its POSIX reading of the
 # whole payload meets the comment's apostrophe: unbalanced quoting).
@@ -10009,10 +10030,16 @@ STRUCT_CASES += [
     ("ps lexer: pwsh 7-only syntax gives 5.1's normalized text too",
      lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
          "1n<#c#>x", "0b1#c<LF>x", "0x#c<LF>x", "echo $x::@'<LF>it's<LF>'@", "echo x<BT>u{74}#c", "$::#c",
-         "echo 1#c")],
+         "echo 1#c", "return#c ; x", "if'x' ; y", "0xan<#c#>x", "clean --% a", "echo $x?.y#c",
+         "echo (1)?.y#c", "echo ${x}?.y#c", "@{a<#c#>=1}", "@{a=1;b#c<LF>=2}", "@{a=b<#c#>}",
+         "$h=@'<LF>a<CR>'@<CR>x#c", "<U663><#c#>x", "1<KELVIN>b<#c#>x")],
      [[_t8bk(t) for t in ts] for ts in (
          ("1n x", "1n<''#c#>x"), ("0b1 <LF>x", "0b1#c<LF>x"), ("0x <LF>x", "0x#c<LF>x"),
-         ("echo $x:: 'it''s'",), ("echo x<BT>u{74}#c", "echo x<BT>u{74} "), ("$:: ",), ("echo 1#c",))]),
+         ("echo $x:: 'it''s'",), ("echo x<BT>u{74}#c", "echo x<BT>u{74} "), ("$:: ",), ("echo 1#c",),
+         ("return#c ; x",), ("if'x' ; y",), ("0xan x", "0xan<''#c#>x"), ("clean --% a", "clean --% 'a'"),
+         ("echo $x?.y ",), ("echo (1)?.y ", "echo (1)?.y#c"), ("echo ${x}?.y#c",), ("@{a =1}",),
+         ("@{a=1;b <LF>=2}",), ("@{a=b<''#c#>}",), ("$h= 'a'<CR>x#c",), ("<U663><''#c#>x",),
+         ("1<KELVIN>b<''#c#>x",))]),
     ("ps lexer: U+180E gives the normalized text of each reading",
      lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
          "echo a<MVS><#c#>x", "echo x<MVS>#c<LF>y", "a<MVS>b", "echo a")],
@@ -10027,8 +10054,12 @@ STRUCT_CASES += [
                   for t in m._ps_normalized_texts(_t8bk(u))) for u in (
          "+.'x'<#><LF>" + _RUN_GP8BK + "<LF>#>", "echo a<MVS><#<LF>" + _RUN_GP8BK + "<LF>#>",
          "-p--%.-p<BT>;# ; " + _RUN_GP8BK, "-p[x<BT> # ; " + _RUN_GP8BK, "echo a,--% ; " + _RUN_GP8BK,
-         "echo a,<LF><BT>--% ; " + _RUN_GP8BK)],
-     [True] * 6),
+         "echo a,<LF><BT>--% ; " + _RUN_GP8BK, "1n<#<LF>" + _RUN_GP8BK + "<LF>#>",
+         "0xan<#<LF>" + _RUN_GP8BK + "<LF>#>", "clean --% '<LF>" + _RUN_GP8BK + "<LF>#'",
+         "echo $x?.y?.z#'<LF>" + _RUN_GP8BK + "<LF>#'", "<U663><#<LF>" + _RUN_GP8BK + "<LF>#>",
+         "1<KELVIN>b<#<LF>" + _RUN_GP8BK + "<LF>#>",
+         "$h=@'<LF>a<CR>'@<CR>" + _RUN_GP8BK + "<CR>$z=@'<LF>'@")],
+     [True] * 13),
     # Git's MSYS2 bash, the tail delivered verbatim (Legacy mode, Windows PowerShell 5.1; the tail
     # fuzz's gap): the unclosed double quote takes the rest of the line into the -c word, which a
     # normalized text carries whole (evaluate() on that text would split its quoted words again).
