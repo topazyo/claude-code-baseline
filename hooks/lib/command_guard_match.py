@@ -5508,8 +5508,8 @@ _PS_LEX_KEYWORDS = frozenset((
     "workflow param begin process end clean dynamicparam return throw exit break continue data "
     "class enum using configuration hidden static").split())
 _PS_LEX_UNARY = frozenset("not bnot split join isplit csplit".split())
-_PS_LEX_VAR_RE = re.compile(r"\$(?:[\w:]+|[?^$])")
-_PS_LEX_NUM_RE = re.compile(r"(?:0x[0-9a-f]+|0b[01]+|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)"
+_PS_LEX_VAR_RE = re.compile(r"\$(?:::?(?:\w|:(?!:))*|\w(?:\w|:(?!:))*|[?^$])")   # `$x::y`: x; `$::x`: ::x
+_PS_LEX_NUM_RE = re.compile(r"(?:0x[0-9a-f]*|0b[01]+|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)"
                          r"(?:ul|us|uy|un|[dlnusy])?(?:kb|mb|gb|tb|pb)?", re.I)
 _PS_LEX_NUM_END = frozenset(";|&,(){}]#<>=+-*/%!.\r\n" + _PS_DASHES) | _PS_LEX_WS
 _PS_LEX_WORD_RE = re.compile(r"[\w\-.\\/:~" + _PS_DASHES + r"]*")
@@ -5527,10 +5527,20 @@ def _ps_lex_escape_end(t, i):
     return min(len(t), i + 2)
 
 
-def _ps_lex_number_end(t, i, n):
+# Windows PowerShell 5.1's number literals (measured, logs/lexdiff51_*_num.log): no 0b, no n / u / ul /
+# y / uy / s / us suffix, and 0x needs a digit; such a word is a bareword there (`1n<#`: no comment).
+_PS_LEX_NUM_RE_51 = re.compile(r"(?:0x[0-9a-f]+|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)"
+                            r"(?:[dl])?(?:kb|mb|gb|tb|pb)?", re.I)
+# A text that may hold syntax only pwsh 7 has: a literal only it reads as a number, or a `u{...}
+# escape (5.1 reads `u as u and starts a script block at the {); see _ps_normalized_texts.
+_PS_LEX_V7_HINT = re.compile(r"\d[nsuy]|0b|0x(?![0-9a-f])|`u\{", re.I)
+
+
+def _ps_lex_number_end(t, i, n, v51=False):
     """End of the number literal at t[i], or -1 when pwsh reads the text there as a bareword
-    (a number runs into anything but a terminator: `1a`, `1$x`, `1'x'`, `` 1`a ``)."""
-    m = _PS_LEX_NUM_RE.match(t, i, n)
+    (a number runs into anything but a terminator: `1a`, `1$x`, `1'x'`, `` 1`a ``). v51:
+    Windows PowerShell 5.1's literals."""
+    m = (_PS_LEX_NUM_RE_51 if v51 else _PS_LEX_NUM_RE).match(t, i, n)
     if m and (m.end() >= n or t[m.end()] in _PS_LEX_NUM_END):
         return m.end()
     return -1
@@ -5576,7 +5586,7 @@ def _ps_lex_here_end(t, j, closers, n):
     return -1, -1
 
 
-def _ps_lex_here_dq(t, i, n, depth):
+def _ps_lex_here_dq(t, i, n, depth, v51=False):
     """(children, body end, string end) of an @"..."@ body from i, or None if unterminated:
     a line starting with a double-quote character and @ ends it, but only outside the body's
     $( ) bodies, which pwsh reads first (a '...' string in one can hold such a line)."""
@@ -5609,7 +5619,7 @@ def _ps_lex_here_dq(t, i, n, depth):
         if d == "$" and t.startswith("(", j + 1):
             if seg < j:
                 children.append(("text", seg, j))
-            nodes, k = _ps_lex_code(t, j + 2, ")", depth + 1, n)
+            nodes, k = _ps_lex_code(t, j + 2, ")", depth + 1, n, v51)
             close = k + 1 if k < n else n
             children.append(("sub", j, close, nodes))
             j = seg = close
@@ -5627,7 +5637,7 @@ def _ps_lex_braced_end(t, j, n):
     return min(n, k + 1)
 
 
-def _ps_lex_dq_parts(t, i, bound, string, depth, literal=False):
+def _ps_lex_dq_parts(t, i, bound, string, depth, literal=False, v51=False):
     """Children of a "..." string's content from i (string=True: a lone quote ends it) or of a
     @"..."@ body (to bound): ("text", a, b) and ("sub", a, b, nodes). Returns (children, index
     of the closing quote, or bound)."""
@@ -5663,7 +5673,7 @@ def _ps_lex_dq_parts(t, i, bound, string, depth, literal=False):
         if d == "$" and t.startswith("(", j + 1):
             if seg < j:
                 children.append(("text", seg, j))
-            nodes, k = _ps_lex_code(t, j + 2, ")", depth + 1, bound)
+            nodes, k = _ps_lex_code(t, j + 2, ")", depth + 1, bound, v51)
             close = k + 1 if k < bound else bound
             children.append(("sub", j, close, nodes))
             j = seg = close
@@ -5674,7 +5684,7 @@ def _ps_lex_dq_parts(t, i, bound, string, depth, literal=False):
     return children, j
 
 
-def _ps_lex_code(t, i, closer, depth, n=None):
+def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
     """Nodes of PowerShell code from i up to an unmatched closer (")" for a $( ) body, None at
     the top) or n. Returns (nodes, index of the closer or n)."""
     if depth > _PS_LEX_MAX_DEPTH:
@@ -5698,6 +5708,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
     rtarget = False                 # just after a redirection: its target comes next
     inv = False                     # just after a first `&` or `.`: no command element yet
     post = False                    # an argument's group or variable just ended: `.` is member access
+    post_nocc = False               # ...a braced variable: `.` only, not `::` (`${x}::y` is one word)
     comma = False                   # just after a `,`: a --% next is an array element, a word
     while i < n:
         c = t[i]
@@ -5707,6 +5718,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
         rt, rtarget = rtarget, False
         iv, inv = inv, False
         po, post = post, False
+        pnocc, post_nocc = post_nocc, False
         cm, comma = comma, False
         # (not after a comma, blanks, comments or a line break between: `echo a, --% ;x` runs x)
         if not cm and ((mode == "cmd" and bnd and not pc and not rt and (
@@ -5719,7 +5731,9 @@ def _ps_lex_code(t, i, closer, depth, n=None):
                     j += 1
                 val.append(t[j])
                 j += 1
-            if "".join(val) == "--%":
+                if len(val) > 3 or "--%"[len(val) - 1] != val[-1]:
+                    break                        # no --%: stop (a glued `-a.''-a.''...` stays linear)
+            if "".join(val) == "--%" and (j >= n or t[j] in _PS_LEX_WS or t[j] in "\r\n;,|&(){}"):
                 k, quoted = j, False             # | and && end it outside a "..." span
                 while k < n and t[k] not in "\r\n" and (quoted or (
                         t[k] != "|" and not t.startswith("&&", k))):
@@ -5744,7 +5758,8 @@ def _ps_lex_code(t, i, closer, depth, n=None):
                 i += 2                     # an escaped blank at a token start: a blank
                 pcolon, rtarget, inv, comma = pc, rt, iv, cm
                 continue
-            i = min(n, _ps_lex_escape_end(t, i))
+            # 5.1 has no `u{...} escape: `u is a u, and the { after it starts a script block
+            i = min(n, i + 2 if v51 else _ps_lex_escape_end(t, i))
             if mode is None:
                 mode, name = "cmd", True
             bnd = num = False
@@ -5754,7 +5769,8 @@ def _ps_lex_code(t, i, closer, depth, n=None):
             while j < n and t[j] not in "\r\n":
                 j += 1
             put("lc", i, j)
-            i, comma = j, cm
+            i, comma = j, cm               # a comment is a blank to what precedes it:
+            pcolon, rtarget, inv = pc, rt, iv
             continue
         if bnd and t.startswith("<#", i):
             j = t.find("#>", i + 2, n)
@@ -5763,7 +5779,8 @@ def _ps_lex_code(t, i, closer, depth, n=None):
                 i = n
                 continue
             put("bc", i, j + 2)
-            i, comma = j + 2, cm
+            i, comma = j + 2, cm           # `echo x > <#c#> --%`: the file name; `& <#c#> > --%`: no file
+            pcolon, rtarget, inv = pc, rt, iv
             continue
         if c == "@" and bnd and not num and i + 1 < n and t[i + 1] in _PS_LEX_QUOTES:
             m = _PS_LEX_BLANK_EOL_RE.match(t, i + 2, n)
@@ -5773,7 +5790,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
                     body_b, end = _ps_lex_here_end(t, body_a, _PS_SQ, n)
                     here = None if end < 0 else ("hsq", i, end, body_a, body_b)
                 else:
-                    r = _ps_lex_here_dq(t, body_a, n, depth)
+                    r = _ps_lex_here_dq(t, body_a, n, depth, v51)
                     here = None if r is None else ("hdq", i, r[2], body_a, r[1], r[0])
                 if here is None:
                     put("open", i, n)
@@ -5806,7 +5823,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
             post = mode == "cmd" and bnd   # ...and a `.` after it is member access (`'a'.b#c`)
             continue
         if c in _PS_DQ:
-            children, j = _ps_lex_dq_parts(t, i + 1, n, True, depth, name and not bnd)
+            children, j = _ps_lex_dq_parts(t, i + 1, n, True, depth, name and not bnd, v51)
             if j >= n:
                 put("open", i, n)
                 i = n
@@ -5831,8 +5848,8 @@ def _ps_lex_code(t, i, closer, depth, n=None):
             i, mode, bnd, num = i + 2, None, True, False
             continue
         if c == "$" and (t.startswith("{", i + 1) or _PS_LEX_VAR_RE.match(t, i, n)):
-            at = bnd
-            if t.startswith("{", i + 1):
+            at, braced = bnd, t.startswith("{", i + 1)
+            if braced:
                 j = i + 2
                 while j < n and t[j] != "}":
                     j += 2 if t[j] == "`" else 1
@@ -5853,14 +5870,14 @@ def _ps_lex_code(t, i, closer, depth, n=None):
             if at:
                 while True:
                     m = _PS_LEX_MEMBER_RE.match(t, i, n)
-                    if not m:
+                    if not m or (braced and t.startswith("::", i)):
                         break
                     i, chain = m.end(), True
                 if t.startswith("[", i) or (chain and t.startswith("(", i)):
                     stack.append(["]" if t[i] == "[" else ")", mode, True, False])
                     i, mode, bnd = i + 1, None, True
                     continue
-            bnd, post = chain, at
+            bnd, post, post_nocc = chain, at, braced
             continue
         if c == "@" and t[i + 1:i + 2] in ("(", "{"):
             stack.append([")" if t[i + 1] == "(" else "}", mode if mode is not None else "expr",
@@ -5924,7 +5941,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
                 i += 1
                 continue
             if c.isdigit() or (c == "." and t[i + 1:i + 2].isdigit()):
-                j = _ps_lex_number_end(t, i, n)
+                j = _ps_lex_number_end(t, i, n, v51)
                 if j < 0:
                     mode, bnd, num, name = "cmd", False, False, True   # a bareword: read on below
                     continue
@@ -5933,7 +5950,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
             if c in _PS_LEX_DASH or c in "+!":
                 nx = t[i + 1:i + 2]
                 if nx.isdigit() or (nx == "." and t[i + 2:i + 3].isdigit()):
-                    j = _ps_lex_number_end(t, i + 1, n)
+                    j = _ps_lex_number_end(t, i + 1, n, v51)
                     if j >= 0:
                         i, mode, bnd, num = (i + 1 if c == "!" else j), "expr", True, c != "!"
                     else:                                       # `+1$x`: a bareword
@@ -5983,7 +6000,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
                 mode, bnd, num = None, True, False
                 continue
             if c.isdigit():
-                j = _ps_lex_number_end(t, i, n)
+                j = _ps_lex_number_end(t, i, n, v51)
                 if j >= 0:
                     i, bnd, num = j, True, True
                     continue
@@ -6005,7 +6022,7 @@ def _ps_lex_code(t, i, closer, depth, n=None):
             # .'x'-p<BT> #c`: a string, then a parameter; before a typographic quote: one bareword)
             i += 1
             continue
-        if po and ((c == "." and not t.startswith("..", i)) or t.startswith("::", i)):
+        if po and ((c == "." and not t.startswith("..", i)) or (t.startswith("::", i) and not pnocc)):
             # member access after a group or a variable (`(1).y#c`, `$x.'y'#c`, `(1).@'`): the
             # member name is its own token, so what follows it starts one (measured)
             i += 2 if c == ":" else 1
@@ -6033,8 +6050,8 @@ def _ps_lex_code(t, i, closer, depth, n=None):
     return nodes, i
 
 
-def _ps_lex(text):
-    return _ps_lex_code(text, 0, None, 0)[0]
+def _ps_lex(text, v51=False):
+    return _ps_lex_code(text, 0, None, 0, None, v51)[0]
 
 
 def _ps_lex_esc(s):
@@ -6308,11 +6325,12 @@ def _ps_lex_emit(t, nodes, out, split="ucrt"):
             out.append(t[node[1]:node[2]])
 
 
-def _ps_normalize(text, mvs_word=False, split="ucrt"):
+def _ps_normalize(text, mvs_word=False, split="ucrt", v51=False):
     # mvs_word: U+180E read as a word character, lexed as an inert character of the same
     # length in its place (no lexer rule names either), emitted from the text itself;
-    # split: how a --% tail's words are delivered (see _PS_LEX_SPLITS)
-    nodes = _ps_lex(text.replace(_PS_LEX_MVS, _PS_LEX_MVS_INERT) if mvs_word else text)
+    # split: how a --% tail's words are delivered (see _PS_LEX_SPLITS); v51: Windows PowerShell
+    # 5.1's number literals
+    nodes = _ps_lex(text.replace(_PS_LEX_MVS, _PS_LEX_MVS_INERT) if mvs_word else text, v51)
     return _ps_lex_emit_capped(text, nodes, split)
 
 
@@ -6334,12 +6352,16 @@ def _ps_normalized_texts(text):
     and, when the text has a --% tail, each delivery of its words (see _PS_LEX_SPLITS), with each
     U+180E reading. Neither U+180E reading alone is safe: as a space, `a<U+180E><#` opens a
     comment pwsh 7 runs past; as a word character, `a<U+180E>#'` opens a string the older one
-    runs past. No split is either: MSYS2 groups '...' (`bash --% -c 'x'`), the UCRT does not."""
+    runs past. No split is either: MSYS2 groups '...' (`bash --% -c 'x'`), the UCRT does not.
+    And, when the text may hold syntax only pwsh 7 has (a literal `1n`, `0b1`, `0x`; a `<BT>u{...}`
+    escape), each read as Windows PowerShell 5.1 reads it too: there `1n<#` is one bareword, to
+    pwsh 7 a number and a comment."""
     texts = []
-    for mvs in ((False, True) if _PS_LEX_MVS in text else (False,)):
-        nodes = _ps_lex(text.replace(_PS_LEX_MVS, _PS_LEX_MVS_INERT) if mvs else text)
-        for split in (_PS_LEX_SPLITS if _ps_lex_has_verb(nodes) else _PS_LEX_SPLITS[:1]):
-            texts.append(_ps_lex_emit_capped(text, nodes, split))
+    for v51 in ((False, True) if _PS_LEX_V7_HINT.search(text) else (False,)):
+        for mvs in ((False, True) if _PS_LEX_MVS in text else (False,)):
+            nodes = _ps_lex(text.replace(_PS_LEX_MVS, _PS_LEX_MVS_INERT) if mvs else text, v51)
+            for split in (_PS_LEX_SPLITS if _ps_lex_has_verb(nodes) else _PS_LEX_SPLITS[:1]):
+                texts.append(_ps_lex_emit_capped(text, nodes, split))
     return list(dict.fromkeys(texts))           # the same text twice is judged once
 
 
