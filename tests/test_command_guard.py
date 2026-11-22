@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1392
+FP_FLOOR = 1400
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4550
+BLOCK_FLOOR = 4590
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -9797,6 +9797,38 @@ _DESYNC8BK = [
     ("a comment after a string's indexed member", _GP8BK, "echo 'a'.b[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
     ("a comment after a string's quoted member", _GP8BK, "echo 'a'.'b'#'<LF>" + _RUN_GP8BK + "<LF>#'"),
     ("a comment after a here-string's member", _GP8BK, "echo @'<LF>a<LF>'@.b#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A comment is a blank to the token before it: a redirection's target, a -name:'s value and a
+    # first & or . reach past it (the lexer had dropped those flags at a comment).
+    ("a redirection's target after a block comment", _GP8BK, "#'<LF>echo x > <#c#> --% ; " + _RUN_GP8BK + " #'"),
+    ("a glued redirection's target after a block comment", _GP8BK,
+     "#'<LF>echo x ><#c#>--% ; " + _RUN_GP8BK + " #'"),
+    ("a 2> target first after a block comment", _GP8BK, "#'<LF>2> <#c#> --% ; " + _RUN_GP8BK + " #'"),
+    ("a -name: value after a block comment", _GP8BK, "#'<LF>echo -p:<#c#>--% ; " + _RUN_GP8BK + " #'"),
+    ("a -name: value after a spaced block comment", _GP8BK,
+     "#'<LF>echo -p: <#c#> --% ; " + _RUN_GP8BK + " #'"),
+    ("--% after &, a block comment and a redirection", _GP8BK, "& <#c#> > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after ., a block comment and a redirection", _GP8BK, ". <#c#> > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after &, a block comment and 2>", _GP8BK, "& <#c#> 2> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    # pwsh 7's literal suffixes and 0b are a bareword to Windows PowerShell 5.1 (its <# opens nothing
+    # there; 5.1 runs these), 0x with no digits a number to pwsh 7 (its # a comment; pwsh 7 runs it),
+    # a variable's name ends before :: (the here-string after it opens), and 5.1 reads <BT>u{...} as u
+    # and a script block (the parameter after it ends at its backtick).
+    ("a pwsh 7 literal 1n a bareword to 5.1, then a block comment", _GP8BK, "1n<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1u a bareword to 5.1, then a block comment", _GP8BK, "1u<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1ul a bareword to 5.1, then a block comment", _GP8BK, "1ul<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1y a bareword to 5.1, then a block comment", _GP8BK, "1y<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 0b1 a bareword to 5.1, then a block comment", _GP8BK, "0b1<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1.5n a bareword to 5.1, then a block comment", _GP8BK,
+     "1.5n<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 2s a bareword to 5.1, then a block comment", _GP8BK, "2s<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1us a bareword to 5.1, then a block comment", _GP8BK, "1us<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("0x with no digits, then a line comment", _GP8BK, "0x#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a here-string after a variable's empty static member", _GP8BK,
+     "echo $x::@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string after a variable's empty static member, after a comma", _GP8BK,
+     "echo a,$x::@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a <BT>u escape before a parameter's backtick and a quote (5.1)", _GP8BK,
+     "echo x<BT>u{74}-p<BT>'x' ; " + _RUN_GP8BK + " ; 'y'"),
 ]
 # Live on main from Bash only (the tool's strict POSIX reading of the payload refuses these as
 # unbalanced quoting, there and here): an escaped line break in a "..." here-string keeps the
@@ -9853,6 +9885,10 @@ _ALLOW8BK = [
     ("a braced name holding an escaped }, then a real comment", "echo ${a<BT>}b} # git push --force"),
     ("a string's member and a real comment", "echo 'a'.b # git push --force"),
     ("a dot, a string and a real comment", "echo .'x' # rm -rf /"),
+    ("a pwsh 7 literal and a real comment", "1n # git push --force"),
+    ("0x and a real comment", "0x # rm -rf /"),
+    ("a variable's static member and a real comment", "echo $x::y # git push --force"),
+    ("a <BT>u escape in a word", "echo x<BT>u{74}y"),
 ]
 # From Bash only: the PowerShell tool refuses these on main too (its POSIX reading of the
 # whole payload meets the comment's apostrophe: unbalanced quoting).
@@ -9943,8 +9979,8 @@ STRUCT_CASES += [
               for u in ("$h=@'<LF>x<LF>'@<LF>", "$h=@'<LF>", "x@'<LF>'<LF>", "'a'<#'#> ", "<#",
                         "(1)#c<LF>", "<DQ>$('a<DQ>b')<DQ> ", "a<BT><LF>", "echo --% '<LF>",
                         "x$((1))<LF>", "x$(", "-a=<#c#> ", "(", "$x.y[0]<#c#> ", "1a$(<#)",
-                        "> --% x<LF>", "echo -p<BT>'x' ")],
-     [True] * 17),
+                        "> --% x<LF>", "echo -p<BT>'x' ", "-a.''", "-a.<DQ><DQ>", "-a.'x'")],
+     [True] * 20),
     ("timing: the normalized reading scales linearly (4 KB vs 2 KB)",
      lambda: [_ratio8ah("powershell", _t8bk(h), _t8bk(u)) < 3.0 for h, u in (
          ("", "$h=@'<LF>it's<LF>'@<LF>"), ("", "x@'<LF>'<LF>"), ("", "(1)#c<LF>"),
@@ -9956,7 +9992,8 @@ STRUCT_CASES += [
          "+.'x'<#c#>", "-.<RSQ>x<LSQ>#c", "-p.-p<BT>;#c", "-p[x<BT> #c", "echo a,--% ; y #z",
          "echo a,<LF><BT>--% #z", "echo a,b --% ; y #z", "echo x${a<BT>}b}#c<LF>x", "echo ${<BT>}}#c",
          "echo ${a<BT>{b", "echo ${a<BT>}", "echo ${env:a<BT>b}", "echo ${ab}#c", "echo 'a'.b#c<LF>x",
-         "echo .'x'-p<BT>'y'", "-p+.'x'#c", "echo 'a'.b[0]#c", "echo @'<LF>a<LF>'@.b#c", "-p.x#c")],
+         "echo .'x'-p<BT>'y'", "-p+.'x'#c", "echo 'a'.b[0]#c", "echo @'<LF>a<LF>'@.b#c", "-p.x#c",
+         "echo x > <#c#> --% a b", "echo -p:<#c#>--% a", "& <#c#> > --% a b", "2> <#c#> --% a")],
      [_t8bk(t) for t in (
          "]-p<BT><BT><LF>x", "echo -p<BT><BT>; <LF>x", "& 2> --% 'a' 'b'", ". 2> --% 'a'",
          "<BT>--% 'a' '#b'", "echo hi<LF><BT>--% 'a'", "echo (1).y <LF>x", "echo $x.'y' ",
@@ -9964,9 +10001,18 @@ STRUCT_CASES += [
          "echo a,--% ; y  ", "echo a,<LF><BT>--%  ", "echo a,b --% ';' 'y' '#z'",
          "echo x${a_b}#c<LF>x", "echo ${_}#c", "echo ${a_b", "echo ${a_", "echo ${env:ab}", "echo ${ab}#c",
          "echo 'a'.b <LF>x", "echo .'x'-p<BT><BT>'y'", "-p+.'x' ", "echo 'a'.b[0] ", "echo  'a'.b ",
-         "-p.x#c")]),
+         "-p.x#c", "echo x >   --% a b", "echo -p: --% a", "&   > --% 'a' 'b'", "2>   --% a")]),
     # U+180E: a blank to Windows PowerShell on .NET Framework 4 to 4.5.2, part of a word to pwsh 7;
     # neither reading alone is safe, so a text holding one normalizes to both (one when they agree).
+    # Syntax only pwsh 7 has (a 1n / 0b1 / 0x literal, a <BT>u{...} escape) gives Windows PowerShell
+    # 5.1's reading too: a second normalized text where the two differ, one where they agree.
+    ("ps lexer: pwsh 7-only syntax gives 5.1's normalized text too",
+     lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
+         "1n<#c#>x", "0b1#c<LF>x", "0x#c<LF>x", "echo $x::@'<LF>it's<LF>'@", "echo x<BT>u{74}#c", "$::#c",
+         "echo 1#c")],
+     [[_t8bk(t) for t in ts] for ts in (
+         ("1n x", "1n<''#c#>x"), ("0b1 <LF>x", "0b1#c<LF>x"), ("0x <LF>x", "0x#c<LF>x"),
+         ("echo $x:: 'it''s'",), ("echo x<BT>u{74}#c", "echo x<BT>u{74} "), ("$:: ",), ("echo 1#c",))]),
     ("ps lexer: U+180E gives the normalized text of each reading",
      lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
          "echo a<MVS><#c#>x", "echo x<MVS>#c<LF>y", "a<MVS>b", "echo a")],
