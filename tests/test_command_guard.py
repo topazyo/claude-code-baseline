@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1325
+FP_FLOOR = 1360
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4390
+BLOCK_FLOOR = 4439
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 46
+REASON_FLOOR = 48
 
 
 def _str_value(node):
@@ -8267,9 +8267,7 @@ _LIMIT8AS = [
     ("a list in a group in a group", "ri -r (('a','~'))"),
     ("a computed cmdlet name for the defaults",
      "(& ('Get-'+'Vari'+'able') ('PS*Val'+'ues')).Value['*:Recurse']=1; ri ~"),
-    ("a | then a block comment", "Get-Item ~ | <# c #><NL>ri -r"),
-    ("a quoted space and #, then a real comment after the |", "Get-Item ~,' #' | # c<NL>ri -r"),
-    ("a splat with no target", "Remove-Item @p"),
+     ("a splat with no target", "Remove-Item @p"),
 ]
 PS_CASES += [
     (f"ps remove-item: {_t8as(label)}", _t8as(cmd), B, ()) for label, cmd in _BLOCK8AS
@@ -9443,10 +9441,17 @@ _QB_BLOCK8BC = [
     ("a dot-source before cmd", _GP8BC, "pwsh -c '. cmd /c git push --force'"),
     ("return before pwsh", _GP8BC, "pwsh -c 'return pwsh -c ''git push --force'''"),
     ("return before iex", _GP8BC, "pwsh -c 'return iex ''git push --force'''"),
-    # cmd's carets read away at each level: the bash -c script read again.
-    ("a caret-spelled bash in cmd", _GP8BC, "cmd /c 'b^ash -c ''cmd //c git push --force'''"),
-    ("a caret-spelled bash in cmd in pwsh", _RF8BC, "pwsh -c 'cmd /c b^ash -c rm -rf ~'"),
-    ("a caret-spelled bash in cmd in cmd", _RF8BC, "cmd /c 'cmd /c b^ash -c rm -rf ~'"),
+    # cmd's carets read away at each level: the bash -c script read again. Four runners with
+    # the outer pwsh are past the depth limit, as the same chain without the comment is (8bk's
+    # normalized reading reads the line without its comment); three are read to the command.
+    ("a caret-spelled bash in cmd", _GP8BC, "cmd /c 'b^ash -c ''git push --force'''"),
+    ("a caret-spelled bash in cmd, rm", _RF8BC, "cmd /c b^ash -c rm -rf ~"),
+    ("a caret-spelled bash in cmd, past the depth limit", _DEEP8BC,
+     "cmd /c 'b^ash -c ''cmd //c git push --force'''"),
+    ("a caret-spelled bash in cmd in pwsh, past the depth limit", _DEEP8BC,
+     "pwsh -c 'cmd /c b^ash -c rm -rf ~'"),
+    ("a caret-spelled bash in cmd in cmd, past the depth limit", _DEEP8BC,
+     "cmd /c 'cmd /c b^ash -c rm -rf ~'"),
     # Past the depth limit (four runners with the outer pwsh), as the strict pass refuses it.
     ("pwsh in cmd in pwsh, past the depth limit", _DEEP8BC,
      "pwsh -c 'cmd /c pwsh -c git push --force'"),
@@ -9633,6 +9638,153 @@ STRUCT_CASES += [
                         "sh -c " + "cmd -c " * 520 + "dir")], [True, True, True]),
 ]
 
+
+# Follow-up 8bk: one PowerShell lexer (_ps_lex) and the text it normalizes to (_ps_normalize),
+# read as an added reading of every PowerShell payload and pwsh script. A comment, a block
+# comment or a here-string opens only where pwsh starts a new token, so a quote inside one no
+# longer shifts the older scanners' strings (each opened them by a rule of its own: at a word
+# start, or after any non-word character). Block rows: carriers found live on main a845b61 by a
+# desync fuzzer (guard-lab examples/8bk: pwsh 7 parses each and runs the runner), before a runner,
+# from the PowerShell tool and from Bash as `pwsh -c '...'`. Allow rows: comments, here-strings
+# and --% tails holding command-like text. Placeholders as in 8bc, and <LSQ> <RSQ> <LDQ> <RDQ>
+# for the typographic quotes U+2018 U+2019 U+201C U+201D.
+_RF8BK = "(rm -rf)"
+_GP8BK = "forced git push"
+_RUN_RF8BK = "pwsh -c 'bash -c ''rm -rf /'''"
+_RUN_GP8BK = "pwsh -c 'env ''a b=1'' git push --force'"
+
+
+def _t8bk(text):
+    return (_t8bc(text).replace("<LSQ>", chr(0x2018)).replace("<RSQ>", chr(0x2019))
+            .replace("<LDQ>", chr(0x201C)).replace("<RDQ>", chr(0x201D)))
+
+
+def _bash8bk(payload):
+    # A PowerShell payload run from Bash as `pwsh -c '...'`.
+    return "pwsh -c '" + _t8bk(payload).replace("'", "'" + '"' + "'" + '"' + "'") + "'"
+
+
+# (label, reason, PowerShell text)
+_DESYNC8BK = [
+    # A here-string opens after =, a comma or +, glued (the older scanners: at a word start).
+    ("a here-string glued to =", _RF8BK, "$h=@'<LF>it's<LF>'@<LF>" + _RUN_RF8BK),
+    ("a here-string glued to =, env", _GP8BK, "$h=@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string glued to =, then ;", _GP8BK, "$h=@'<LF>it's<LF>'@; " + _RUN_GP8BK),
+    ("a here-string glued to = holding #'", _GP8BK, "$h=@'<LF>#'<LF>'@<LF><LF>" + _RUN_GP8BK),
+    ("a here-string after a comma", _RF8BK, "echo a,@'<LF>it's<LF>'@<LF>" + _RUN_RF8BK),
+    ("a here-string after a comma, env", _GP8BK, "echo a,@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string after +", _GP8BK, "+@'<LF>'<LF>'@;<LF>" + _RUN_GP8BK + " ;"),
+    # A block comment after a -name: parameter, a number, an = or a string.
+    ("a block comment after -name:", _GP8BK, "<LF>-p:<#'#><LF><LF>" + _RUN_GP8BK + " <#'#>"),
+    ("a block comment after -name:, then ;", _GP8BK, "-p:<# x #> ; " + _RUN_GP8BK),
+    ("a block comment after a hex number", _RF8BK, "0x1<# x #> ; " + _RUN_RF8BK),
+    ("a block comment after a decimal", _GP8BK, "1.5<# x #>; " + _RUN_GP8BK),
+    ("a block comment after a number, then a stray ]", _RF8BK, "1<# x #>;] ; " + _RUN_RF8BK),
+    ("a block comment after =", _GP8BK, "$h=<# x #>]1   ; " + _RUN_GP8BK),
+    ("a block comment after a string", _GP8BK,
+     "<BT>@<DQ><LF>@<DQ><LF>''<# x #> ; " + _RUN_GP8BK),
+    ("a block comment after typographic strings", _RF8BK, "<RSQ>[int]<LSQ><# x #>; " + _RUN_RF8BK),
+    # A line comment after a number (its backtick is no line continuation) or a string.
+    ("a line comment after a number, ending in a backtick", _RF8BK, "1#<BT><LF>" + _RUN_RF8BK),
+    ("a line comment after a string", _RF8BK, "<DQ><DQ>#  <RDQ>a=<LF><LF>" + _RUN_RF8BK),
+    ("a line comment after a typographic-quoted string", _GP8BK, "'@<RSQ>#'#(<LF>" + _RUN_GP8BK),
+    ("a line comment after a word's typographic string", _GP8BK,
+     ".a:!<RSQ>#'<LF>" + _RUN_GP8BK + " #'$"),
+    ("a line comment holding an apostrophe", _GP8BK, "#'<LF><LF>" + _RUN_GP8BK + " #><#'#>1.5"),
+    ("a line comment holding @<DQ>", _GP8BK, "#'(@<DQ><LF>; " + _RUN_GP8BK + " #'a:"),
+    # A --% after a redirection: the rest of its line only is verbatim.
+    ("--% after a redirection", _RF8BK, "><BS>- --% <LDQ><LF><LF>" + _RUN_RF8BK),
+]
+# Allowed: command-like text in a comment, a here-string, a string or a --% tail, and an
+# opener pwsh reads as part of a word (`C#`, `a=@'`).
+_ALLOW8BK = [
+    ("a here-string holding an apostrophe", "Write-Output @'<LF>it's fine<LF>'@"),
+    ("a here-string in a group", "Write-Output (@'<LF>it's fine<LF>'@)"),
+    ("a here-string after a comma", "Write-Output a,@'<LF>it's fine<LF>'@"),
+    ("a comment after a group", "(1)#c<LF>Write-Output 2"),
+    ("a comment holding a command", "Write-Output 1 # git push --force"),
+    ("a block comment holding a command", "Write-Output 'a' <# rm -rf / #> 'b'"),
+    ("a # in a word", "dotnet new console -lang C# -o app"),
+    ("a # in a URL", "Invoke-WebRequest https://x.example/a#b"),
+    ("@' in a word", "echo a=@'<LF>x'"),
+    ("a subexpression in a string", "Write-Output <DQ>sha: $(git rev-parse --short HEAD) #<DQ>"),
+    ("a --% tail", "icacls C:/x --% /grant <DQ>Users:(OI)(CI)F<DQ>"),
+    ("a --% tail of quotes", "echo --% ''''''''"),
+    ("a double-quoted here-string", "Write-Output @<DQ><LF>line <DQ>quoted<DQ> here<LF><DQ>@"),
+    # Typographic quotes (pwsh closes a string at one, as the lexer does) and a --% tail that
+    # holds a variable, a quote and a # (each word of a tail is read as a literal string).
+    ("a typographic apostrophe in a string", "Write-Output <DQ>it<RSQ>s<DQ>"),
+    ("typographic quotes in a string", "Write-Output 'say <LDQ>hi<RDQ>'"),
+    ("typographic quotes in a --% tail", "echo --% <LDQ>a|b<RDQ> c | echo d"),
+    ("a --% tail holding a variable and a #", "echo --% $x 'it' #c"),
+]
+# From Bash only: the PowerShell tool refuses these on main too (its POSIX reading of the
+# whole payload meets the comment's apostrophe: unbalanced quoting).
+_ALLOW_BASH8BK = [
+    ("a comment after a group holding an apostrophe", "Write-Output 1<LF>(2)#it's<LF>Write-Output 3"),
+    ("a block comment between strings", "Write-Output 'a'<#it's#>'b'"),
+    ("a block comment after -name:", "Get-ChildItem -Filter:<#it's#>*.log"),
+]
+# Formerly known limits (8as): a pipeline continued after a `|` across a comment.
+_PIPED8BK = "targets piped in"
+_PIPE_BLOCK8BK = [
+    ("a | then a block comment", "Get-Item ~ | <# c #><LF>ri -r"),
+    ("a quoted space and #, then a real comment after the |", "Get-Item ~,' #' | # c<LF>ri -r"),
+]
+# The lexer's own refusals: nesting past its depth, and a $( ) body whose quotes double at
+# each level past the inspection length.
+_DEEP_DEPTH8BK = "nested too deep to read (> 32 levels)"
+_DEEP_DOUBLE8BK = "its quotes double at each level"
+_DEEP_ROWS8BK = [
+    ("33 nested subexpressions in strings", _DEEP_DEPTH8BK,
+     "Write-Output " + "<DQ>$(" * 33 + "1" + ")<DQ>" * 33),
+    ("14 nested subexpressions doubling their quotes", _DEEP_DOUBLE8BK,
+     "Write-Output " + "<DQ>$(" * 14 + "<BT><BT>" + ")<DQ>" * 14),
+]
+PS_CASES += [
+    (f"ps lexer: {label}", _t8bk(t), B, ()) for label, _r, t in _DESYNC8BK
+] + [
+    (f"ps lexer fp: {label}", _t8bk(t), A, ()) for label, t in _ALLOW8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), B, ()) for label, t in _PIPE_BLOCK8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), B, ()) for label, _r, t in _DEEP_ROWS8BK
+]
+CASES += [
+    (f"ps lexer: {label} (bash)", _bash8bk(t), B, ()) for label, _r, t in _DESYNC8BK
+] + [
+    (f"ps lexer fp: {label} (bash)", _bash8bk(t), A, ()) for label, t in _ALLOW8BK + _ALLOW_BASH8BK
+]
+MUST_BLOCK += [
+    (f"ps lexer: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _DESYNC8BK
+] + [
+    (f"ps lexer: {label} (bash)", _bash8bk(t), "bash", (), r) for label, r, t in _DESYNC8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), "powershell", (), _PIPED8BK) for label, t in _PIPE_BLOCK8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _DEEP_ROWS8BK
+]
+STRUCT_CASES += [
+    ("ps lexer: the normalized text of each opener rule",
+     lambda: [m._ps_normalize(_t8bk(t)) for t in (
+         "$h=@'<LF>it's<LF>'@<LF>x", "echo a=@'<LF>'", "(1)#c<LF>x", "echo a#b", "'s'<#c#>x",
+         "a<#c#>", "echo a<BT><LF>#'", "x$(<#)<LF>y", "echo --% it's #x", "<RSQ>a<RSQ>",
+         "<DQ>$('a<DQ>b')<DQ>", "@<DQ><LF>say <DQ>hi<LF><DQ>@", "-p:<#c#>x", "1#c", "1a#c")],
+     [_t8bk(t) for t in (
+         "$h= 'it''s'<LF>x", "echo a=@'<LF>'", "(1) <LF>x", "echo a#b", "'s' x",
+         "a<#c#>", "echo a<BT><LF>#'", "x$(<#)<LF>y", "echo --% 'it''s' '#x'", "'a'",
+         "<DQ>$('a<DQ><DQ>b')<DQ>", " <DQ>say <DQ><DQ>hi<DQ>", "-p: x", "1 ", "1a#c")]),
+    ("timing: the lexer is linear (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(m._ps_normalize, _t8bk(u)) < 3.0
+              for u in ("$h=@'<LF>x<LF>'@<LF>", "$h=@'<LF>", "x@'<LF>'<LF>", "'a'<#'#> ", "<#",
+                        "(1)#c<LF>", "<DQ>$('a<DQ>b')<DQ> ", "a<BT><LF>", "echo --% '<LF>",
+                        "x$((1))<LF>", "x$(", "-a=<#c#> ", "(", "$x.y[0]<#c#> ", "1a$(<#)")],
+     [True] * 15),
+    ("timing: the normalized reading scales linearly (4 KB vs 2 KB)",
+     lambda: [_ratio8ah("powershell", _t8bk(h), _t8bk(u)) < 3.0 for h, u in (
+         ("", "$h=@'<LF>it's<LF>'@<LF>"), ("", "x@'<LF>'<LF>"), ("", "(1)#c<LF>"),
+         ("echo ", "'a'<#'#> 'a'<#'#> "), ("echo ", "-a=<#c#> -p:<#c#> "))], [True] * 5),
+]
 
 def _main_blocks(tool_name, cmd):
     """Run the matcher as the hook does (payload on stdin) and report block/allow."""
