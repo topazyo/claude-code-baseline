@@ -113,7 +113,10 @@ here-strings read as one-line strings exactly where pwsh's tokenizer opens them,
 read with its $( ) whole, the words after --% (stop-parsing) as literal strings, split as the
 UCRT and, in a second text, as Git's MSYS2 runtime splits the command line a program receives;
 two texts again when it holds U+180E, which Windows PowerShell on .NET Framework 4 to 4.5.2 reads
-as a space and pwsh 7 as part of a word), so an older scanner's own rule for where a comment or a
+as a space and pwsh 7 as part of a word; again with a bare word glued to a comment opener ending
+before it, an identifier position not modelled; and, for a non-ASCII text, with its non-ASCII
+characters all outside names and all inside them, as .NET's letters differ from Python's and
+between .NET versions), so an older scanner's own rule for where a comment or a
 string opens cannot hide a command. The raw readings stay: they also judge the text after --%
 decoded, and give what the program receives there (for cmd, the text after it is also read as the
 script cmd gets: _ps_stop_parsing_cmd_scripts). Limits: a --% tail holding a single-quoted script
@@ -5497,12 +5500,19 @@ def _ps_unescape(text: str, legacy: bool = False) -> str:
 _PS_LEX_WS = frozenset(" \t\x0b\x0c\x85\u2028\u2029" + _PS_SPACES)
 _PS_LEX_QUOTES = frozenset(_PS_SQ | _PS_DQ)
 _PS_LEX_DASH = frozenset("-" + _PS_DASHES)
+_PS_LEX_EOL_RE = re.compile("[\r\n]")
 _PS_LEX_KEY_RE = re.compile(r"\w+")                # a hashtable's bare key: letters, digits, _
 _PS_LEX_DIGITS = frozenset("0123456789")   # only ASCII digits start a number (`<U+0663>`: a word character)
 _PS_LEX_MVS = chr(0x180E)          # U+180E: a space to the older .NET, a word character to pwsh 7
 _PS_LEX_MVS_INERT = chr(0x200B)    # what U+180E as a word character is lexed as (see _ps_normalize)
 # a here-string opener's rest: any blank pwsh accepts there (NBSP, NEL, VT, ... measured), then a line break
 _PS_LEX_BLANK_EOL_RE = re.compile("[" + re.escape("".join(sorted(_PS_LEX_WS))) + "]*(?:\r\n|\n|\r)")
+# a bare word glued to a comment opener, after a blank or a statement / group start: in an
+# identifier position (a DSC resource's key, ...) it ends before the opener (see _ps_lex_copies)
+_PS_LEX_IDENT_RE = re.compile(r"(?<![^\s({;,|&=])\w+(?=<#|#)")
+_PS_LEX_WORD_CH_RE = re.compile(r"\w")
+_PS_LEX_NARROW = chr(0xA7)         # a non-name, non-blank character: a non-ASCII word character, narrowly
+_PS_LEX_WIDE = chr(0x138)          # a name character lower() keeps: any other non-ASCII character, widely
 _PS_LEX_MAX_DEPTH = 32
 _PS_LEX_MAX_OUT = 2 * _MAX_INSPECT_LEN      # the normalized text's length cap (2 x the inspected input)
 _PS_LEX_KEYWORDS = frozenset((
@@ -5537,7 +5547,7 @@ _PS_LEX_NUM_RE_51 = re.compile(r"(?:0x[0-9a-f]+|(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e
                             r"(?:[dl])?(?:kb|mb|gb|tb|pb)?", re.I | re.A)
 # Syntax only pwsh 7 has (see _ps_normalized_texts): a `u{...} escape (5.1 reads `u as u and starts a
 # script block at the {), the keyword clean, or a number pwsh 7 reads that 5.1 reads to another end.
-_PS_LEX_V7_WORDS = re.compile(r"`u\{|clean|\?\.", re.I | re.A)
+_PS_LEX_V7_WORDS = re.compile(r"`u\{|clean|\?\.|\?\[", re.I | re.A)
 
 
 def _ps_lex_v7_syntax(text):
@@ -5595,7 +5605,8 @@ def _ps_lex_here_end(t, j, closers, n):
             if t[j - 1:j] == "\n" and body_end > 0 and t[body_end - 1] == "\r":
                 body_end -= 1
             return body_end, j + 2
-        k = min((x for x in (t.find("\n", j, n), t.find("\r", j, n)) if x >= 0), default=-1)
+        m = _PS_LEX_EOL_RE.search(t, j, n)
+        k = m.start() if m else -1
         if k < 0:
             break
         j = k + 1
@@ -5726,6 +5737,8 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
     post = False                    # an argument's group or variable just ended: `.` is member access
     post_nocc = False               # ...a braced variable: `.` only, not `::` (`${x}::y` is one word)
     comma = False                   # just after a `,`: a --% next is an array element, a word
+    ident_next = False              # just after `class` / `enum` / `data`: its name is an identifier
+    body = None                     # the stack depth whose next `{` is a class's / an enum's body
     while i < n:
         c = t[i]
         if bnd:
@@ -5736,6 +5749,11 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
         po, post = post, False
         pnocc, post_nocc = post_nocc, False
         cm, comma = comma, False
+        if stack and stack[-1][3] == "v=" and not (
+                c in _PS_LEX_WS or c in "\r\n|&," or (c == "`" and (t[i + 1:i + 2] in ("\r", "\n")
+                                                     or t[i + 1:i + 2] in _PS_LEX_WS))
+                or (bnd and (c == "#" or t.startswith("<#", i)))):
+            stack[-1][3] = "v"                                   # the value's first token
         # (not after a comma, blanks, comments or a line break between: `echo a, --% ;x` runs x)
         if not cm and ((mode == "cmd" and bnd and not pc and not rt and (
                 c == "-" or (c == "`" and t.startswith("-", i + 1)))) or (
@@ -5764,8 +5782,8 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             continue
         if c in "\r\n":
             i, bnd, num, mode, comma = i + 1, True, False, None, cm   # `a,<LF>`: the array goes on
-            if stack and stack[-1][3]:
-                stack[-1][3] = True                              # a hashtable's next key
+            if stack and stack[-1][3] in (True, "v"):
+                stack[-1][3] = True                              # a hashtable's next key (`a=<LF>b`: the value)
             continue
         if c == "`":
             if bnd and i + 1 < n and t[i + 1] in "\r\n":
@@ -5891,9 +5909,10 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
                     if not m or (braced and not chain and not t.startswith(".", i)):
                         break
                     i, chain = m.end(), True
-                if t.startswith("[", i) or (chain and t.startswith("(", i)):
-                    stack.append(["]" if t[i] == "[" else ")", mode, True, False])
-                    i, mode, bnd = i + 1, None, True
+                nc = not v51 and t.startswith("?[", i)          # pwsh 7.1+: `$x.y?[0]`
+                if nc or t.startswith("[", i) or (chain and t.startswith("(", i)):
+                    stack.append(["]" if nc or t[i] == "[" else ")", mode, True, False])
+                    i, mode, bnd = i + (2 if nc else 1), None, True
                     continue
             bnd, post, post_nocc = chain, at, braced and not chain
             continue
@@ -5903,8 +5922,13 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             i, mode, bnd, num = i + 2, None, True, False
             continue
         if c in "({":
-            stack.append([")" if c == "(" else "}", mode if mode is not None else "expr", True, False])
-            i, mode, bnd, num = i + 1, None, True, False
+            flag = False
+            if c == "{" and body == len(stack):
+                flag, body = "i", None                   # a class's / an enum's body: names are identifiers
+            elif c == "(" and _ps_lex_attribute_open(t, i):
+                flag = "i"                               # an attribute's arguments (`[Parameter(Mandatory)]`)
+            stack.append([")" if c == "(" else "}", mode if mode is not None else "expr", True, flag])
+            i, mode, bnd, num, ident_next = i + 1, None, True, False, False
             continue
         if c == "[" and mode != "cmd":
             i, mode, bnd, num = i + 1, "expr", True, False      # an index or a type literal
@@ -5924,17 +5948,21 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             bnd = bnd or mode == "expr"
             continue
         if c == ";":
-            if stack and stack[-1][3]:
+            if stack and stack[-1][3] in (True, "v", "v="):
                 stack[-1][3] = True                              # a hashtable's next key
-            i, mode, bnd, num = i + 1, None, True, False
+            i, mode, bnd, num, ident_next, body = i + 1, None, True, False, False, None
             continue
         if c == "|":
             i += 2 if t.startswith("||", i) else 1
             mode, bnd, num = None, True, False
+            if stack and stack[-1][3] in ("v", "v="):
+                stack[-1][3] = "v="                              # the pipeline goes on past a line break
             continue
         if c == "&":
             if t.startswith("&&", i):
                 i, mode = i + 2, None
+                if stack and stack[-1][3] in ("v", "v="):
+                    stack[-1][3] = "v="
             elif mode is None:
                 i, mode, inv = i + 1, "cmd", True
             else:
@@ -5943,9 +5971,11 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             continue
         if c == ",":
             i, bnd, num, comma = i + 1, True, False, True
+            if stack and stack[-1][3] in ("v", "v="):
+                stack[-1][3] = "v="                              # the array goes on past a line break
             continue
-        if stack and stack[-1][3] and c == "=" and (mode != "expr" or stack[-1][3] is True):
-            stack[-1][3] = "v"                                   # the value comes next
+        if stack and stack[-1][3] is True and c == "=":       # a value's own `b=x` is one bareword
+            stack[-1][3] = "v="                                  # the value comes next
             i, mode, bnd, num = i + 1, None, True, False         # a hashtable's key = value
             continue
         if mode != "cmd" and (c == ">" or (c in "0123456789*" and t[i + 1:i + 2] == ">")):
@@ -5990,7 +6020,8 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
                 continue
             if c in _PS_LEX_DASH:
                 m = _PS_LEX_PARAM_RE.match(t, i, n)
-                name = m.group(0)[1:].rstrip(":").lower()
+                name = m.group(0)[1:].rstrip(":")
+                name = name.lower() if name.isascii() else name   # lower() folds the Kelvin sign into k
                 if len(m.group(0)) == 1 or name in _PS_LEX_UNARY:
                     i, mode, bnd, num = m.end(), "expr", True, False
                     continue
@@ -6007,12 +6038,13 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
                 i, mode, bnd, inv = i + 1, "cmd", True, True
                 continue
             j = max(_PS_LEX_WORD_RE.match(t, i, n).end(), i + 1)
-            word = t[i:j].lower()
-            key = (stack and stack[-1][3] is True and mode is None and bnd
+            word = t[i:j].lower() if t[i:j].isascii() else ""   # `brea<U+212A>`: no keyword to pwsh
+            key = ((ident_next or (stack and stack[-1][3] in (True, "i"))) and mode is None and bnd
                    and _PS_LEX_KEY_RE.fullmatch(t, i, j) is not None)
-            i, num = j, False
+            i, num, ident_next = j, False, False
             if key:
-                # a hashtable's bare key (`@{a<#c#>=1}`): a token ends after it (measured)
+                # a hashtable's bare key (`@{a<#c#>=1}`), a class's / an enum's name or member, an
+                # attribute's argument name: a token ends after it (measured)
                 mode, bnd = "expr", True
                 continue
             # a keyword only before a blank, a line break, the end or &(),;{|} (measured, pwsh 7 and
@@ -6020,6 +6052,10 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             if word in (_PS_LEX_KEYWORDS_51 if v51 else _PS_LEX_KEYWORDS) and (
                     j >= n or t[j] in _PS_LEX_WS or t[j] in "\r\n&(),;{|}"):
                 mode, bnd = None, True
+                if word in ("class", "enum", "data"):
+                    ident_next = True                    # `class C<#c#>{}`: the name is an identifier
+                    if word != "data":
+                        body = len(stack)
             else:
                 mode, bnd, name = "cmd", False, True
             continue
@@ -6028,6 +6064,8 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
                     or t.startswith("??=", i)):
                 i += 3 if t.startswith("??=", i) else (1 if c == "=" else 2)
                 mode, bnd, num = None, True, False
+                if stack and stack[-1][3] in ("v", "v="):
+                    stack[-1][3] = "v="                          # `@{a=$x=<LF>b}`: b is the right side
                 continue
             if c in _PS_LEX_DIGITS:
                 j = _ps_lex_number_end(t, i, n, v51)
@@ -6042,10 +6080,11 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             bnd, num = True, False
             continue
         # mode == "cmd": an argument
-        if po and c == "[":
-            # an index after a member name (`'a'.b[0]#c`): a group, a token starts after it
+        if po and (c == "[" or (not v51 and t.startswith("?[", i))):
+            # an index after a member name (`'a'.b[0]#c`, pwsh 7.1+ `(1)?[0]#c`): a group, a token
+            # starts after it
             stack.append(["]", mode, True, False])
-            i, mode, bnd, num = i + 1, None, True, False
+            i, mode, bnd, num = i + (1 if c == "[" else 2), None, True, False
             continue
         if bnd and not po and c == "." and (t[i + 1:i + 2] in ("'", '"') or t.startswith("$(", i + 1)):
             # a `.` first in an argument before an ASCII quote or $( is a token of its own (`echo
@@ -6079,6 +6118,14 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
     if code[0] < i:
         nodes.append(("code", code[0], i))
     return nodes, i
+
+
+def _ps_lex_attribute_open(t, i):
+    # a `(` right after `[` and a type name: an attribute's arguments follow
+    j = i - 1
+    while j >= 0 and (t[j].isalnum() or t[j] in "_."):
+        j -= 1
+    return j < i - 1 and j >= 0 and t[j] == "["
 
 
 def _ps_lex(text, v51=False):
@@ -6386,14 +6433,41 @@ def _ps_normalized_texts(text):
     runs past. No split is either: MSYS2 groups '...' (`bash --% -c 'x'`), the UCRT does not.
     And, when the text may hold syntax only pwsh 7 has (a literal `1n`, `0b1`, `0x`; a `<BT>u{...}`
     escape), each read as Windows PowerShell 5.1 reads it too: there `1n<#` is one bareword, to
-    pwsh 7 a number and a comment."""
+    pwsh 7 a number and a comment. Each of these for each copy of the text _ps_lex_copies() gives (a
+    bare word glued to a comment opener ending before it; a non-ASCII text's narrow and wide name
+    characters)."""
     texts = []
-    for v51 in ((False, True) if _ps_lex_v7_syntax(text) else (False,)):
-        for mvs in ((False, True) if _PS_LEX_MVS in text else (False,)):
-            nodes = _ps_lex(text.replace(_PS_LEX_MVS, _PS_LEX_MVS_INERT) if mvs else text, v51)
-            for split in (_PS_LEX_SPLITS if _ps_lex_has_verb(nodes) else _PS_LEX_SPLITS[:1]):
-                texts.append(_ps_lex_emit_capped(text, nodes, split))
+    for copy in _ps_lex_copies(text):
+        for v51 in ((False, True) if _ps_lex_v7_syntax(text) else (False,)):
+            for mvs in ((False, True) if _PS_LEX_MVS in text else (False,)):
+                nodes = _ps_lex(copy.replace(_PS_LEX_MVS, _PS_LEX_MVS_INERT) if mvs else copy, v51)
+                for split in (_PS_LEX_SPLITS if _ps_lex_has_verb(nodes) else _PS_LEX_SPLITS[:1]):
+                    texts.append(_ps_lex_emit_capped(text, nodes, split))
     return list(dict.fromkeys(texts))           # the same text twice is judged once
+
+
+def _ps_lex_narrow(ch):
+    return _PS_LEX_NARROW if ord(ch) > 127 and _PS_LEX_WORD_CH_RE.match(ch) else ch
+
+
+def _ps_lex_wide(ch):
+    return (_PS_LEX_WIDE if ord(ch) > 127 and not _PS_LEX_WORD_CH_RE.match(ch) and ch not in _PS_LEX_WS
+            and ch not in _PS_LEX_QUOTES and ch not in _PS_LEX_DASH and ch != _PS_LEX_MVS_INERT else ch)
+
+
+def _ps_lex_copies(text):
+    """The copies of text the lexer reads, each of the text's length (emitted from the text itself):
+    the text; when a bare word is glued to `#` / `<#`, the text with each such word ending before
+    it (an identifier position the lexer does not model: a DSC resource's key, ...); and, when it is
+    not ASCII, each with every non-ASCII word character ending a name and with every other
+    non-ASCII character in one (Python, .NET 8 / 10 and .NET Framework 4.8 each know other letters;
+    measured: `$x.y<U+00B2>#'` and `$x.y<U+1C89>#'` end the name to pwsh 7)."""
+    copies = [text]
+    if _PS_LEX_IDENT_RE.search(text):
+        copies.append(_PS_LEX_IDENT_RE.sub(lambda m: m.group(0)[:-1] + " ", text))
+    if not text.isascii():
+        copies += ["".join(map(f, c)) for c in list(copies) for f in (_ps_lex_narrow, _ps_lex_wide)]
+    return list(dict.fromkeys(copies))
 
 
 def _ps_unescape_everywhere(text: str, legacy: bool = False) -> str:
@@ -6579,6 +6653,11 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     try:
         segments = (_powershell_segments(raw) if shell == "powershell"
                     else _segments(raw, shell=shell))
+        if shell != "powershell" and chr(0x212A) in raw:
+            # The Bash reader lowercases words, and lower() folds the Kelvin sign into k, which
+            # neither bash nor pwsh does (`pwsh -c 'brea<U+212A> --% ...'` holds no keyword): the
+            # text again, the sign spelled as a letter lower() leaves alone (U+0138).
+            segments += _segments(raw.replace(chr(0x212A), chr(0x138)), shell=shell)
     except _Uninspectable as exc:
         return [f"uninspectable command ({exc})"]
     except ValueError as exc:
