@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1410
+FP_FLOOR = 1422
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4608
+BLOCK_FLOOR = 4656
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -9650,7 +9650,9 @@ STRUCT_CASES += [
 # the typographic quotes U+2018 U+2019 U+201C U+201D, and <NEL> <LS> <PS> for U+0085, U+2028 and
 # U+2029 (blanks to pwsh), <NBSP> <EMSP> for U+00A0 and U+2003, <MVS> for U+180E (part of a word to
 # pwsh 7, a blank to Windows PowerShell on .NET Framework 4 to 4.5.2), <CR> a lone carriage return,
-# <U663> an Arabic-Indic digit three, <KELVIN> the Kelvin sign U+212A.
+# <U663> an Arabic-Indic digit three, <KELVIN> the Kelvin sign U+212A, <SUP2> U+00B2, <ROMAN1> U+2160,
+# <U1C89> (a letter to .NET 8 / 10, not to Python 3.13), <U1C80> (a letter to Python and .NET 8, not to
+# .NET Framework 4.8), <MATHA> U+1D400 (one letter to Python, two surrogates to .NET).
 _RF8BK = "(rm -rf)"
 _GP8BK = "forced git push"
 _RUN_RF8BK = "pwsh -c 'bash -c ''rm -rf /'''"
@@ -9663,7 +9665,9 @@ def _t8bk(text):
             .replace("<LDQ>", chr(0x201C)).replace("<RDQ>", chr(0x201D))
             .replace("<NEL>", chr(0x85)).replace("<LS>", chr(0x2028)).replace("<PS>", chr(0x2029))
             .replace("<NBSP>", chr(0xA0)).replace("<EMSP>", chr(0x2003)).replace("<MVS>", chr(0x180E))
-            .replace("<CR>", chr(13)).replace("<U663>", chr(0x663)).replace("<KELVIN>", chr(0x212A)))
+            .replace("<CR>", chr(13)).replace("<U663>", chr(0x663)).replace("<KELVIN>", chr(0x212A))
+            .replace("<SUP2>", chr(0xB2)).replace("<ROMAN1>", chr(0x2160)).replace("<U1C89>", chr(0x1C89))
+            .replace("<U1C80>", chr(0x1C80)).replace("<MATHA>", chr(0x1D400)))
 
 
 def _raises8bk(fn, text):
@@ -9845,6 +9849,42 @@ _DESYNC8BK = [
     ("a null-conditional member after a group", _GP8BK, "echo (1)?.y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
     # A hashtable's bare key ends a token: the <# after it opens a comment.
     ("a block comment after a hashtable's bare key", _GP8BK, "@{a<#'#>=1}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A Kelvin sign is no k to pwsh: brea<KELVIN> is a command, its --% stops parsing (Python's lower()
+    # folds it: the Bash reader's words too). A value's own `b=` is one bareword; a value may start after
+    # a line break.
+    ("a Kelvin-sign break, then --%", _GP8BK, "brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a Kelvin-sign workflow, then --%", _GP8BK, "wor<KELVIN>flow --% '<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a block comment after a hashtable value's bareword =", _GP8BK, "@{a=b=<#'#>x'<LF>}<LF>" + _RUN_GP8BK + " #''"),
+    ("a line comment after a hashtable value's bareword =", _GP8BK, "@{a=b=#'<LF>'<LF>}<LF>" + _RUN_GP8BK + " #''"),
+    ("a hashtable value after two line breaks", _GP8BK, "@{a=<LF><LF>b#'<LF>'<LF>}<LF>" + _RUN_GP8BK + " #''"),
+    # Names pwsh reads as identifiers (a token ends after each): an attribute's argument, a class's /
+    # an enum's / a data section's name, an enum's member, a class's method.
+    ("a comment after an attribute's argument name", _GP8BK,
+     "[CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute's argument name, then =", _GP8BK,
+     "function f{[CmdletBinding(PositionalBinding<#'#>=$false)]param()}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a class's name", _GP8BK, "class C<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an enum's name", _GP8BK, "enum E<#'#>{a}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an enum's member", _GP8BK, "enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an enum's second member", _GP8BK, "enum E{a<LF>b<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a data section's name", _GP8BK, "data D<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a class's method name", _GP8BK, "class C{f<#'#>(){}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # pwsh 7.1+'s null-conditional index ends a token like an index.
+    ("a null-conditional index after a member", _GP8BK, "echo $x.y?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional index after a group", _GP8BK, "echo (1)?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional index after a string", _GP8BK, "echo 'a'?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional index after an index", _GP8BK, "echo $x[0]?[1]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A member's name ends where .NET's letters end, not Python's (both ways; 5.1's .NET knows fewer).
+    ("a member name before a superscript two", _GP8BK, "echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    ("a member name before a Roman numeral", _GP8BK, "echo 'a'.b<ROMAN1>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    ("a member name before an astral letter", _GP8BK, "echo $x.y<MATHA>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    ("a member name with a Unicode 16 letter", _GP8BK, "echo $x.y<U1C89>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a member name with a letter 5.1 does not know", _GP8BK, "echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    # A DSC resource's body is a hashtable (not modelled: the bare-word copy reads it).
+    ("a comment after a DSC resource's key", _GP8BK,
+     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a DSC resource's second key", _GP8BK,
+     "configuration c{File f{DestinationPath='x'<LF>Ensure<#'#>='Present'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
 ]
 # Live on main from Bash only (the tool's strict POSIX reading of the payload refuses these as
 # unbalanced quoting, there and here): an escaped line break in a "..." here-string keeps the
@@ -9910,6 +9950,12 @@ _ALLOW8BK = [
     ("a keyword glued to a word and a real comment", "return#c # rm -rf /"),
     ("a hashtable's key, a comment and a value", "@{a<#c#>=1} # git push --force"),
     ("a hashtable value glued to a comment opener", "@{a=b<#c#>}"),
+    ("a Kelvin-sign word and a real comment", "brea<KELVIN> # git push --force"),
+    ("a hashtable value's bareword = and a real comment", "@{a=b=c} # git push --force"),
+    ("an attribute and a real comment", "[CmdletBinding()]param() # git push --force"),
+    ("a class, an enum and a real comment", "class C{f(){}} ; enum E{a} # git push --force"),
+    ("a null-conditional index and a real comment", "echo $x?[0] # git push --force"),
+    ("a non-ASCII member name and a real comment", "echo (1).y<SUP2> # git push --force"),
 ]
 # From Bash only: the PowerShell tool refuses these on main too (its POSIX reading of the
 # whole payload meets the comment's apostrophe: unbalanced quoting).
@@ -10035,11 +10081,12 @@ STRUCT_CASES += [
          "$h=@'<LF>a<CR>'@<CR>x#c", "<U663><#c#>x", "1<KELVIN>b<#c#>x")],
      [[_t8bk(t) for t in ts] for ts in (
          ("1n x", "1n<''#c#>x"), ("0b1 <LF>x", "0b1#c<LF>x"), ("0x <LF>x", "0x#c<LF>x"),
-         ("echo $x:: 'it''s'",), ("echo x<BT>u{74}#c", "echo x<BT>u{74} "), ("$:: ",), ("echo 1#c",),
-         ("return#c ; x",), ("if'x' ; y",), ("0xan x", "0xan<''#c#>x"), ("clean --% a", "clean --% 'a'"),
-         ("echo $x?.y ",), ("echo (1)?.y ", "echo (1)?.y#c"), ("echo ${x}?.y#c",), ("@{a =1}",),
-         ("@{a=1;b <LF>=2}",), ("@{a=b<''#c#>}",), ("$h= 'a'<CR>x#c",), ("<U663><''#c#>x",),
-         ("1<KELVIN>b<''#c#>x",))]),
+         ("echo $x:: 'it''s'",), ("echo x<BT>u{74}#c", "echo x<BT>u{74} "), ("$:: ",),
+         ("echo 1#c", "echo 1 "), ("return#c ; x", "return "), ("if'x' ; y",), ("0xan x", "0xan<''#c#>x"),
+         ("clean --% a", "clean --% 'a'"), ("echo $x?.y ",), ("echo (1)?.y ", "echo (1)?.y#c"),
+         ("echo ${x}?.y#c",), ("@{a =1}",), ("@{a=1;b <LF>=2}",), ("@{a=b<''#c#>}", "@{a=b }"),
+         ("$h= 'a'<CR>x#c", "$h= 'a'<CR>x "), ("<U663><''#c#>x", "<U663> x"),
+         ("1<KELVIN>b<''#c#>x", "1<KELVIN>b x"))]),
     ("ps lexer: U+180E gives the normalized text of each reading",
      lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
          "echo a<MVS><#c#>x", "echo x<MVS>#c<LF>y", "a<MVS>b", "echo a")],
@@ -10058,8 +10105,15 @@ STRUCT_CASES += [
          "0xan<#<LF>" + _RUN_GP8BK + "<LF>#>", "clean --% '<LF>" + _RUN_GP8BK + "<LF>#'",
          "echo $x?.y?.z#'<LF>" + _RUN_GP8BK + "<LF>#'", "<U663><#<LF>" + _RUN_GP8BK + "<LF>#>",
          "1<KELVIN>b<#<LF>" + _RUN_GP8BK + "<LF>#>",
-         "$h=@'<LF>a<CR>'@<CR>" + _RUN_GP8BK + "<CR>$z=@'<LF>'@")],
-     [True] * 13),
+         "$h=@'<LF>a<CR>'@<CR>" + _RUN_GP8BK + "<CR>$z=@'<LF>'@",
+         "brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'", "@{a=b=<#'#>x'<LF>}<LF>" + _RUN_GP8BK + " #''",
+         "@{a=<LF><LF>b#'<LF>'<LF>}<LF>" + _RUN_GP8BK + " #''",
+         "[CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'",
+         "class C<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'", "enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'",
+         "echo (1)?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'", "echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #''",
+         "echo $x.y<U1C89>#'<LF>" + _RUN_GP8BK + "<LF>#'",
+         "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'")],
+     [True] * 23),
     # Git's MSYS2 bash, the tail delivered verbatim (Legacy mode, Windows PowerShell 5.1; the tail
     # fuzz's gap): the unclosed double quote takes the rest of the line into the -c word, which a
     # normalized text carries whole (evaluate() on that text would split its quoted words again).
