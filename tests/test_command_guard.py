@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1422
+FP_FLOOR = 1428
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4656
+BLOCK_FLOOR = 4670
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 49
+REASON_FLOOR = 50
 
 
 def _str_value(node):
@@ -9652,8 +9652,9 @@ STRUCT_CASES += [
 # pwsh 7, a blank to Windows PowerShell on .NET Framework 4 to 4.5.2), <CR> a lone carriage return,
 # <U663> an Arabic-Indic digit three, <KELVIN> the Kelvin sign U+212A, <SUP2> U+00B2, <ROMAN1> U+2160,
 # <U1C89> (a letter to .NET 8 / 10, not to Python 3.13), <U1C80> (a letter to Python and .NET 8, not to
-# .NET Framework 4.8), <MATHA> U+1D400 (one letter to Python, two surrogates to .NET).
+# .NET Framework 4.8), <MATHA> U+1D400 (one letter to Python, two surrogates to .NET), <EACUTE> U+00E9.
 _RF8BK = "(rm -rf)"
+_F3HEAD8BK = "echo $x.y<SUP2>#c<LF>x#c<LF>echo $x.y<U1C89>#c<LF>1n<#c#>x<LF>echo a<MVS><#c#>x<LF>echo --% <DQ>a b<DQ> ''<LF>"
 _GP8BK = "forced git push"
 _RUN_RF8BK = "pwsh -c 'bash -c ''rm -rf /'''"
 _RUN_GP8BK = "pwsh -c 'env ''a b=1'' git push --force'"
@@ -9667,7 +9668,7 @@ def _t8bk(text):
             .replace("<NBSP>", chr(0xA0)).replace("<EMSP>", chr(0x2003)).replace("<MVS>", chr(0x180E))
             .replace("<CR>", chr(13)).replace("<U663>", chr(0x663)).replace("<KELVIN>", chr(0x212A))
             .replace("<SUP2>", chr(0xB2)).replace("<ROMAN1>", chr(0x2160)).replace("<U1C89>", chr(0x1C89))
-            .replace("<U1C80>", chr(0x1C80)).replace("<MATHA>", chr(0x1D400)))
+            .replace("<U1C80>", chr(0x1C80)).replace("<MATHA>", chr(0x1D400)).replace("<EACUTE>", chr(0xE9)))
 
 
 def _raises8bk(fn, text):
@@ -9885,6 +9886,26 @@ _DESYNC8BK = [
      "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
     ("a comment after a DSC resource's second key", _GP8BK,
      "configuration c{File f{DestinationPath='x'<LF>Ensure<#'#>='Present'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # Round 8: an attribute's `(...)]` leaves the statement going on; a DSC resource's body is read as
+    # a hashtable, so a glued word elsewhere keeps its own reading; a letter and a non-letter name
+    # character in one text; `echo [a(` is a command argument's group, no attribute.
+    ("a comment after an attribute before an enum", _GP8BK, "[Flags()] enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute before a class's method", _GP8BK,
+     "[Obsolete()] class C{M<#'#>(){}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a DSC resource's key and an ordinary glued word", _GP8BK,
+     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a letter key and a superscript member name in one text", _GP8BK,
+     "@{ <#c#><EACUTE><#'#>=1}<LF>echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("an argument's [name( group, no attribute", _GP8BK,
+     "echo [a(x<#)<LF>echo (1).y#'<LF>" + _RUN_GP8BK + "<LF>#' #>"),
+    # The Kelvin sign in a word the readings decode or lowercase: a nested pwsh's script.
+    ("a Kelvin-sign break in a nested pwsh's script", _GP8BK,
+     "pwsh -c <DQ>brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+]
+# Bash commands as typed: an ANSI-C escape bash decodes to the Kelvin sign.
+_BASH_RAW8BK = [
+    ("a Kelvin sign from an ANSI-C escape", _GP8BK,
+     "pwsh -c $'brea<BS>u212a --% <BS>'<BS>npwsh -c <BS>'env <BS>'<BS>'a b=1<BS>'<BS>' git push --force<BS>'<BS>n#<BS>''"),
 ]
 # Live on main from Bash only (the tool's strict POSIX reading of the payload refuses these as
 # unbalanced quoting, there and here): an escaped line break in a "..." here-string keeps the
@@ -9956,6 +9977,9 @@ _ALLOW8BK = [
     ("a class, an enum and a real comment", "class C{f(){}} ; enum E{a} # git push --force"),
     ("a null-conditional index and a real comment", "echo $x?[0] # git push --force"),
     ("a non-ASCII member name and a real comment", "echo (1).y<SUP2> # git push --force"),
+    ("an argument's [name( group and a real comment", "echo [a(1) # git push --force"),
+    ("a DSC resource and a real comment", "configuration c{File f{DestinationPath='x'}} # git push --force"),
+    ("an attribute before an enum and a real comment", "[Flags()] enum E{a} # git push --force"),
 ]
 # From Bash only: the PowerShell tool refuses these on main too (its POSIX reading of the
 # whole payload meets the comment's apostrophe: unbalanced quoting).
@@ -9984,6 +10008,7 @@ _ARGV8BK = [
 # each level past the inspection length.
 _DEEP_DEPTH8BK = "nested too deep to read (> 32 levels)"
 _DEEP_DOUBLE8BK = "its quotes double at each level"
+_DEEP_READINGS8BK = "too many readings to inspect"
 _DEEP_ROWS8BK = [
     ("33 nested subexpressions in strings", _DEEP_DEPTH8BK,
      "Write-Output " + "<DQ>$(" * 33 + "1" + ")<DQ>" * 33),
@@ -9992,6 +10017,8 @@ _DEEP_ROWS8BK = [
     # each chain under the cap, the whole normalized text over it
     ("two chains of 10 nested subexpressions doubling their quotes", _DEEP_DOUBLE8BK,
      "Write-Output " + ("<DQ>$(" * 10 + "<BT><BT>" + ")<DQ>" * 10 + " ") * 2),
+    # every reading at once, 4 KB: the readings' texts together past the bound
+    ("every reading at once in 4 KB", _DEEP_READINGS8BK, _F3HEAD8BK + "Write-Output 1 #c<LF>" * 200),
 ]
 PS_CASES += [
     (f"ps lexer: {label}", _t8bk(t), B, ()) for label, _r, t in _DESYNC8BK
@@ -10007,6 +10034,8 @@ PS_CASES += [
 CASES += [
     (f"ps lexer: {label} (bash)", _bash8bk(t), B, ()) for label, _r, t in _DESYNC8BK + _DESYNC_BASH8BK
 ] + [
+    (f"ps lexer: {label} (bash)", _t8bk(t), B, ()) for label, _r, t in _BASH_RAW8BK
+] + [
     (f"ps lexer fp: {label} (bash)", _bash8bk(t), A, ()) for label, t in _ALLOW8BK + _ALLOW_BASH8BK
 ]
 MUST_BLOCK += [
@@ -10016,6 +10045,8 @@ MUST_BLOCK += [
 ] + [
     (f"ps lexer: {label} (bash)", _bash8bk(t), "bash", (), r)
     for label, r, t in _DESYNC8BK + _DESYNC_BASH8BK
+] + [
+    (f"ps lexer: {label} (bash)", _t8bk(t), "bash", (), r) for label, r, t in _BASH_RAW8BK
 ] + [
     (f"ps lexer: {label}", _t8bk(t), "powershell", (), _PIPED8BK) for label, t in _PIPE_BLOCK8BK
 ] + [
@@ -10082,11 +10113,19 @@ STRUCT_CASES += [
      [[_t8bk(t) for t in ts] for ts in (
          ("1n x", "1n<''#c#>x"), ("0b1 <LF>x", "0b1#c<LF>x"), ("0x <LF>x", "0x#c<LF>x"),
          ("echo $x:: 'it''s'",), ("echo x<BT>u{74}#c", "echo x<BT>u{74} "), ("$:: ",),
-         ("echo 1#c", "echo 1 "), ("return#c ; x", "return "), ("if'x' ; y",), ("0xan x", "0xan<''#c#>x"),
+         ("echo 1#c",), ("return#c ; x", "return "), ("if'x' ; y",), ("0xan x", "0xan<''#c#>x"),
          ("clean --% a", "clean --% 'a'"), ("echo $x?.y ",), ("echo (1)?.y ", "echo (1)?.y#c"),
-         ("echo ${x}?.y#c",), ("@{a =1}",), ("@{a=1;b <LF>=2}",), ("@{a=b<''#c#>}", "@{a=b }"),
+         ("echo ${x}?.y#c",), ("@{a =1}",), ("@{a=1;b <LF>=2}",), ("@{a=b<''#c#>}",),
          ("$h= 'a'<CR>x#c", "$h= 'a'<CR>x "), ("<U663><''#c#>x", "<U663> x"),
          ("1<KELVIN>b<''#c#>x", "1<KELVIN>b x"))]),
+    # Every reading at once (non-ASCII names, a glued word, pwsh 7-only syntax, U+180E, a --% tail)
+    # multiplies the texts: 36 for a short text; past 48 K of them together the text is refused.
+    ("ps lexer: every reading at once is bounded",
+     lambda: [len(m._ps_normalized_texts(_t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 20))) == 36,
+              _raises8bk(m._ps_normalized_texts, _t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 200)),
+              "too many readings" in (m.evaluate(_t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 200),
+                                                  shell="powershell") or [""])[0]],
+     [True] * 3),
     ("ps lexer: U+180E gives the normalized text of each reading",
      lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
          "echo a<MVS><#c#>x", "echo x<MVS>#c<LF>y", "a<MVS>b", "echo a")],
@@ -10112,8 +10151,14 @@ STRUCT_CASES += [
          "class C<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'", "enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'",
          "echo (1)?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'", "echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #''",
          "echo $x.y<U1C89>#'<LF>" + _RUN_GP8BK + "<LF>#'",
-         "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'")],
-     [True] * 23),
+         "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'",
+         "[Flags()] enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'",
+         "configuration c{File f{DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'",
+         "@{ <#c#><EACUTE><#'#>=1}<LF>echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #'",
+         "echo [a(x<#)<LF>echo (1).y#'<LF>" + _RUN_GP8BK + "<LF>#' #>",
+         "$h=@{a=echo x<LF>| echo b#'<LF>'}<LF>" + _RUN_GP8BK + "<LF>#'",
+         "pwsh -c <DQ>brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'<DQ>")],
+     [True] * 29),
     # Git's MSYS2 bash, the tail delivered verbatim (Legacy mode, Windows PowerShell 5.1; the tail
     # fuzz's gap): the unclosed double quote takes the rest of the line into the -c word, which a
     # normalized text carries whole (evaluate() on that text would split its quoted words again).
