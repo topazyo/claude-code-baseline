@@ -30,7 +30,7 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1476
+FP_FLOOR = 1478
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
@@ -10556,6 +10556,11 @@ CASES += [
     (f"8bl dq escapes fp: {label}", _t8bl(t), A, ()) for label, t in _ALLOW8BL
 ] + [
     (f"8bl dq escapes, accepted cost: {label}", _t8bl(t), B, ()) for label, t in _COST8BL
+]
+# PowerShell-tool text gets no heredoc reading: `<<` there is no heredoc, a backslash no bash escape.
+PS_CASES += [
+    ("8bl dq escapes fp (powershell): a cmd script", _t8bl("cmd /c <DQ>echo a <<E <BS><BS>x<DQ>"), A, ()),
+    ("8bl dq escapes fp (powershell): a pwsh script", _t8bl("pwsh -c <SQ>git log --oneline <<E <BS>$x<SQ>"), A, ()),
 ]
 MUST_BLOCK += [
     (f"8bl dq escapes: {label}", _t8bl(t), "bash", (), r) for label, r, t in _DQ8BL + _HEREDOC8BL
