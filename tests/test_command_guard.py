@@ -9697,6 +9697,34 @@ def _lex_emit8bk(text, mvs_word=False):
     return out
 
 
+def _lex_items8bk(text, v51=False):
+    # The lexer's comment (C), string (S), unclosed (O) and --% tail (T) extents, nested ones included
+    # (lexdiff's measure against pwsh 7.6's tokens).
+    acc = set()
+
+    def collect(nodes):
+        for nd in nodes:
+            if nd[0] in ("lc", "bc"):
+                acc.add(("C", nd[1], nd[2]))
+            elif nd[0] == "verb":
+                acc.add(("T", nd[1], nd[2]))
+            elif nd[0] in ("sq", "hsq", "dq", "hdq", "open"):
+                acc.add(("S" if nd[0] != "open" else "O", nd[1], nd[2]))
+                for ch in (nd[3] if nd[0] == "dq" else nd[5] if nd[0] == "hdq" else ()):
+                    if ch[0] == "sub":
+                        collect(ch[3])
+    collect(m._ps_lex(text, v51))
+    return sorted(acc)
+
+
+def _norm8bk(text):
+    # The normalized texts, or the refusal's reason.
+    try:
+        return list(m._ps_normalized_texts(text))
+    except m._Uninspectable as exc:
+        return "refused: " + str(exc)
+
+
 # (label, reason, PowerShell text)
 _DESYNC8BK = [
     # A here-string opens after =, a comma or +, glued (the older scanners: at a word start).
@@ -10098,6 +10126,16 @@ _PIPE_BLOCK8BK = [
 ]
 # (tail, delivery, the words the program received)
 _ARGV8BK = [
+    # the mutant run's pins (Legacy-mode captures: ucrt = python, msys2 = Git's sh)
+    ("@q'<DQ>'<BS>@<DQ>'", 'msys2', ["@q<BS>@'"]),
+    ("@<DQ><BS>'<DQ> <DQ><BS><BS><DQ>", 'msys2', ['@<BS>', '<BS>']),
+    ("<DQ><BS><BS><DQ> '", 'msys2', ['<BS>', '']),
+    (';<DQ><BS><BS><DQ><DQ>', 'msys2', [';<BS><DQ>']),
+    ('<DQ><DQ><DQ>', 'msys2', ['<DQ>']),
+    ('<DQ><DQ><DQ>:', 'msys2', ['<DQ>:']),
+    ('<BS><BS>', 'msys2', ['<BS><BS>']),
+    ('<BS><BS>', 'msys2', ['<BS><BS>']),
+    ("x:<BS><BS><BS><BS><BS><BS><DQ>'<BS>''$(x)", 'msys2', ["x:<BS><BS><BS><BS><BS><BS>'<BS>''$(x)"]),
     ("<DQ><DQ><DQ>", "ucrt", ["<DQ>"]),
     ("<DQ><DQ> <BS>''", "ucrt", ["", "<BS>''"]),
     ("<DQ><DQ> <BS>''", "msys2", ["", "<BS>"]),
@@ -10165,6 +10203,150 @@ MUST_BLOCK += [
     (f"ps lexer: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _DEEP_ROWS8BK
 ]
 STRUCT_CASES += [
+    # The lexer's extents where pwsh 7.6's tokens disagree with a surviving mutant of the lexer (the
+    # Actions mutant run on 01de3719a64a; guard-lab examples/8bk mutsurv8bk.py): pwsh's comments and strings.
+    ("ps lexer: normalized texts the mutant run pins",
+     lambda: [_norm8bk(_t8bk(t)) for t in (
+         "@'<LF><LF>'@%#'<LSQ>",
+         '@<DQ><EMSP><LF><LF><DQ>@<BT> %#<CR><LF>',
+         "&&|!1<# x #>@'<LF>'@<BS>>",
+         "<RSQ>@'@1.5<#<#'#>@<DQ><LF>>$x[0]",
+         '[CmdletBinding<BT><LF>(SupportsShouldProcess#c)]param()',
+         '[CmdletBinding<BT><LF>(SupportsShouldProcess#c<LF>)]param()',
+         '!<BT><#',
+         "<LF><BT>@'<LF><BT>",
+         "[int]@<DQ><LF><BT><RDQ>@(+a:<LF><DQ>@#'",
+         '@{a=x<LF><BT><LF>| y#c}',
+         '@{a=x<LF><BT><LF>| y#c<LF>}',
+         '2>&1 --% @<DQ>a<RSQ>b<DQ>#  ',
+         '2>&1<MVS>--% @<DQ>a<RSQ>b<DQ>#  ',
+         '>--% #+=<NEL>><MVS>-<DQ>@<BS>> --% <MVS><LF><DQ>',
+         "><BT> <#'#>*2> --% <DQ>&&<BS>*> --% ",
+         '2>&1 --% -<DQ><DQ><DQ>',
+         '>--% <DQ>a<RSQ>b<DQ><DQ>a<RDQ>',
+         '=> --% ><BS>$',
+         '<BT><# --% <BS>-',
+         '$(<RDQ>${x}<RDQ>2>&1 --% a:<BS>[int].]',
+         '> --% a:$x<MVS>-p<MVS>a:-<BS>x<BT>u{74}(1).2>&1',
+         'echo <DQ>$(configuration c{})<DQ>',
+         'echo <DQ>a $(echo <U1C89>) b<DQ>')],
+     [[_t8bk(" ''% ")],
+      [_t8bk(' <DQ><DQ><BT> % <CR><LF>')],
+      [_t8bk("&&|!1 @<DQ><DQ>'<LF>'@<BS>>")],
+      [_t8bk("'@'@1.5 @''<DQ><LF>>$x[0]")],
+      [_t8bk('[CmdletBinding<BT><LF>(SupportsShouldProcess ')],
+      [_t8bk('[CmdletBinding<BT><LF>(SupportsShouldProcess <LF>)]param()')],
+      [_t8bk('!<BT><#')],
+      [_t8bk("<LF><BT>@'<LF><BT>")],
+      [_t8bk('[int] <DQ><BT><RDQ>@(+a:<DQ> ')],
+      [_t8bk('@{a=x<LF><BT><LF>| y#c}')],
+      [_t8bk('@{a=x<LF><BT><LF>| y#c<LF>}')],
+      [_t8bk("2>&1 --% '@a<RSQ><RSQ>b#'")],
+      [_t8bk("2>&1<MVS>--% '@a<RSQ><RSQ>b#'"), _t8bk("2>&1<MVS>--% @''<DQ>a<RSQ>b<DQ>#  ")],
+      [_t8bk(">--% '#+=<NEL>><MVS>-@<BS>> --% <MVS>'<LF><DQ>")],
+      [_t8bk("><BT>  *2> --% '&&<BS>*> --% '")],
+      [_t8bk("2>&1 --% '-<DQ>'")],
+      [_t8bk(">--% 'a<RSQ><RSQ>b<DQ>a<RDQ>'")],
+      [_t8bk("=> --% '><BS>$'")],
+      [_t8bk("<BT><# --% '<BS>-'")],
+      [_t8bk("$(<DQ>${x}<DQ>2>&1 --% 'a:<BS>[int].]'")],
+      [_t8bk("> --% 'a:$x<MVS>-p<MVS>a:-<BS>x<BT>u{74}(1).2>&1'")],
+      "refused: a PowerShell DSC configuration (its body's reading depends on the resources loaded)",
+      'refused: a PowerShell name character whose letter class differs between Unicode versions']),
+    ("ps lexer: a --% tail inside a string's $( ) is found",
+     lambda: m._ps_lex_has_verb(m._ps_lex(_t8bk("echo <DQ>$(x --% a<LF>)<DQ>"))), True),
+    ("ps lexer: comment and string extents pwsh 7.6 reads (mutant pins)",
+     lambda: [_lex_items8bk(_t8bk(t), v51) for t, v51 in (
+         ('<DQ><DQ><DQ><DQ>', False),
+         ("a<DQ>$(<# x #><BS>); Invoke-Command { pwsh -c 'rm -rf /' } @<DQ><LF>", False),
+         ("1@<DQ><LF><LF>'@$('a<DQ>b'){;; bash -c 'rm -rf /' ;@<DQ><LF> ", False),
+         ("<LF>; rm -rf / $('a<DQ>b') ", False),
+         ('@{a=x<LF><#c#><LF>| y#c}', False),
+         ('@{a=x<LF><#c#><LF>| y#c<LF>}', False),
+         ('$h=@{a=echo x<LF>#c<LF>| echo b#c}', False),
+         ('$h=@{a=echo x<LF>#c<LF>| echo b#c<LF>}', False),
+         ('@{a=1<LF>b<#c#>=1}', False),
+         ('@{a=b<LF>b<#c#>=1}', False),
+         ('<BT><LF>#', False),
+         ('<BT><LF>#%', False),
+         ('<BT> #', False),
+         ("<BT> #'", False),
+         ("<LF>'@ #$('''<LF>rm -rf /", False),
+         ("<LF>'@$(<LF>''<DQ> ; rm -rf / <BS><#'#>", False),
+         ('x$(a@<DQ><LF>)', False),
+         ('x$(|<RDQ>)-p', False),
+         ('-p[$(1)#y', False),
+         ('x | -p[$(1)#y', False),
+         ('enum E{a#c<LF>}', False),
+         ('enum E{a<LF>b#c<LF>}', False),
+         ('[A(b#c<LF>)][B(c)]$x=1', False),
+         ("[A(b<#'#>)][B(c)]$x=1", False),
+         ('[int]#', False),
+         ('[int]#>', False),
+         ('[Flags()]enum E{a#c<LF>}', False),
+         ('[Flags()] enum E{a#c<LF>}', False),
+         (']$x#', False),
+         (']1<#', False),
+         ('a&&0x1#>', False),
+         ("]&&-'&&a:<#'#>$", False),
+         ('<LF>!x#', False),
+         ('!echo x<#@', False),
+         ('+1<BT>-p<BT> #!', False),
+         ('+1.5#>', False),
+         ("+2><MVS>--% #'(", False),
+         ('+=#', False),
+         ('+=#>', False),
+         ("-''#", False),
+         ('-<DQ><DQ>#>', False),
+         ('function f{param([ Parameter(Mandatory#c<LF>)]$x)}', False),
+         ('[ CmdletBinding(SupportsShouldProcess#c<LF>)]param()', False),
+         ('[<#c#>CmdletBinding(SupportsShouldProcess#c<LF>)]param()', False),
+         ('[CmdletBinding <#c#>(SupportsShouldProcess#c<LF>)]param()', False))],
+     [[('S', 0, 4)],
+     [('S', 1, 55)],
+     [('S', 2, 41)],
+     [('S', 14, 19)],
+     [('C', 6, 11)],
+     [('C', 6, 11)],
+     [('C', 14, 16)],
+     [('C', 14, 16)],
+     [('C', 7, 12)],
+     [('C', 7, 12)],
+     [('C', 2, 3)],
+     [('C', 2, 4)],
+     [('C', 2, 3)],
+     [('C', 2, 4)],
+     [('S', 1, 10)],
+     [('C', 25, 27), ('S', 1, 25)],
+     [],
+     [],
+     [],
+     [],
+     [('C', 8, 10)],
+     [('C', 10, 12)],
+     [('C', 4, 6)],
+     [('C', 4, 9)],
+     [('C', 5, 6)],
+     [('C', 5, 7)],
+     [('C', 17, 19)],
+     [('C', 18, 20)],
+     [],
+     [],
+     [('C', 6, 8)],
+     [('C', 12, 15), ('S', 4, 12)],
+     [],
+     [],
+     [],
+     [('C', 4, 6)],
+     [('C', 8, 11)],
+     [],
+     [],
+     [('C', 3, 4), ('S', 1, 3)],
+     [('C', 3, 5), ('S', 1, 3)],
+     [('C', 38, 40)],
+     [('C', 37, 39)],
+     [('C', 1, 6), ('C', 41, 43)],
+     [('C', 15, 20), ('C', 42, 44)]]),
     ("ps lexer: the normalized text of each opener rule",
      lambda: [m._ps_normalize(_t8bk(t)) for t in (
          "$h=@'<LF>it's<LF>'@<LF>x", "echo a=@'<LF>'", "(1)#c<LF>x", "echo a#b", "'s'<#c#>x",
