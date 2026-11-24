@@ -117,7 +117,7 @@ as a space and pwsh 7 as part of a word; again with a bare word glued to a comme
 before it, an identifier position not modelled; and, for a non-ASCII text, with its non-ASCII
 characters outside names, inside them as .NET's letters only, and as those with unknown
 characters too, as .NET's letters differ from Python's and between .NET versions; a text whose
-readings together pass 48 K is refused), so an older scanner's own rule for where a comment or a
+readings together pass 24 K in one evaluation is refused), so an older scanner's own rule for where a comment or a
 string opens cannot hide a command. The raw readings stay: they also judge the text after --%
 decoded, and give what the program receives there (for cmd, the text after it is also read as the
 script cmd gets: _ps_stop_parsing_cmd_scripts). Limits: a --% tail holding a single-quoted script
@@ -145,6 +145,7 @@ import os
 import re
 import shlex
 import sys
+import unicodedata
 
 # Hard input cap. Anything larger is blocked unparsed (see docstring; review S1).
 _MAX_INSPECT_LEN = 4096
@@ -3731,13 +3732,19 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
                 continue
             if not _SHORT_FLAG_RE.match(piece):
-                if chr(0x212A) in piece:
-                    # lower() folds the Kelvin sign into k (see evaluate()): noted, and in the
-                    # second reading spelled as a letter lower() keeps
+                if not piece.isascii() and any(ord(c) > 127 and c.lower() != c for c in piece):
+                    # lower() changes a non-ASCII character (the Kelvin sign folds into k, U+0130
+                    # splits in two, U+1C90 becomes a letter Unicode 3.2 had; see evaluate()): noted,
+                    # and the second reading lowercases ASCII only, the Kelvin sign and U+0130 spelled
+                    # U+0138 (a letter lower() keeps)
                     _Command.kelvin_seen = True
                     if _Command.kelvin_alt:
-                        piece = piece.replace(chr(0x212A), chr(0x138))
-                piece = piece.lower()
+                        piece = piece.replace(chr(0x212A), chr(0x138)).replace(chr(0x130), chr(0x138))
+                        piece = "".join(c.lower() if ord(c) < 128 else c for c in piece)
+                    else:
+                        piece = piece.lower()
+                else:
+                    piece = piece.lower()
             if pending:
                 if pending == "<<<":
                     herestr.append(piece)
@@ -4820,8 +4827,8 @@ class _Command:
     raw = ""
     ps_defaults = False
     backslash_switch = False
-    kelvin_seen = False             # a lowercased word held U+212A (see evaluate())
-    kelvin_alt = False              # ...and this reading spells it U+0138
+    kelvin_seen = False             # a lowercased word held a character lower() changes (see evaluate())
+    kelvin_alt = False              # ...and this reading lowercases ASCII only
 
 
 @functools.lru_cache(maxsize=4096)
@@ -5516,17 +5523,23 @@ _PS_LEX_MVS = chr(0x180E)          # U+180E: a space to the older .NET, a word c
 _PS_LEX_MVS_INERT = chr(0x200B)    # what U+180E as a word character is lexed as (see _ps_normalize)
 # a here-string opener's rest: any blank pwsh accepts there (NBSP, NEL, VT, ... measured), then a line break
 _PS_LEX_BLANK_EOL_RE = re.compile("[" + re.escape("".join(sorted(_PS_LEX_WS))) + "]*(?:\r\n|\n|\r)")
-# a bare word glued to a comment opener, after a blank or a statement / group start: in an
-# identifier position (a DSC resource's key, ...) it ends before the opener (see _ps_lex_copies)
-_PS_LEX_IDENT_RE = re.compile(r"(?:^|(?<=[{;\r\n]))[^\S\r\n]*\w+(?=<#|#)")
-# a DSC resource's statement before its `{`: a type and a name (`File f {`, `node localhost {`)
-_PS_LEX_DSC_RE = re.compile(r"\s*([\w.\\:-]+)\s+([^\s{}();]+)\s*")
+# a bare word glued to a comment opener at a statement start (the start, after `{`, `(`, `;` or a
+# line break, blanks between): in an identifier position the lexer does not model it ends before the
+# opener (see _ps_lex_copies)
+_PS_LEX_IDENT_RE = re.compile(r"(?:^|(?<=[{(;\r\n]))[^\S\r\n]*\w+(?=<#|#)")
+# a DSC configuration's keyword (refused in code wherever a name can follow it: its body's shape depends on the
+# resources loaded when pwsh parses it; any position, an over-approximation: a position test missed blanks the
+# lexer knows)
+_PS_LEX_DSC_WORD_RE = re.compile(r"(?<![\w$.\-:\\/@`])" + "`?".join("configuration")
+                              + r"(?![\w\-.:\\/=`])", re.I | re.A)
 _PS_LEX_WORD_CH_RE = re.compile(r"\w")
 _PS_LEX_NARROW = chr(0xA7)         # a non-name, non-blank character: a non-ASCII word character, narrowly
-_PS_LEX_WIDE = chr(0x138)          # a name character lower() keeps: any other non-ASCII character, widely
+
 _PS_LEX_MAX_DEPTH = 32
 _PS_LEX_MAX_OUT = 2 * _MAX_INSPECT_LEN      # the normalized text's length cap (2 x the inspected input)
-_PS_LEX_MAX_READ = 6 * _PS_LEX_MAX_OUT   # the normalized texts' total length when copies add readings
+_PS_LEX_MAX_READ = 3 * _PS_LEX_MAX_OUT   # the normalized texts' total length when copies add readings (24 K)
+# over one evaluate() when "on" (the matcher sets it; used counts every call's texts), else per call
+_PS_LEX_READ = {"used": 0, "on": False}
 _PS_LEX_KEYWORDS = frozenset((
     "if elseif else while for foreach switch do until try catch finally trap function filter "
     "workflow param begin process end clean dynamicparam return throw exit break continue data "
@@ -5750,8 +5763,7 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
     post_nocc = False               # ...a braced variable: `.` only, not `::` (`${x}::y` is one word)
     comma = False                   # just after a `,`: a --% next is an array element, a word
     ident_next = False              # just after `class` / `enum` / `data`: its name is an identifier
-    body = None                     # (stack depth, flag) for the next `{`: a class / enum ("i") or DSC ("d") body
-    stmt = i                        # where the current statement started (a DSC resource's `Type Name {`)
+    body = None                     # (stack depth, flag) for the next `{`: a class's / an enum's body ("i")
     type_lb = -1                    # the last `[` read as an index / a type literal / an attribute
     attr_end = False                # just after an attribute's `)`
     pipe_at, pipe_next = -1, False  # look-ahead cache: does the line after a break start with `|`?
@@ -5799,17 +5811,23 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             continue
         if c in "\r\n":
             i, bnd, num, mode, comma = i + 1, True, False, None, cm   # `a,<LF>`: the array goes on
-            stmt = i
             if stack and stack[-1][3] == "v" and not v51:
                 if i > pipe_at:                                  # pwsh 7: `a=x<LF>| y` goes on
                     pipe_at = i
-                    while pipe_at < n and (t[pipe_at] in _PS_LEX_WS or t[pipe_at] in "\r\n"
-                                           or t[pipe_at] == "#"):
-                        if t[pipe_at] == "#":
+                    while pipe_at < n:                   # blanks, comments, line continuations
+                        ch = t[pipe_at]
+                        if ch in _PS_LEX_WS or ch in "\r\n":
+                            pipe_at += 1
+                        elif t.startswith("<#", pipe_at):
+                            k = t.find("#>", pipe_at + 2, n)
+                            pipe_at = n if k < 0 else k + 2
+                        elif ch == "#":
                             m = _PS_LEX_EOL_RE.search(t, pipe_at, n)
                             pipe_at = m.start() if m else n
+                        elif ch == "`" and t[pipe_at + 1:pipe_at + 2] in ("\r", "\n"):
+                            pipe_at += 2
                         else:
-                            pipe_at += 1
+                            break
                     pipe_next = t.startswith(("|", "&&"), pipe_at)   # `|`, `||`, `&&` first
                 if pipe_next:
                     continue
@@ -5955,18 +5973,13 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
         if c in "({":
             flag = False
             if c == "{" and body is not None and body[0] == len(stack):
-                flag, body = body[1], None               # a class / enum body ("i"), a configuration's ("d")
-            elif c == "{" and stack and stack[-1][3] == "d":
-                m = _PS_LEX_DSC_RE.fullmatch(t, stmt, i)
-                if m and m.group(1).lower() not in _PS_LEX_KEYWORDS:
-                    flag = "d" if m.group(1).lower() == "node" else True   # a resource's body: a hashtable
-                else:
-                    flag = "d"                           # `if (...) {`, `foreach (...) {`: still the body
-            elif c == "(" and type_lb >= 0 and _ps_lex_attribute_open(t, i, type_lb):
-                flag = "i"                               # an attribute's arguments (`[Parameter(Mandatory)]`)
+                flag, body = body[1], None               # a class's / an enum's body
+            elif c == "(" and type_lb >= 0:
+                if _ps_lex_attribute_open(t, i, type_lb):
+                    flag = "i"                           # an attribute's arguments (`[Parameter(Mandatory)]`)
+                type_lb = -1                             # each `[` checked once (linear)
             stack.append([")" if c == "(" else "}", mode if mode is not None else "expr", True, flag])
             i, mode, bnd, num, ident_next = i + 1, None, True, False, False
-            stmt = i
             continue
         if c == "[" and mode != "cmd":
             type_lb = i                                  # an attribute's `(` may follow its name
@@ -5994,7 +6007,6 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
             if stack and stack[-1][3] in (True, "v", "v="):
                 stack[-1][3] = True                              # a hashtable's next key
             i, mode, bnd, num, ident_next, body = i + 1, None, True, False, False, None
-            stmt = i
             continue
         if c == "|":
             i += 2 if t.startswith("||", i) else 1
@@ -6091,15 +6103,15 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
                 # a hashtable's bare key (`@{a<#c#>=1}`), a class's / an enum's name or member, an
                 # attribute's argument name: a token ends after it (measured)
                 mode, bnd = "expr", True
-                if owner in ("class", "enum", "configuration"):
-                    body = (len(stack), "d" if owner == "configuration" else "i")   # its body comes next
+                if owner in ("class", "enum"):
+                    body = (len(stack), "i")             # its body comes next
                 continue
             # a keyword only before a blank, a line break, the end or &(),;{|} (measured, pwsh 7 and
             # 5.1): `return#c`, `if'x'`, `if$x` are one bareword each, their # or quote opens nothing
             if word in (_PS_LEX_KEYWORDS_51 if v51 else _PS_LEX_KEYWORDS) and (
                     j >= n or t[j] in _PS_LEX_WS or t[j] in "\r\n&(),;{|}"):
                 mode, bnd = None, True
-                if word in ("class", "enum", "data", "configuration"):
+                if word in ("class", "enum", "data"):
                     ident_next = word                    # `class C<#c#>{}`: the name is an identifier
             else:
                 mode, bnd, name = "cmd", False, True
@@ -6165,12 +6177,32 @@ def _ps_lex_code(t, i, closer, depth, n=None, v51=False):
     return nodes, i
 
 
+def _ps_lex_skip_fwd(t, j, end):
+    # over blanks, <#...#> comments and line continuations, not past end
+    while j < end:
+        if t[j] in _PS_LEX_WS:
+            j += 1
+        elif t.startswith("<#", j):
+            k = t.find("#>", j + 2, end)
+            if k < 0:
+                return j
+            j = k + 2
+        elif t[j] == "`" and t[j + 1:j + 2] in ("\r", "\n"):
+            j += 3 if t.startswith("\r\n", j + 1) else 2
+        else:
+            break
+    return j
+
+
 def _ps_lex_attribute_open(t, i, lb):
-    # a `(` right after a type-position `[` (at lb) and a type name: an attribute's arguments follow
-    j = i - 1
-    while j > lb and (t[j].isalnum() or t[j] in "_."):
-        j -= 1
-    return j == lb < i - 1
+    # a `(` after a type-position `[` (at lb) and a type name, blanks, block comments and line
+    # continuations between allowed (measured: `[ CmdletBinding(`, `[<#c#>CmdletBinding(`): an
+    # attribute's arguments follow
+    j = _ps_lex_skip_fwd(t, lb + 1, i)
+    k = j
+    while k < i and (t[k].isalnum() or t[k] in "_."):
+        k += 1
+    return k > j and _ps_lex_skip_fwd(t, k, i) == i
 
 
 def _ps_lex(text, v51=False):
@@ -6479,31 +6511,70 @@ def _ps_normalized_texts(text):
     And, when the text may hold syntax only pwsh 7 has (a literal `1n`, `0b1`, `0x`; a `<BT>u{...}`
     escape), each read as Windows PowerShell 5.1 reads it too: there `1n<#` is one bareword, to
     pwsh 7 a number and a comment. Each of these for each copy of the text _ps_lex_copies() gives (a
-    bare word glued to a comment opener ending before it; a non-ASCII text's narrow and wide name
-    characters)."""
+    bare word glued to a comment opener ending before it, at a statement start; a non-ASCII text's
+    name characters as Python and .NET read them). A DSC configuration, and a name character whose
+    letter class differs between Unicode versions, are refused (see _ps_lex_refusal)."""
     texts = []
     copies = _ps_lex_copies(text)
     for copy in copies:
         for v51 in ((False, True) if _ps_lex_v7_syntax(text) else (False,)):
             for mvs in ((False, True) if _PS_LEX_MVS in text else (False,)):
                 nodes = _ps_lex(copy.replace(_PS_LEX_MVS, _PS_LEX_MVS_INERT) if mvs else copy, v51)
+                _ps_lex_refusal(text, nodes)
                 for split in (_PS_LEX_SPLITS if _ps_lex_has_verb(nodes) else _PS_LEX_SPLITS[:1]):
                     texts.append(_ps_lex_emit_capped(text, nodes, split))
     texts = list(dict.fromkeys(texts))          # the same text twice is judged once
-    if len(copies) > 1 and sum(map(len, texts)) > _PS_LEX_MAX_READ:
+    total = sum(map(len, texts)) if len(copies) > 1 else 0
+    if _PS_LEX_READ["on"]:
+        _PS_LEX_READ["used"] += total
+        total = _PS_LEX_READ["used"]
+    if total > _PS_LEX_MAX_READ:
         # every reading at once (non-ASCII names, a glued word, pwsh 7-only syntax, U+180E, a --%
         # tail) multiplies the texts each reading then reads: past the bound, refuse (a block)
         raise _Uninspectable("PowerShell text with too many readings to inspect")
     return texts
 
 
-def _ps_lex_narrow(ch):
-    return _PS_LEX_NARROW if ord(ch) > 127 and _PS_LEX_WORD_CH_RE.match(ch) else ch
+def _ps_lex_code_spans(nodes):
+    # (a, b) of each code node, a $( ) in a string's included
+    for node in nodes:
+        if node[0] == "code":
+            yield node[1], node[2]
+        elif node[0] in ("dq", "hdq"):
+            for child in node[-1]:
+                if child[0] == "sub":
+                    yield from _ps_lex_code_spans(child[3])
 
 
-def _ps_lex_wide(ch):
-    return (_PS_LEX_WIDE if ord(ch) > 127 and not _PS_LEX_WORD_CH_RE.match(ch) and ch not in _PS_LEX_WS
-            and ch not in _PS_LEX_QUOTES and ch not in _PS_LEX_DASH and ch != _PS_LEX_MVS_INERT else ch)
+def _ps_lex_name_class(db, ch):
+    # a letter or a decimal digit in Unicode database db (a name character to .NET)
+    k = db.category(ch)
+    return k[0] == "L" or k == "Nd"
+
+
+def _ps_lex_dsc_nameless(t, e):
+    # whether no DSC name can follow the keyword ending at e: blanks, then `=` `,` `)` `}` `;` `|` or the text's
+    # end (`@{ Configuration = 'Release' }`; `configuration =c{` and `configuration ,c{` are parse errors to pwsh
+    # 7.6 and 5.1: measured)
+    while e < len(t) and t[e] in _PS_LEX_WS:
+        e += 1
+    return e == len(t) or t[e] in "=,)};|"
+
+
+def _ps_lex_refusal(t, nodes):
+    # raise Uninspectable when a lexer reading's code cannot be read faithfully (see _ps_normalized_texts). A
+    # character Unicode 3.2 did not assign, or classed otherwise than Python's Unicode does, is a name
+    # character to some of .NET 8 / 10, .NET Framework 4.8 and Python and not to others (measured over
+    # the BMP: U+1885 and U+1886 are letters to .NET Framework 4.8 only)
+    for a, b in _ps_lex_code_spans(nodes):
+        for i in range(a, b):
+            ch = t[i]
+            if ord(ch) > 127 and (unicodedata.ucd_3_2_0.category(ch) == "Cn"
+                                  or _ps_lex_name_class(unicodedata.ucd_3_2_0, ch) != _ps_lex_name_class(unicodedata, ch)):
+                raise _Uninspectable("a PowerShell name character whose letter class differs between Unicode versions")
+        for m in _PS_LEX_DSC_WORD_RE.finditer(t, a, b):
+            if not _ps_lex_dsc_nameless(t, m.end()):
+                raise _Uninspectable("a PowerShell DSC configuration (its body's reading depends on the resources loaded)")
 
 
 def _ps_lex_net(ch):
@@ -6513,23 +6584,20 @@ def _ps_lex_net(ch):
             and not ((ch.isalpha() or ch.isdecimal()) and ord(ch) <= 0xFFFF) else ch)
 
 
-def _ps_lex_net_wide(ch):
-    return _ps_lex_wide(_ps_lex_net(ch))
-
-
 def _ps_lex_copies(text):
     """The copies of text the lexer reads, each of the text's length (emitted from the text itself):
     the text; when a bare word is glued to `#` / `<#`, the text with each such word ending before
     it, at a statement start (an identifier position the lexer does not model); and, when it is not
-    ASCII, each with every non-ASCII word character ending a name, with .NET's letters and decimal
-    digits only in one, and that with every other non-ASCII character in one too (Python, .NET 8 /
-    10 and .NET Framework 4.8 each know other letters; measured: `$x.y<U+00B2>#'` ends the name to
-    pwsh 7 and 5.1, `$x.y<U+1C89>#'` does not to pwsh 7)."""
+    ASCII, each with .NET's letters and decimal digits only as name characters (measured:
+    `$x.y<U+00B2>#'` ends the name to pwsh 7 and 5.1). Python, .NET 8 / 10 and .NET Framework 4.8
+    disagree only on characters Unicode 3.2 did not assign or classed otherwise (`$x.y<U+1C89>#'`
+    does not end the name to pwsh 7, `$x.y<U+1C80>#'` and `$x.y<U+1885>#'` do to 5.1): a text with one
+    in its code is refused instead (_ps_lex_refusal)."""
     copies = [text]
     if _PS_LEX_IDENT_RE.search(text):
         copies.append(_PS_LEX_IDENT_RE.sub(lambda m: m.group(0)[:-1] + " ", text))
     if not text.isascii():
-        copies += ["".join(map(f, c)) for c in list(copies) for f in (_ps_lex_narrow, _ps_lex_net, _ps_lex_net_wide)]
+        copies += ["".join(map(_ps_lex_net, c)) for c in list(copies)]
     return list(dict.fromkeys(copies))
 
 
@@ -6620,7 +6688,9 @@ def _powershell_segments(raw: str, normalized: bool = False):
         for body in _ps_bodies(raw):
             if body.strip() not in ("", ":"):
                 _RunnerBudget.charge(len(body))
-                segments += _powershell_segments(body)
+                # a normalized text's bodies hold code the lexer emitted: read, not normalized
+                # again (the raw text's own bodies are; every reading at once squared otherwise)
+                segments += _powershell_segments(body, normalized=normalized)
     base = _ps_dash_readings(raw)
     # The code a canonical literal call runs from a string ([scriptblock]::Create('...'),
     # .InvokeScript('...'), ...), read as a pwsh script; any other such call is refused
@@ -6714,13 +6784,17 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     _RunnerBudget.used = 0
     _Command.raw = raw
     _Command.kelvin_seen = _Command.kelvin_alt = False
+    _PS_LEX_READ["used"], _PS_LEX_READ["on"] = 0, True     # the readings bound, over this evaluation
     try:
         segments = (_powershell_segments(raw) if shell == "powershell"
                     else _segments(raw, shell=shell))
         if _Command.kelvin_seen:
-            # A word the readings lowercase held the Kelvin sign, which lower() folds into k and
-            # neither bash nor pwsh does (`pwsh -c 'brea<U+212A> --% ...'` holds no keyword):
-            # every reading again, the sign spelled as a letter lower() keeps (U+0138).
+            # A word the readings lowercase held a non-ASCII character lower() changes: the Kelvin
+            # sign folds into k, which neither bash nor pwsh does (`pwsh -c 'brea<U+212A> --% ...'`
+            # holds no keyword); U+0130 splits into i and a combining dot that ends a name to the
+            # lexer (`pwsh -c "echo (1).y<U+0130>#'..."`: to pwsh one letter); U+1C90 becomes U+10D0,
+            # a letter to every reading, where 5.1 knows no U+1C90. Every reading again, with ASCII
+            # only lowercased (the Kelvin sign and U+0130 spelled U+0138, a letter lower() keeps).
             _runner_segments.cache_clear()
             _ps_script_texts.cache_clear()
             _ps_code_strings.cache_clear()
@@ -6737,6 +6811,7 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
     finally:
         _Command.raw = ""                  # no later direct _segments() call reads it
         _Command.kelvin_alt = False
+        _PS_LEX_READ["on"] = False
 
     # The readings overlap heavily; judge each distinct segment once. The key holds
     # everything a rule reads, ps_script included, so an exempt copy of a segment
