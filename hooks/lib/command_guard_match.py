@@ -1314,7 +1314,8 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     inline scripts _lenient_inline took from it included). Otherwise the quote-blind
     segments of a line holding one (lenient_fed). (An alias's value is a script fed by
     any heredoc in the text: see _expand_scripts.) Returns whether every segment is fed,
-    for the scripts _segments expands from this text."""
+    for the scripts _segments expands from this text. A fed shell's heredoc in text holding a
+    backslash is refused (see below)."""
     here = [s for s in main + lenient if getattr(s, "heredoc", False)]
     # A here-string on a function or alias call feeds its body too. (One on the runner
     # itself is a piped one, refused as such.)
@@ -1334,6 +1335,12 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     for toks in fed:
         if _runner_reads_heredoc(toks):
             raise _Uninspectable("Windows runner reading its commands from a heredoc")
+    # A shell or function a heredoc feeds runs its body as script text, which bash first
+    # decodes when the delimiter is unquoted (a backslash before a backslash, $ or `, and a
+    # backslash-newline): the lines judged here would not be the ones it runs. Refused when
+    # the text holds any backslash, whatever the delimiter's quoting (it has many spellings).
+    if here and wide and "\\" in text:
+        raise _Uninspectable("shell reading a heredoc whose text holds a backslash")
     return wide
 
 
@@ -3217,13 +3224,15 @@ def _ansi_escape(s: str, i: int):
     return "\\" + c, i + 2                           # unknown escape: bash keeps the \
 
 
-def _shell_words(s: str):
+def _shell_words(s: str, bash_dq: bool = False):
     """Words of a logical line, exactly as shlex.split(s, posix=True) reads them --
     quotes removed, backslash escapes resolved, the same errors for an unclosed quote
     or a trailing backslash -- except that an UNQUOTED run of ( ) ; < > | & ` comes
     out as its own _Op token. A quoted one stays inside its word, as in bash, so
     `bash -c "cd /tmp && rm -rf /"` keeps its script whole and `rm -rf '&' ~` keeps
-    `&` as an argument.
+    `&` as an argument. bash_dq: inside "..." also decode the escapes bash decodes
+    there and shlex keeps: a backslash before $ or ` is dropped, a backslash-newline
+    is nothing (see the second reading in _segments).
     """
     words, buf, has_word, state, ansi_cut = _Words(), [], False, "", False
     i, n = 0, len(s)
@@ -3275,6 +3284,10 @@ def _shell_words(s: str):
                 raise ValueError("No escaped character")
             elif c == "\\" and s[i + 1] in '"\\':
                 buf.append(s[i + 1])
+                i += 1
+            elif bash_dq and c == "\\" and s[i + 1] in "$`\n":
+                if s[i + 1] != "\n":
+                    buf.append(s[i + 1])
                 i += 1
             else:
                 if c == "`" or (c == "$" and s[i + 1:i + 2] == "("):
@@ -4541,6 +4554,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     # text gets its bash reading below, windows_paths False).
     bash_read = (scan and shell == "bash" and not ps_script and not cmd_script
                  and slashed == raw)
+    # Bash text (not a script pwsh or cmd reads): its "..." escapes, see below.
+    bash_dq_read = shell == "bash" and not (ps_script or ps_tool or cmd_script)
     if shell == "powershell" and ps_slashes:
         # PowerShell's escape is the backtick; a backslash is a path separator, so
         # `rm -r -Force ..\..` must not tokenize to `....`.
@@ -4559,6 +4574,17 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         if words is not None:
             strict = list(_words_to_segments(words, split_words=False, latch=latch))
             segments.extend(strict)
+            # Bash's own escapes in "..." (\$ \` and a backslash-newline), which
+            # shlex keeps: the line is also read with them decoded, as the program a word
+            # is handed gets it (`pwsh -c "echo \$x.y#'..."` runs `echo $x.y#'...`).
+            # An added reading: the one above is unchanged.
+            if bash_dq_read and "\\" in logical:
+                try:
+                    decoded = _shell_words(logical, bash_dq=True)
+                except ValueError:
+                    decoded = None
+                if decoded is not None and list(decoded) != list(words):
+                    segments.extend(_words_to_segments(decoded, split_words=False))
         # The piecewise pass: for a multi-line logical line, and for any line with a
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
