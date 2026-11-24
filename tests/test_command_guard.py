@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1471
+FP_FLOOR = 1476
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4799
+BLOCK_FLOOR = 4807
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -10484,13 +10484,13 @@ STRUCT_CASES += [
 # which shlex keeps, so a script handed to a runner in a double-quoted word was read with them
 # undecoded (`pwsh -c "echo <BS>$x.y#'..."`: the readings saw a generic word and a string, pwsh runs
 # `$x.y`, a comment, then the next line). Bash text's lines are also read with them decoded (an added
-# reading: _shell_words(bash_dq=True)). An unquoted heredoc's body is decoded by bash too before the
-# shell it feeds runs it: a shell or function a heredoc feeds is refused when the text holds a
-# backslash, whatever the delimiter's quoting. Block rows: live on main 3bdf803 (pwsh 7.6 and
-# Windows PowerShell 5.1 parse the payload line as a command; a harmless twin ran under Git Bash).
+# reading: _shell_words(bash_dq=True)). Bash also decodes an unquoted heredoc's body before whatever
+# reads it runs it: a heredoc whose body holds such an escape is refused, whoever reads it
+# (_heredoc_escapes). Block rows: live on main 3bdf803 (pwsh 7.6 and Windows PowerShell 5.1 parse the
+# payload line as a command; a harmless twin ran under Git Bash), but for the accepted-cost rows.
 # Placeholders as in 8bc (<LF> <BS> <BT> <DQ>), and <SQ> a single quote.
 _GP8BL = "forced git push"
-_HD8BL = "shell reading a heredoc whose text holds a backslash"
+_HD8BL = "unquoted heredoc whose body bash decodes"
 _PAY8BL = "pwsh -c <SQ>env <SQ><SQ>a b=1<SQ><SQ> git push --force<SQ>"
 
 
@@ -10509,24 +10509,29 @@ _DQ8BL = [
     ("two levels: bash -c > pwsh -c", _GP8BL,
      "bash -c <DQ>pwsh -c <BS><DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><BS><DQ><DQ>"),
 ]
+_BODY8BL = "pwsh -c <DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><DQ><LF>EOF"
 _HEREDOC8BL = [
-    (f"{shell} <<EOF", _HD8BL, shell + " <<EOF<LF>pwsh -c <DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><DQ><LF>EOF")
-    for shell in ("bash", "sh", "bash -s")
+    (f"{reader} <<EOF", _HD8BL, reader.replace("<<", "") + " <<EOF<LF>" + _BODY8BL) for reader in ("bash", "sh", "bash -s")
 ] + [
-    ("a body line that stops tokenizing once decoded", _HD8BL,
-     "bash <<EOF<LF>pwsh -c <DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><DQ>; echo <DQ><BS>$(echo a"
-     "<BS><BS><BS><DQ><SQ><DQ>)<DQ> # <DQ><LF>EOF"),
-    ("a backslash-newline in the delimiter", _HD8BL,
-     "bash <<E<BS><LF>OF<LF>pwsh -c <DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><DQ><LF>EOF"),
-    ("a backslash-newline before the delimiter", _HD8BL,
-     "bash << <BS><LF>EOF<LF>pwsh -c <DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><DQ><LF>EOF"),
-    ("a backslash-newline inside the operator", _HD8BL,
-     "bash <<BS><LF><EOF<LF>pwsh -c <DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><DQ><LF>EOF"),
+    (f"{label}", _HD8BL, text + "<LF>" + _BODY8BL) for label, text in (
+        ("a subshell", "(bash) <<EOF"), ("a spaced subshell", "( bash ) <<EOF"), ("a group", "{ bash; } <<EOF"),
+        ("a group of two", "{ true; bash; } <<EOF"), ("a script on the heredoc's fd", "bash /dev/fd/3 3<<EOF"),
+        ("sourced from the heredoc's fd", "source /dev/fd/3 3<<EOF"),
+        ("a proc fd path", "bash /proc/self/fd/3 3<<EOF"), ("a dot-sourced fd from -c", "bash -c <SQ>. /dev/fd/3<SQ> 3<<EOF"),
+        ("a backslash-newline in the delimiter", "bash <<E<BS><LF>OF"),
+        ("a backslash-newline before the delimiter", "bash << <BS><LF>EOF"),
+        ("a backslash-newline inside the operator", "bash <<BS><LF><EOF"),
+    )
+] + [
     ("nested heredoc-fed shells", _HD8BL,
      "bash <<A<LF>bash <<B<LF>pwsh -c <DQ>echo 1,<BS><BS><BS><BS><BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ>"
      "<DQ><LF>B<LF>A"),
-    # The accepted cost: a quoted delimiter's body is not decoded, but it is refused too.
-    ("a quoted delimiter (refused all the same)", _HD8BL, "bash <<<SQ>EOF<SQ><LF>echo <BS>$x<LF>EOF"),
+]
+# The accepted cost (not in MUST_BLOCK: nothing runs differently): a data heredoc holding a decoded escape.
+_COST8BL = [
+    ("a data heredoc with an escaped backslash", "cat <<EOF<LF><BS><BS>server<BS>share<LF>EOF"),
+    ("a data heredoc with escaped backticks",
+     "cat <<EOF > notes.md<LF>Never run <BS><BT>git push --force<BS><BT> on main.<LF>EOF"),
 ]
 # Bash-tool texts whose verdict must stay allow.
 _ALLOW8BL = [
@@ -10535,16 +10540,22 @@ _ALLOW8BL = [
     ("bash -c with an escaped dollar", "bash -c <DQ>echo <BS>$HOME<DQ>"),
     ("ssh with an escaped dollar", "ssh host <DQ>echo <BS>$PATH; ls<DQ>"),
     ("a commit message with an escaped dollar", "git commit -m <DQ>costs <BS>$5<DQ>"),
-    ("a data heredoc with escaped backticks",
-     "cat <<EOF > notes.md<LF>Never run <BS><BT>git push --force<BS><BT> on main.<LF>EOF"),
-    ("a commit message from a heredoc", "git commit -F - <<EOF<LF>docs: warn about <BS><BT>git reset --hard<BS><BT><LF>EOF"),
-    ("a data heredoc with an escaped dollar", "cat <<EOF<LF>x <BS>$x <BS><BS> <BS><BT>a<BS><BT><LF>EOF"),
+    ("a quoted delimiter's body is not decoded", "bash <<<SQ>EOF<SQ><LF>echo <BS>$x<LF>EOF"),
+    ("a quoted heredoc commit message", "git commit -F - <<<SQ>EOF<SQ><LF>docs: warn about <BS><BT>git reset --hard<BS><BT><LF>EOF"),
+    ("a read loop over Windows paths", "while IFS= read -r f; do echo <DQ>$f<DQ>; done <<EOF<LF>C:<BS>Users<BS>a.txt<LF>EOF"),
+    ("a quoted read loop over Windows paths", "while IFS= read -r f; do echo x; done <<<SQ>EOF<SQ><LF>C:<BS>Users<BS>x<LF>EOF"),
+    ("a backslash before the heredoc", "cd C:<BS>repo && bash <<EOF<LF>echo hi<LF>EOF"),
+    ("an escaped dollar before the heredoc", "git commit -m <DQ>fix <BS>$x handling<DQ> && bash <<EOF<LF>echo hi<LF>EOF"),
+    ("a backslash bash keeps in the body", "bash <<EOF<LF>printf <SQ>%s<BS>n<SQ> a<LF>EOF"),
+    ("a here-string is not a heredoc", "cat <<< <DQ><BS><BS>x<DQ>"),
     ("a heredoc-fed shell without a backslash", "bash <<EOF<LF>echo hi<LF>EOF"),
 ]
 CASES += [
     (f"8bl dq escapes: {label}", _t8bl(t), B, ()) for label, _r, t in _DQ8BL + _HEREDOC8BL
 ] + [
     (f"8bl dq escapes fp: {label}", _t8bl(t), A, ()) for label, t in _ALLOW8BL
+] + [
+    (f"8bl dq escapes, accepted cost: {label}", _t8bl(t), B, ()) for label, t in _COST8BL
 ]
 MUST_BLOCK += [
     (f"8bl dq escapes: {label}", _t8bl(t), "bash", (), r) for label, r, t in _DQ8BL + _HEREDOC8BL
@@ -10557,6 +10568,13 @@ GROUP_CASES += [
      [["echo", "$x"]]),
 ]
 STRUCT_CASES += [
+    ("8bl: _heredoc_escapes on unquoted, quoted, here-string and continued forms",
+     lambda: [m._heredoc_escapes(_t8bl(t)) for t in (
+         "cat <<E<LF><BS>$x<LF>E", "cat <<-E<LF><BS><BS><LF>E", "cat << E<LF><BS><BT><LF>E", "cat <<E<LF>a<BS><LF>b",
+         "cat <<<SQ>E<SQ><LF><BS>$x<LF>E", "cat <<<DQ>E<DQ><LF><BS>$x", "cat <<<BS>E<LF><BS>$x", "cat <<E<SQ>F<SQ><LF><BS>$x",
+         "cat <<<<DQ><BS>$x<DQ>", "cat <<E<LF>C:<BS>Users<LF>E", "cat <<E<LF>x<LF>E", "x <BS>$y; cat <<E<LF>x<LF>E",
+         "cat <<E<BS><LF>F<LF><BS>$x", "cat <<<SQ>E<SQ> <BS><LF><LF><BS>$x")],
+     [True, True, True, True, False, False, False, False, False, False, False, False, True, False]),
     ("8bl: bash_dq decodes a backslash before $ and `, and drops a backslash-newline",
      lambda: list(m._shell_words(_t8bl("x <DQ>a<BS>$b<BS><BT>c<BS><LF>d<BS><BS>e<BS><DQ>f<BS>g<DQ>"), bash_dq=True)),
      ["x", _t8bl("a$b<BT>cd<BS>e<DQ>f<BS>g")]),

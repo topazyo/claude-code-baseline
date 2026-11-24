@@ -1314,8 +1314,7 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     inline scripts _lenient_inline took from it included). Otherwise the quote-blind
     segments of a line holding one (lenient_fed). (An alias's value is a script fed by
     any heredoc in the text: see _expand_scripts.) Returns whether every segment is fed,
-    for the scripts _segments expands from this text. A fed shell's heredoc in text holding a
-    backslash is refused (see below)."""
+    for the scripts _segments expands from this text."""
     here = [s for s in main + lenient if getattr(s, "heredoc", False)]
     # A here-string on a function or alias call feeds its body too. (One on the runner
     # itself is a piped one, refused as such.)
@@ -1335,12 +1334,6 @@ def _heredoc_check(text, main, lenient, lenient_fed, orphan, inherited: bool) ->
     for toks in fed:
         if _runner_reads_heredoc(toks):
             raise _Uninspectable("Windows runner reading its commands from a heredoc")
-    # A shell or function a heredoc feeds runs its body as script text, which bash first
-    # decodes when the delimiter is unquoted (a backslash before a backslash, $ or `, and a
-    # backslash-newline): the lines judged here would not be the ones it runs. Refused when
-    # the text holds any backslash, whatever the delimiter's quoting (it has many spellings).
-    if here and wide and "\\" in text:
-        raise _Uninspectable("shell reading a heredoc whose text holds a backslash")
     return wide
 
 
@@ -3119,6 +3112,37 @@ def _scan_line(line: str, state: str, ps_herestrings: bool = False):
     return state, False, None
 
 
+# A heredoc operator (`<<`, `<<-`; not the here-string's `<<<`) with its delimiter word, and the
+# escapes bash decodes in an unquoted heredoc's body.
+_HEREDOC_OP_RE = re.compile(r"(?<!<)<<-?(?!<)[ \t]*([^\s;|&<>()]*)")
+_HEREDOC_ESC_RE = re.compile(r"\\[\\$`\n]")
+
+
+def _heredoc_escapes(text: str) -> bool:
+    """Whether bash text holds a heredoc whose body bash decodes into other text: one whose
+    delimiter word is unquoted (no quote or backslash in it) with a backslash before a
+    backslash, $, ` or a newline after its operator. The operator and its word are read with
+    backslash-newlines joined, as bash joins them before it reads an operator or a word
+    (`<<E`, a backslash-newline, `OF` is `<<EOF`); the escapes are searched in the text itself, from where the
+    word ends. An over-approximation: the search runs to the text's end (the delimiter line
+    and later commands too), and an operator inside quotes counts."""
+    kept, at, i, n = [], [], 0, len(text)
+    while i < n:
+        if text[i] == "\\" and text[i + 1:i + 2] == "\n":
+            i += 2
+            continue
+        kept.append(text[i])
+        at.append(i)
+        i += 1
+    joined = "".join(kept)
+    for m in _HEREDOC_OP_RE.finditer(joined):
+        if any(q in m.group(1) for q in "'\"\\"):
+            continue
+        if _HEREDOC_ESC_RE.search(text, at[m.end() - 1] + 1):
+            return True
+    return False
+
+
 def _logical_lines(text: str, shell: str = "bash"):
     """Split on UNQUOTED newlines. Returns [(logical_line, physical_lines)].
 
@@ -4545,6 +4569,12 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
+    # Bash decodes an unquoted heredoc's body (see _heredoc_escapes) before whatever reads it
+    # runs it, so the lines judged here would not be the ones it runs: refused, whoever reads
+    # the heredoc (a shell, a group, a script file on its fd, a function, data).
+    if (shell == "bash" and not (ps_script or ps_tool or cmd_script) and "<" in raw
+            and "\\" in raw and _heredoc_escapes(raw)):
+        raise _Uninspectable("unquoted heredoc whose body bash decodes (a backslash escape)")
     segments, lenient, lenient_runs, latch = [], [], [], _Latch()
     lenient_fed, orphan = [], False    # see _heredoc_check
     fed_in = heredoc
