@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1325
+FP_FLOOR = 1462
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4390
+BLOCK_FLOOR = 4768
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 46
+REASON_FLOOR = 52
 
 
 def _str_value(node):
@@ -8267,8 +8267,6 @@ _LIMIT8AS = [
     ("a list in a group in a group", "ri -r (('a','~'))"),
     ("a computed cmdlet name for the defaults",
      "(& ('Get-'+'Vari'+'able') ('PS*Val'+'ues')).Value['*:Recurse']=1; ri ~"),
-    ("a | then a block comment", "Get-Item ~ | <# c #><NL>ri -r"),
-    ("a quoted space and #, then a real comment after the |", "Get-Item ~,' #' | # c<NL>ri -r"),
     ("a splat with no target", "Remove-Item @p"),
 ]
 PS_CASES += [
@@ -9443,10 +9441,17 @@ _QB_BLOCK8BC = [
     ("a dot-source before cmd", _GP8BC, "pwsh -c '. cmd /c git push --force'"),
     ("return before pwsh", _GP8BC, "pwsh -c 'return pwsh -c ''git push --force'''"),
     ("return before iex", _GP8BC, "pwsh -c 'return iex ''git push --force'''"),
-    # cmd's carets read away at each level: the bash -c script read again.
-    ("a caret-spelled bash in cmd", _GP8BC, "cmd /c 'b^ash -c ''cmd //c git push --force'''"),
-    ("a caret-spelled bash in cmd in pwsh", _RF8BC, "pwsh -c 'cmd /c b^ash -c rm -rf ~'"),
-    ("a caret-spelled bash in cmd in cmd", _RF8BC, "cmd /c 'cmd /c b^ash -c rm -rf ~'"),
+    # cmd's carets read away at each level: the bash -c script read again. Four runners with
+    # the outer pwsh are past the depth limit, as the same chain without the comment is (8bk's
+    # normalized reading reads the line without its comment); three are read to the command.
+    ("a caret-spelled bash in cmd", _GP8BC, "cmd /c 'b^ash -c ''git push --force'''"),
+    ("a caret-spelled bash in cmd, rm", _RF8BC, "cmd /c b^ash -c rm -rf ~"),
+    ("a caret-spelled bash in cmd, past the depth limit", _DEEP8BC,
+     "cmd /c 'b^ash -c ''cmd //c git push --force'''"),
+    ("a caret-spelled bash in cmd in pwsh, past the depth limit", _DEEP8BC,
+     "pwsh -c 'cmd /c b^ash -c rm -rf ~'"),
+    ("a caret-spelled bash in cmd in cmd, past the depth limit", _DEEP8BC,
+     "cmd /c 'cmd /c b^ash -c rm -rf ~'"),
     # Past the depth limit (four runners with the outer pwsh), as the strict pass refuses it.
     ("pwsh in cmd in pwsh, past the depth limit", _DEEP8BC,
      "pwsh -c 'cmd /c pwsh -c git push --force'"),
@@ -9631,6 +9636,847 @@ STRUCT_CASES += [
               for t in ("wsl bash -c pwsh -c " * 190 + "dir",
                         "cmd /c b^ash " + "-c x, " * 560 + "dir",
                         "sh -c " + "cmd -c " * 520 + "dir")], [True, True, True]),
+]
+
+
+# Follow-up 8bk: one PowerShell lexer (_ps_lex) and the text it normalizes to (_ps_normalize),
+# read as an added reading of every PowerShell payload and pwsh script. A comment, a block
+# comment or a here-string opens only where pwsh starts a new token, so a quote inside one no
+# longer shifts the older scanners' strings (each opened them by a rule of its own: at a word
+# start, or after any non-word character). Block rows: carriers found live on main a845b61 by a
+# desync fuzzer (guard-lab examples/8bk: pwsh 7 parses each and runs the runner), before a runner,
+# from the PowerShell tool and from Bash as `pwsh -c '...'`. Allow rows: comments, here-strings
+# and --% tails holding command-like text. Placeholders as in 8bc, <LSQ> <RSQ> <LDQ> <RDQ> for
+# the typographic quotes U+2018 U+2019 U+201C U+201D, and <NEL> <LS> <PS> for U+0085, U+2028 and
+# U+2029 (blanks to pwsh), <NBSP> <EMSP> for U+00A0 and U+2003, <MVS> for U+180E (part of a word to
+# pwsh 7, a blank to Windows PowerShell on .NET Framework 4 to 4.5.2), <CR> a lone carriage return,
+# <U663> an Arabic-Indic digit three, <KELVIN> the Kelvin sign U+212A, <SUP2> U+00B2, <ROMAN1> U+2160,
+# <U1C89> (a letter to .NET 8 / 10, not to Python 3.13), <U1C80> (a letter to Python and .NET 8, not to
+# .NET Framework 4.8), <MATHA> U+1D400 (one letter to Python, two surrogates to .NET), <EACUTE> U+00E9.
+_RF8BK = "(rm -rf)"
+_F3HEAD8BK = "echo $x.y<SUP2>#c<LF>x#c<LF>echo $x.y<ROMAN1>#c<LF>1n<#c#>x<LF>echo a<MVS><#c#>x<LF>echo --% <DQ>a b<DQ> ''<LF>"
+_GP8BK = "forced git push"
+_RUN_RF8BK = "pwsh -c 'bash -c ''rm -rf /'''"
+_RUN_GP8BK = "pwsh -c 'env ''a b=1'' git push --force'"
+_BR_GP8BK = "Invoke-Command { pwsh -c '& <DQ>gi<BT>u{74}<DQ> push --force' }"
+
+
+def _t8bk(text):
+    return (_t8bc(text).replace("<LSQ>", chr(0x2018)).replace("<RSQ>", chr(0x2019))
+            .replace("<LDQ>", chr(0x201C)).replace("<RDQ>", chr(0x201D))
+            .replace("<NEL>", chr(0x85)).replace("<LS>", chr(0x2028)).replace("<PS>", chr(0x2029))
+            .replace("<NBSP>", chr(0xA0)).replace("<EMSP>", chr(0x2003)).replace("<MVS>", chr(0x180E))
+            .replace("<CR>", chr(13)).replace("<U663>", chr(0x663)).replace("<KELVIN>", chr(0x212A))
+            .replace("<SUP2>", chr(0xB2)).replace("<ROMAN1>", chr(0x2160)).replace("<U1C89>", chr(0x1C89))
+            .replace("<U1C80>", chr(0x1C80)).replace("<MATHA>", chr(0x1D400)).replace("<EACUTE>", chr(0xE9))
+            .replace("<U0237>", chr(0x237)).replace("<U2427>", chr(0x2427))
+            .replace("<U1885>", chr(0x1885)).replace("<U1886>", chr(0x1886)).replace("<U0130>", chr(0x130))
+            .replace("<U1C90>", chr(0x1C90)).replace("<UA7AE>", chr(0xA7AE)).replace("<UA7C5>", chr(0xA7C5)))
+
+
+def _raises8bk(fn, text):
+    # whether fn(text) refuses the text
+    try:
+        fn(text)
+    except m._Uninspectable:
+        return True
+    return False
+
+
+def _bash8bk(payload):
+    # A PowerShell payload run from Bash as `pwsh -c '...'`.
+    return "pwsh -c '" + _t8bk(payload).replace("'", "'" + '"' + "'" + '"' + "'") + "'"
+
+
+def _lex_emit8bk(text, mvs_word=False):
+    # The lexer and its emitter without the whole text's cap (the timing rows run past it; the
+    # cap has rows of its own). mvs_word: U+180E read as a word character, as _ps_normalize() does.
+    out = []
+    lexed = text.replace(chr(0x180E), m._PS_LEX_MVS_INERT) if mvs_word else text
+    m._ps_lex_emit(text, m._ps_lex(lexed), out)
+    return out
+
+
+def _lex_items8bk(text, v51=False):
+    # The lexer's comment (C), string (S), unclosed (O) and --% tail (T) extents, nested ones included
+    # (lexdiff's measure against pwsh 7.6's tokens).
+    acc = set()
+
+    def collect(nodes):
+        for nd in nodes:
+            if nd[0] in ("lc", "bc"):
+                acc.add(("C", nd[1], nd[2]))
+            elif nd[0] == "verb":
+                acc.add(("T", nd[1], nd[2]))
+            elif nd[0] in ("sq", "hsq", "dq", "hdq", "open"):
+                acc.add(("S" if nd[0] != "open" else "O", nd[1], nd[2]))
+                for ch in (nd[3] if nd[0] == "dq" else nd[5] if nd[0] == "hdq" else ()):
+                    if ch[0] == "sub":
+                        collect(ch[3])
+    collect(m._ps_lex(text, v51))
+    return sorted(acc)
+
+
+def _norm8bk(text):
+    # The normalized texts, or the refusal's reason.
+    try:
+        return list(m._ps_normalized_texts(text))
+    except m._Uninspectable as exc:
+        return "refused: " + str(exc)
+
+
+# (label, reason, PowerShell text)
+_DESYNC8BK = [
+    # A here-string opens after =, a comma or +, glued (the older scanners: at a word start).
+    ("a here-string glued to =", _RF8BK, "$h=@'<LF>it's<LF>'@<LF>" + _RUN_RF8BK),
+    ("a here-string glued to =, env", _GP8BK, "$h=@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string glued to =, then ;", _GP8BK, "$h=@'<LF>it's<LF>'@; " + _RUN_GP8BK),
+    ("a here-string glued to = holding #'", _GP8BK, "$h=@'<LF>#'<LF>'@<LF><LF>" + _RUN_GP8BK),
+    ("a here-string after a comma", _RF8BK, "echo a,@'<LF>it's<LF>'@<LF>" + _RUN_RF8BK),
+    ("a here-string after a comma, env", _GP8BK, "echo a,@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string after +", _GP8BK, "+@'<LF>'<LF>'@;<LF>" + _RUN_GP8BK + " ;"),
+    # A block comment after a -name: parameter, a number, an = or a string.
+    ("a block comment after -name:", _GP8BK, "<LF>-p:<#'#><LF><LF>" + _RUN_GP8BK + " <#'#>"),
+    ("a block comment after -name:, then ;", _GP8BK, "-p:<# x #> ; " + _RUN_GP8BK),
+    ("a block comment after a hex number", _RF8BK, "0x1<# x #> ; " + _RUN_RF8BK),
+    ("a block comment after a decimal", _GP8BK, "1.5<# x #>; " + _RUN_GP8BK),
+    ("a block comment after a number, then a stray ]", _RF8BK, "1<# x #>;] ; " + _RUN_RF8BK),
+    ("a block comment after =", _GP8BK, "$h=<# x #>]1   ; " + _RUN_GP8BK),
+    ("a block comment after a string", _GP8BK,
+     "<BT>@<DQ><LF>@<DQ><LF>''<# x #> ; " + _RUN_GP8BK),
+    ("a block comment after typographic strings", _RF8BK, "<RSQ>[int]<LSQ><# x #>; " + _RUN_RF8BK),
+    # A line comment after a number (its backtick is no line continuation) or a string.
+    ("a line comment after a number, ending in a backtick", _RF8BK, "1#<BT><LF>" + _RUN_RF8BK),
+    ("a line comment after a string", _RF8BK, "<DQ><DQ>#  <RDQ>a=<LF><LF>" + _RUN_RF8BK),
+    ("a line comment after a typographic-quoted string", _GP8BK, "'@<RSQ>#'#(<LF>" + _RUN_GP8BK),
+    ("a line comment after a word's typographic string", _GP8BK,
+     ".a:!<RSQ>#'<LF>" + _RUN_GP8BK + " #'$"),
+    ("a line comment holding an apostrophe", _GP8BK, "#'<LF><LF>" + _RUN_GP8BK + " #><#'#>1.5"),
+    ("a line comment holding @<DQ>", _GP8BK, "#'(@<DQ><LF>; " + _RUN_GP8BK + " #'a:"),
+    # A --% after a redirection: the rest of its line only is verbatim.
+    ("--% after a redirection", _RF8BK, "><BS>- --% <LDQ><LF><LF>" + _RUN_RF8BK),
+    # NEL, U+2028 and U+2029 separate words: the # after one starts a comment.
+    ("a line comment after a NEL", _GP8BK, "echo a<NEL>#'<LF>" + _RUN_GP8BK + " #'"),
+    ("a line comment after a U+2028", _GP8BK, "echo a<LS>#'<LF>" + _RUN_GP8BK + " #'"),
+    ("a line comment after a U+2029", _GP8BK, "echo a<PS>#'<LF>" + _RUN_GP8BK + " #'"),
+    # A mid-word `@'` or `<#` opens nothing (the wider scanners' only runner readings:
+    # a string's $( ) and a brace-escaped script).
+    ("a mid-word @' before a string's $( )", _GP8BK,
+     "echo a=@'<LF>'<LF>Write-Output <DQ>$(" + _RUN_GP8BK + ")<DQ>"),
+    ("a mid-word @' before a brace-escaped script", _GP8BK, "echo a=@'<LF>'<LF>" + _BR_GP8BK),
+    ("a mid-word <# before a brace-escaped script", _GP8BK, "echo x<#<LF>" + _BR_GP8BK),
+    # A here-string opener may end its line with any blank.
+    ("a here-string opener and a no-break space", _GP8BK, "$h=@'<NBSP><LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string opener and an em space", _GP8BK, "$h=@'<EMSP><LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    # A bare >, >> or *> first in a command takes no --% as its file: the rest of the line is a
+    # stop-parsing tail (after a command, or after 2>, --% is the file's name).
+    ("--% after a redirection first in a command", _GP8BK, "> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after >> first in a command", _GP8BK, ">> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after *> first in a command", _GP8BK, "*> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% glued to a redirection first in a command", _GP8BK, ">--% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after & and a redirection", _GP8BK, "& > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after . and a redirection", _GP8BK, ". > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after a pipe and a redirection", _GP8BK, "echo a | > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    # A line continuation or an escaped blank keeps a redirection's target and a -name:'s value.
+    ("a redirection's target after a line continuation", _GP8BK,
+     "#'<LF>echo x ><BT><LF>--% ; " + _RUN_GP8BK + " #'"),
+    ("a redirection's target after an escaped blank", _GP8BK, "#'<LF>echo x ><BT> --% ; " + _RUN_GP8BK + " #'"),
+    ("a -name: value after a line continuation", _GP8BK, "#'<LF>echo -p: <BT><LF>--% ; " + _RUN_GP8BK + " #'"),
+    # A parameter's backtick before a blank or a quote escapes nothing: it ends the parameter.
+    ("a parameter's backtick before a blank", _GP8BK, "echo -p<BT> #'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a leading parameter's backtick before a blank", _GP8BK, "-p<BT> #'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a parameter's backtick before a quote", _GP8BK, "echo -p<BT>'x' ; " + _RUN_GP8BK + " ; 'y'"),
+    ("a parameter's backtick before a double quote", _GP8BK,
+     "echo -p<BT><DQ>x<DQ> ; " + _RUN_GP8BK + " ; 'y'"),
+    # ...and before a line break or any other parameter terminator (the line break ends the
+    # statement; the older readers took <BT><LF> for a line continuation).
+    ("a parameter's backtick before a line break, after ]", _GP8BK, "]-p<BT><LF>" + _RUN_GP8BK),
+    ("a parameter's backtick before a line break", _GP8BK, "echo -p<BT><LF>" + _RUN_GP8BK),
+    ("a parameter's backtick before ;", _GP8BK, "echo -p<BT>;#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a parameter's backtick before )", _GP8BK, "echo (echo -p<BT>)#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # After a first & or ., any redirection takes no --% as its file.
+    ("--% after & and 2>", _GP8BK, "& 2> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after . and 2>", _GP8BK, ". 2> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after & and 1>>", _GP8BK, "& 1>> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    # An escaped --% first in a statement stops parsing.
+    ("an escaped --% first", _GP8BK, "<BT>--% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("an escaped --% first on a later line", _GP8BK, "echo hi<LF><BT>--% <# x<LF>" + _RUN_GP8BK + " #>"),
+    # Member access after an argument's group or variable: the member name ends a token.
+    ("a comment after a group's member", _GP8BK, "echo (1).y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a variable's quoted member", _GP8BK, "echo $x.'y'#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a here-string after a group's member dot", _GP8BK, "echo (1).@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string after a block's member dot", _GP8BK, "echo {1}.@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    # A sign and a dot first in a statement start one bareword (a number that fails to scan): its
+    # quotes and <# open nothing. Live only with a runner no raw reading decodes.
+    ("a sign-dot word's quote and block comment", _GP8BK, "+.'x'<#><LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a minus-dot word's typographic quote", _GP8BK, "-.<RSQ>x<LSQ><#><LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a sign-dot word's double quote", _GP8BK, "+.<DQ>x<DQ><#><LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a sign-dot word after a pipe", _GP8BK, "echo a | +.'x'<#><LF>" + _BR_GP8BK + "<LF>#>"),
+    # U+180E is part of a word to pwsh 7: the <# after it opens nothing.
+    ("a block comment after U+180E in a word", _GP8BK, "echo a<MVS><#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a string and a block comment after U+180E", _GP8BK, "x<MVS>'y'<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a block comment after a dot and U+180E", _GP8BK, ".<MVS><#<LF>" + _BR_GP8BK + "<LF>#>"),
+    # A braced variable's name runs to an unescaped }: an older reader ends it at an escaped brace
+    # and opens a comment at the # after it (pwsh: one bareword, the # opens nothing).
+    ("a # after a braced name holding an escaped }", _GP8BK, "echo x${a<BT>}b}#'x' ; " + _BR_GP8BK),
+    ("a # after a braced name holding an escaped {", _GP8BK, "echo ${a<BT>{b}#x ; " + _BR_GP8BK),
+    ("a # after a braced name of one escaped }", _GP8BK, "echo x${<BT>}}#<DQ>x<DQ> ; " + _BR_GP8BK),
+    # In an argument a . first before an ASCII quote is a token of its own, a string starts the next,
+    # and a parameter may follow it glued; member access after a string ends a token, as after a
+    # group or a variable (the lexer read one bareword, and its quote opened over the next lines).
+    ("a dot then a string, then a parameter's backtick before a quote", _GP8BK,
+     "echo .'x'-p<BT>'y'<LF>" + _RUN_GP8BK + "<LF>'z'"),
+    ("a parameter, a dot and a string, then a parameter's backtick", _GP8BK,
+     "-p .'x'-p<BT>'y'<LF>" + _RUN_GP8BK + "<LF>'z'"),
+    ("a parameter glued to a dot and a string", _GP8BK, "-p+.'x'-p<BT>'y'<LF>" + _RUN_GP8BK + "<LF>'z'"),
+    ("a string's member, then a parameter's backtick", _GP8BK,
+     "echo 'a'.b-p<BT>'y'<LF>" + _RUN_GP8BK + "<LF>'z'"),
+    ("a comment after a string's member", _GP8BK, "echo 'a'.b#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a string's indexed member", _GP8BK, "echo 'a'.b[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a string's quoted member", _GP8BK, "echo 'a'.'b'#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a here-string's member", _GP8BK, "echo @'<LF>a<LF>'@.b#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A comment is a blank to the token before it: a redirection's target, a -name:'s value and a
+    # first & or . reach past it (the lexer had dropped those flags at a comment).
+    ("a redirection's target after a block comment", _GP8BK, "#'<LF>echo x > <#c#> --% ; " + _RUN_GP8BK + " #'"),
+    ("a glued redirection's target after a block comment", _GP8BK,
+     "#'<LF>echo x ><#c#>--% ; " + _RUN_GP8BK + " #'"),
+    ("a 2> target first after a block comment", _GP8BK, "#'<LF>2> <#c#> --% ; " + _RUN_GP8BK + " #'"),
+    ("a -name: value after a block comment", _GP8BK, "#'<LF>echo -p:<#c#>--% ; " + _RUN_GP8BK + " #'"),
+    ("a -name: value after a spaced block comment", _GP8BK,
+     "#'<LF>echo -p: <#c#> --% ; " + _RUN_GP8BK + " #'"),
+    ("--% after &, a block comment and a redirection", _GP8BK, "& <#c#> > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after ., a block comment and a redirection", _GP8BK, ". <#c#> > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("--% after &, a block comment and 2>", _GP8BK, "& <#c#> 2> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    # pwsh 7's literal suffixes and 0b are a bareword to Windows PowerShell 5.1 (its <# opens nothing
+    # there; 5.1 runs these), 0x with no digits a number to pwsh 7 (its # a comment; pwsh 7 runs it),
+    # a variable's name ends before :: (the here-string after it opens), and 5.1 reads <BT>u{...} as u
+    # and a script block (the parameter after it ends at its backtick).
+    ("a pwsh 7 literal 1n a bareword to 5.1, then a block comment", _GP8BK, "1n<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1u a bareword to 5.1, then a block comment", _GP8BK, "1u<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1ul a bareword to 5.1, then a block comment", _GP8BK, "1ul<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1y a bareword to 5.1, then a block comment", _GP8BK, "1y<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 0b1 a bareword to 5.1, then a block comment", _GP8BK, "0b1<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1.5n a bareword to 5.1, then a block comment", _GP8BK,
+     "1.5n<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 2s a bareword to 5.1, then a block comment", _GP8BK, "2s<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("a pwsh 7 literal 1us a bareword to 5.1, then a block comment", _GP8BK, "1us<#<LF>" + _BR_GP8BK + "<LF>#>"),
+    ("0x with no digits, then a line comment", _GP8BK, "0x#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a here-string after a variable's empty static member", _GP8BK,
+     "echo $x::@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a here-string after a variable's empty static member, after a comma", _GP8BK,
+     "echo a,$x::@'<LF>it's<LF>'@<LF>" + _RUN_GP8BK),
+    ("a <BT>u escape before a parameter's backtick and a quote (5.1)", _GP8BK,
+     "echo x<BT>u{74}-p<BT>'x' ; " + _RUN_GP8BK + " ; 'y'"),
+    # clean is a command to 5.1 (a keyword to pwsh 7.3+): its --% stops parsing there. A variable's name
+    # takes ? (`$x?.y`), a braced variable's member takes :: after it, and pwsh 7's ?. is member access:
+    # each ends a token, so the # after it opens a comment over the quote.
+    ("clean, a command to 5.1, then --%", _GP8BK, "clean --% '<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a static member after a braced variable's member", _GP8BK,
+     "echo ${x}.y::z#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a ? in a variable's name, then a member", _GP8BK, "echo $x?.y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a ? in a variable's name, then an index", _GP8BK, "echo $x?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("two ? in a variable's name, then a member", _GP8BK, "echo $x??.y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional member after a member", _GP8BK, "echo $x?.y?.z#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional member after a plain member", _GP8BK, "echo $x.y?.z#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional member after a group", _GP8BK, "echo (1)?.y#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A hashtable's bare key ends a token: the <# after it opens a comment.
+    ("a block comment after a hashtable's bare key", _GP8BK, "@{a<#'#>=1}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A Kelvin sign is no k to pwsh: brea<KELVIN> is a command, its --% stops parsing (Python's lower()
+    # folds it: the Bash reader's words too). A value's own `b=` is one bareword; a value may start after
+    # a line break.
+    ("a Kelvin-sign break, then --%", _GP8BK, "brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a Kelvin-sign workflow, then --%", _GP8BK, "wor<KELVIN>flow --% '<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a block comment after a hashtable value's bareword =", _GP8BK, "@{a=b=<#'#>x'<LF>}<LF>" + _RUN_GP8BK + " #''"),
+    ("a line comment after a hashtable value's bareword =", _GP8BK, "@{a=b=#'<LF>'<LF>}<LF>" + _RUN_GP8BK + " #''"),
+    ("a hashtable value after two line breaks", _GP8BK, "@{a=<LF><LF>b#'<LF>'<LF>}<LF>" + _RUN_GP8BK + " #''"),
+    # Names pwsh reads as identifiers (a token ends after each): an attribute's argument, a class's /
+    # an enum's / a data section's name, an enum's member, a class's method.
+    ("a comment after an attribute's argument name", _GP8BK,
+     "[CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute's argument name, then =", _GP8BK,
+     "function f{[CmdletBinding(PositionalBinding<#'#>=$false)]param()}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a class's name", _GP8BK, "class C<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an enum's name", _GP8BK, "enum E<#'#>{a}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an enum's member", _GP8BK, "enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an enum's second member", _GP8BK, "enum E{a<LF>b<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a data section's name", _GP8BK, "data D<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a class's method name", _GP8BK, "class C{f<#'#>(){}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # pwsh 7.1+'s null-conditional index ends a token like an index.
+    ("a null-conditional index after a member", _GP8BK, "echo $x.y?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional index after a group", _GP8BK, "echo (1)?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional index after a string", _GP8BK, "echo 'a'?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a null-conditional index after an index", _GP8BK, "echo $x[0]?[1]#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # A member's name ends where .NET's letters end, not Python's (both ways; 5.1's .NET knows fewer).
+    ("a member name before a superscript two", _GP8BK, "echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    ("a member name before a Roman numeral", _GP8BK, "echo 'a'.b<ROMAN1>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    ("a member name before an astral letter", _GP8BK, "echo $x.y<MATHA>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    # Round 8: an attribute's `(...)]` leaves the statement going on; a letter and a non-letter name
+    # character in one text; `echo [a(` is a command argument's group, no attribute.
+    ("a comment after an attribute before an enum", _GP8BK, "[Flags()] enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute before a class's method", _GP8BK,
+     "[Obsolete()] class C{M<#'#>(){}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a letter key and a superscript member name in one text", _GP8BK,
+     "@{ <#c#><EACUTE><#'#>=1}<LF>echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("an argument's [name( group, no attribute", _GP8BK,
+     "echo [a(x<#)<LF>echo (1).y#'<LF>" + _RUN_GP8BK + "<LF>#' #>"),
+    # The Kelvin sign in a word the readings decode or lowercase: a nested pwsh's script.
+    ("a Kelvin-sign break in a nested pwsh's script", _GP8BK,
+     "pwsh -c <DQ>brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+    # U+0130 (dotted capital I): a letter to pwsh; lower() splits it into i and a combining dot (measured)
+    ("a dotted capital I in a nested pwsh's member name", _GP8BK,
+     "pwsh -c <DQ>echo (1).y<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+    ("a dotted capital I in a nested powershell's member name", _GP8BK,
+     "powershell -c <DQ>echo 'a'.b<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+    ("a dotted capital I as a nested pwsh's member name", _GP8BK,
+     "pwsh -c <DQ>echo (1).<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+]
+# Round 9: an attribute with a blank or a comment inside `[...(`; under 5.1 (an older Unicode) e-acute
+# is a name character and U+1C80 is not.
+_DESYNC8BK += [
+    ("a comment after an attribute's argument, a blank after its [", _GP8BK,
+     "[ CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute's argument, a comment after its [", _GP8BK,
+     "[<#c#>CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute's argument, a comment before its (", _GP8BK,
+     "[CmdletBinding <#c#>(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+]
+# A DSC configuration is refused: pwsh reads its body by the resources loaded when it parses.
+_DSC8BK = "a PowerShell DSC configuration"
+_REFUSE8BK = [
+    ("a comment after a DSC resource's key", _DSC8BK,
+     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a DSC resource's second key", _DSC8BK,
+     "configuration c{File f{DestinationPath='x'<LF>Ensure<#'#>='Present'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a DSC resource's key and an ordinary glued word", _DSC8BK,
+     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a comment before a DSC resource", _DSC8BK,
+     "configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a quoted configuration name", _DSC8BK,
+     "configuration 'c'{File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a script block in a configuration", _DSC8BK,
+     "configuration C { Invoke-Command -ScriptBlock {echo -p<BT>'y' ; " + _RUN_GP8BK + "} }; C"),
+    ("a DSC resource and a real comment", _DSC8BK, "configuration c{File f{DestinationPath='x'}} # git push --force"),
+    # reviewer r11: refused by the keyword's position, whatever follows it
+    ("a DSC name past a long gap", _DSC8BK, "configuration" + " " * 401 + "c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name past a long block comment", _DSC8BK, "configuration <#" + "x" * 400 + "#> c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a line comment before a DSC body", _DSC8BK, "configuration c #x<LF>{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a lone-CR continuation before a DSC name", _DSC8BK, "configuration <BT><CR>c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name with a doubled quote", _DSC8BK, "configuration 'c''d'{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name with an escaped quote", _DSC8BK, "configuration <DQ>c<BT><DQ>d<DQ>{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name from a subexpression", _DSC8BK, "configuration $('c'){<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC configuration assigned", _DSC8BK, "$x=configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a block comment", _DSC8BK, "<#c#>configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword and many comments", _DSC8BK, "configuration " + "<##>" * 100),
+    ("a backtick-blank before a DSC keyword at the start", _DSC8BK, "<BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword after ;", _DSC8BK, "echo a; <BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword after a block comment", _DSC8BK, "<#c#><BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword after an assignment", _DSC8BK, "$x= <BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword a non-breaking space, after an attribute", _DSC8BK, "[a()]<BT><NBSP>configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword where a name can follow, in an argument", _DSC8BK, "Copy-Item configuration backup"),
+    ("a DSC keyword after ;", _DSC8BK, "echo a; configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after {", _DSC8BK, "& {configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after }", _DSC8BK, "if(1){}configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after (", _DSC8BK, "(configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after )", _DSC8BK, "if(1)configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after ]", _DSC8BK, "[x()]configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after |", _DSC8BK, "echo a | configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after &&", _DSC8BK, "echo a && configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a line break", _DSC8BK, "echo a<LF>configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a label", _DSC8BK, ":a configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after an assignment", _DSC8BK, "$x = configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after an index assignment", _DSC8BK, "$a[0]=configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a braced variable's assignment", _DSC8BK, "${a b}+=configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a block comment", _DSC8BK, "<#c#> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+]
+# A name character Unicode 3.2 did not assign is a letter to some of Python, .NET 8 / 10 and .NET
+# Framework 4.8 and not to others (measured): such a text is refused, not read one way.
+_UNI8BK = "letter class differs between Unicode versions"
+_REFUSE8BK += [
+    ("a member name with a Unicode 16 letter", _UNI8BK, "echo $x.y<U1C89>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a member name with a letter 5.1 does not know", _UNI8BK, "echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    ("a letter key and a letter 5.1 does not know in one text", _UNI8BK,
+     "@{ <#c#><EACUTE><#'#>=1}<LF>echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a Unicode 4.1 letter key and a letter 5.1 does not know", _UNI8BK,
+     "@{ <#c#><U0237><#'#>=1}<LF>echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a Unicode 16 letter key and a symbol member", _UNI8BK,
+     "@{ <#c#><U1C89><#'#>=1}<LF>echo $x.y<U2427>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    # letters to .NET Framework 4.8 only (Unicode 3.2 to 8 class them Lo, later Unicode Mn): measured
+    ("a member name with a letter only 5.1 knows", _UNI8BK, "echo $x.y<U1885>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a member name with another letter only 5.1 knows", _UNI8BK,
+     "echo $x.y<U1886>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # lower() turns these into letters Unicode 3.2 had; 5.1 knows none of them (measured)
+    ("a Georgian Mtavruli letter in a nested 5.1 script's member name", _UNI8BK,
+     "powershell -c <DQ>echo (1).y<U1C90>#'<LF>'; " + _RUN_GP8BK + " #'<DQ>"),
+    ("a Unicode 9 capital in a nested 5.1 script's member name", _UNI8BK,
+     "powershell -c <DQ>echo 'a'.b<UA7AE>#'<LF>'; " + _RUN_GP8BK + " #'<DQ>"),
+    ("a Unicode 12 capital in a nested 5.1 script's member name", _UNI8BK,
+     "powershell -c <DQ>echo (1).y<UA7C5>#'<LF>'; " + _RUN_GP8BK + " #'<DQ>"),
+]
+# Bash commands as typed: an ANSI-C escape bash decodes to the Kelvin sign.
+_BASH_RAW8BK = [
+    ("a dotted capital I in a nested powershell's script", _GP8BK,
+     "cmd /c powershell -Command <DQ>echo (1).y<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+    ("a Kelvin sign from an ANSI-C escape", _GP8BK,
+     "pwsh -c $'brea<BS>u212a --% <BS>'<BS>npwsh -c <BS>'env <BS>'<BS>'a b=1<BS>'<BS>' git push --force<BS>'<BS>n#<BS>''"),
+]
+# Live on main from Bash only (the tool's strict POSIX reading of the payload refuses these as
+# unbalanced quoting, there and here): an escaped line break in a "..." here-string keeps the
+# next line from ending it; a ${...} name in a string is one variable.
+_DESYNC_BASH8BK = [
+    ("an escaped line break before a here-string's terminator", _GP8BK,
+     "Write-Output @<DQ><LF>a<BT><LF><DQ>@<LF><#<LF><DQ>@<LF>" + _RUN_GP8BK + "<LF>#>"),
+    ("a double quote in a braced variable in a string", _GP8BK,
+     "Write-Output <DQ>${a<DQ>b} <#<DQ><LF>" + _RUN_GP8BK + "<LF>#>"),
+]
+# Blocked on main too, pinned with the reason so the normalized reading keeps them: a --% tail's
+# words after a carrier (a double-quoted span is one word, as the program reads it).
+_PIN8BK = [
+    ("a --% tail's words after a comment's apostrophe", _GP8BK, "#'<LF>git --% push --force<LF>#'"),
+    ("a --% tail's double-quoted script after a comment's apostrophe", _GP8BK,
+     "#'<LF>bash --% -c <DQ>env 'a b=1' git push --force<DQ><LF>#'"),
+]
+# Allowed: command-like text in a comment, a here-string, a string or a --% tail, and an
+# opener pwsh reads as part of a word (`C#`, `a=@'`).
+_ALLOW8BK = [
+    ("a here-string holding an apostrophe", "Write-Output @'<LF>it's fine<LF>'@"),
+    ("a here-string in a group", "Write-Output (@'<LF>it's fine<LF>'@)"),
+    ("a here-string after a comma", "Write-Output a,@'<LF>it's fine<LF>'@"),
+    ("a comment after a group", "(1)#c<LF>Write-Output 2"),
+    ("a comment holding a command", "Write-Output 1 # git push --force"),
+    ("a block comment holding a command", "Write-Output 'a' <# rm -rf / #> 'b'"),
+    ("a # in a word", "dotnet new console -lang C# -o app"),
+    ("a # in a URL", "Invoke-WebRequest https://x.example/a#b"),
+    ("@' in a word", "echo a=@'<LF>x'"),
+    ("a subexpression in a string", "Write-Output <DQ>sha: $(git rev-parse --short HEAD) #<DQ>"),
+    ("a --% tail", "icacls C:/x --% /grant <DQ>Users:(OI)(CI)F<DQ>"),
+    ("a --% tail of quotes", "echo --% ''''''''"),
+    ("a double-quoted here-string", "Write-Output @<DQ><LF>line <DQ>quoted<DQ> here<LF><DQ>@"),
+    # Typographic quotes (pwsh closes a string at one, as the lexer does) and a --% tail that
+    # holds a variable, a quote and a # (each word of a tail is read as a literal string).
+    ("a typographic apostrophe in a string", "Write-Output <DQ>it<RSQ>s<DQ>"),
+    ("typographic quotes in a string", "Write-Output 'say <LDQ>hi<RDQ>'"),
+    ("typographic quotes in a --% tail", "echo --% <LDQ>a|b<RDQ> c | echo d"),
+    ("a --% tail holding a variable and a #", "echo --% $x 'it' #c"),
+    ("a --% tail's double-quoted script", "bash --% -c <DQ>echo hi<DQ>"),
+    ("a comment after a U+2028", "echo a<LS>#c<LF>echo z"),
+    ("a comment after a NEL", "echo a<NEL>#c<LF>echo z"),
+    # --% after a command's redirection or after 2> is the file's name: a comment follows.
+    ("a comment after a --% file name", "echo x > --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("a comment after a 2> --% file name", "2> --% <# x<LF>" + _RUN_GP8BK + " #>"),
+    ("a parameter's backtick before a string", "echo -p<BT>'x' ; echo hi ; 'y'"),
+    ("a typographic-quoted word after a dot", ".<LSQ>x<RSQ>#c ; echo hi"),
+    ("a comment after a group's member", "echo (1).y # git push --force"),
+    ("a comment after a word holding U+180E", "echo a<MVS>b # git push --force"),
+    ("a block comment after a sign-dot word and a blank", "+.'x' <# rm -rf / #>"),
+    ("a comment after a parameter ended by a dot", "echo -p.x <# git push --force #>"),
+    ("a parameter's backtick before a line break, then a plain command", "echo -p<BT><LF>echo hi"),
+    ("a string member and a real comment", "echo $x.'y' # rm -rf /"),
+    ("a braced name holding an escaped }, then a real comment", "echo ${a<BT>}b} # git push --force"),
+    ("a string's member and a real comment", "echo 'a'.b # git push --force"),
+    ("a dot, a string and a real comment", "echo .'x' # rm -rf /"),
+    ("a pwsh 7 literal and a real comment", "1n # git push --force"),
+    ("0x and a real comment", "0x # rm -rf /"),
+    ("a variable's static member and a real comment", "echo $x::y # git push --force"),
+    ("a <BT>u escape in a word", "echo x<BT>u{74}y"),
+    ("clean with a real comment", "clean # git push --force"),
+    ("a ? variable's member and a real comment", "echo $x?.y # git push --force"),
+    ("a keyword glued to a word and a real comment", "return#c # rm -rf /"),
+    ("a hashtable's key, a comment and a value", "@{a<#c#>=1} # git push --force"),
+    ("a hashtable value glued to a comment opener", "@{a=b<#c#>}"),
+    ("a Kelvin-sign word and a real comment", "brea<KELVIN> # git push --force"),
+    ("a dotted capital I in a nested pwsh's word", "pwsh -c <DQ>echo <U0130>stanbul<DQ>"),
+    ("a dotted capital I in a nested member name and a real comment", "pwsh -c <DQ>echo (1).y<U0130> # x<DQ>"),
+    ("a hashtable value's bareword = and a real comment", "@{a=b=c} # git push --force"),
+    ("an attribute and a real comment", "[CmdletBinding()]param() # git push --force"),
+    ("a class, an enum and a real comment", "class C{f(){}} ; enum E{a} # git push --force"),
+    ("a null-conditional index and a real comment", "echo $x?[0] # git push --force"),
+    ("a non-ASCII member name and a real comment", "echo (1).y<SUP2> # git push --force"),
+    ("an argument's [name( group and a real comment", "echo [a(1) # git push --force"),
+    ("an attribute before an enum and a real comment", "[Flags()] enum E{a} # git push --force"),
+    # the word configuration outside a DSC definition's shape
+    ("a build property named Configuration", "dotnet build -p:Configuration=Release"),
+    ("an msbuild property named Configuration", "msbuild x.sln /p:Configuration=Release"),
+    ("a directory named Configuration", "cd src<BS>Configuration"),
+    ("a path through Configuration", "git add src/Configuration/a.cs"),
+    ("a relative Configuration path", "Get-ChildItem .<BS>Configuration"),
+    ("the bare word configuration", "echo configuration"),
+    ("an argument named configuration", "Get-Item -Path x configuration"),
+    ("a redirection to a file named configuration", "echo a > configuration"),
+    ("a hashtable key named Configuration", "@{ Configuration = 'Release' }"),
+    ("a property list naming Configuration", "Select-Object Name, Configuration"),
+    ("a test filter naming Configuration", "dotnet test --filter Category=Configuration"),
+    ("a group holding the word Configuration", "Write-Output (Configuration)"),
+    ("a colon parameter before the word configuration", "Get-Item -Path:x configuration"),
+    ("a host and port before the word configuration", "ssh host:22 configuration"),
+    ("a Unicode 3.2 letter in a name", "$<EACUTE>=1; echo $<EACUTE>.Length"),
+    ("a letter only 5.1 knows in a string", "echo 'x<U1885>y'"),
+]
+# From Bash only: the PowerShell tool refuses these on main too (its POSIX reading of the
+# whole payload meets the comment's apostrophe: unbalanced quoting).
+_ALLOW_BASH8BK = [
+    ("a comment after a group holding an apostrophe", "Write-Output 1<LF>(2)#it's<LF>Write-Output 3"),
+    ("a block comment between strings", "Write-Output 'a'<#it's#>'b'"),
+    ("a block comment after -name:", "Get-ChildItem -Filter:<#it's#>*.log"),
+]
+# Formerly known limits (8as): a pipeline continued after a `|` across a comment.
+_PIPED8BK = "targets piped in"
+_PIPE_BLOCK8BK = [
+    ("a | then a block comment", "Get-Item ~ | <# c #><LF>ri -r"),
+    ("a quoted space and #, then a real comment after the |", "Get-Item ~,' #' | # c<LF>ri -r"),
+]
+# (tail, delivery, the words the program received)
+_ARGV8BK = [
+    # the mutant run's pins (Legacy-mode captures: ucrt = python, msys2 = Git's sh)
+    ("@q'<DQ>'<BS>@<DQ>'", 'msys2', ["@q<BS>@'"]),
+    ("@<DQ><BS>'<DQ> <DQ><BS><BS><DQ>", 'msys2', ['@<BS>', '<BS>']),
+    ("<DQ><BS><BS><DQ> '", 'msys2', ['<BS>', '']),
+    (';<DQ><BS><BS><DQ><DQ>', 'msys2', [';<BS><DQ>']),
+    ('<DQ><DQ><DQ>', 'msys2', ['<DQ>']),
+    ('<DQ><DQ><DQ>:', 'msys2', ['<DQ>:']),
+    ('<BS><BS>', 'msys2', ['<BS><BS>']),
+    ('<BS><BS>', 'msys2', ['<BS><BS>']),
+    ("x:<BS><BS><BS><BS><BS><BS><DQ>'<BS>''$(x)", 'msys2', ["x:<BS><BS><BS><BS><BS><BS>'<BS>''$(x)"]),
+    ("<DQ><DQ><DQ>", "ucrt", ["<DQ>"]),
+    ("<DQ><DQ> <BS>''", "ucrt", ["", "<BS>''"]),
+    ("<DQ><DQ> <BS>''", "msys2", ["", "<BS>"]),
+    ("<DQ> ;a<BS><DQ>'<DQ>'''<DQ>", "ucrt", [" ;a<DQ>''''"]),
+    ("<DQ> ;a<BS><DQ>'<DQ>'''<DQ>", "msys2", [" ;a<DQ>'<DQ>"]),
+    ("@<DQ>#@'", "ucrt", ["@#@'"]),
+    ("@<DQ>#@'", "msys2", ["@#@"]),
+]
+# The lexer's own refusals: nesting past its depth, and a $( ) body whose quotes double at
+# each level past the inspection length.
+_DEEP_DEPTH8BK = "nested too deep to read (> 32 levels)"
+_DEEP_DOUBLE8BK = "its quotes double at each level"
+_DEEP_READINGS8BK = "too many readings to inspect"
+_DEEP_ROWS8BK = [
+    ("33 nested subexpressions in strings", _DEEP_DEPTH8BK,
+     "Write-Output " + "<DQ>$(" * 33 + "1" + ")<DQ>" * 33),
+    ("14 nested subexpressions doubling their quotes", _DEEP_DOUBLE8BK,
+     "Write-Output " + "<DQ>$(" * 14 + "<BT><BT>" + ")<DQ>" * 14),
+    # each chain under the cap, the whole normalized text over it
+    ("two chains of 10 nested subexpressions doubling their quotes", _DEEP_DOUBLE8BK,
+     "Write-Output " + ("<DQ>$(" * 10 + "<BT><BT>" + ")<DQ>" * 10 + " ") * 2),
+    # every reading at once, 4 KB: the readings' texts together past the bound
+    ("every reading at once in 4 KB", _DEEP_READINGS8BK, _F3HEAD8BK + "Write-Output 1 #c<LF>" * 200),
+    ("every reading at once in a subexpression", _DEEP_READINGS8BK,
+     "echo $(" + _F3HEAD8BK + "echo a<BT><LF>b #c<LF>" * 60 + ")"),
+]
+PS_CASES += [
+    (f"ps lexer: {label}", _t8bk(t), B, ()) for label, _r, t in _DESYNC8BK
+] + [
+    (f"ps lexer pin: {label}", _t8bk(t), B, ()) for label, _r, t in _PIN8BK
+] + [
+    (f"ps lexer fp: {label}", _t8bk(t), A, ()) for label, t in _ALLOW8BK
+] + [
+    (f"ps lexer refused: {label}", _t8bk(t), B, ()) for label, _r, t in _REFUSE8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), B, ()) for label, t in _PIPE_BLOCK8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), B, ()) for label, _r, t in _DEEP_ROWS8BK
+]
+CASES += [
+    (f"ps lexer: {label} (bash)", _bash8bk(t), B, ()) for label, _r, t in _DESYNC8BK + _DESYNC_BASH8BK
+] + [
+    (f"ps lexer: {label} (bash)", _t8bk(t), B, ()) for label, _r, t in _BASH_RAW8BK
+] + [
+    (f"ps lexer refused: {label} (bash)", _bash8bk(t), B, ()) for label, _r, t in _REFUSE8BK
+] + [
+    (f"ps lexer fp: {label} (bash)", _bash8bk(t), A, ()) for label, t in _ALLOW8BK + _ALLOW_BASH8BK
+]
+MUST_BLOCK += [
+    (f"ps lexer: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _DESYNC8BK
+] + [
+    (f"ps lexer pin: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _PIN8BK
+] + [
+    (f"ps lexer: {label} (bash)", _bash8bk(t), "bash", (), r)
+    for label, r, t in _DESYNC8BK + _DESYNC_BASH8BK
+] + [
+    (f"ps lexer: {label} (bash)", _t8bk(t), "bash", (), r) for label, r, t in _BASH_RAW8BK
+] + [
+    (f"ps lexer refused: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _REFUSE8BK
+] + [
+    (f"ps lexer refused: {label} (bash)", _bash8bk(t), "bash", (), r) for label, r, t in _REFUSE8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), "powershell", (), _PIPED8BK) for label, t in _PIPE_BLOCK8BK
+] + [
+    (f"ps lexer: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _DEEP_ROWS8BK
+]
+STRUCT_CASES += [
+    # The lexer's extents where pwsh 7.6's tokens disagree with a surviving mutant of the lexer (the
+    # Actions mutant run on 01de3719a64a; guard-lab examples/8bk mutsurv8bk.py): pwsh's comments and strings.
+    ("ps lexer: normalized texts the mutant run pins",
+     lambda: [_norm8bk(_t8bk(t)) for t in (
+         "@'<LF><LF>'@%#'<LSQ>",
+         '@<DQ><EMSP><LF><LF><DQ>@<BT> %#<CR><LF>',
+         "&&|!1<# x #>@'<LF>'@<BS>>",
+         "<RSQ>@'@1.5<#<#'#>@<DQ><LF>>$x[0]",
+         '[CmdletBinding<BT><LF>(SupportsShouldProcess#c)]param()',
+         '[CmdletBinding<BT><LF>(SupportsShouldProcess#c<LF>)]param()',
+         '!<BT><#',
+         "<LF><BT>@'<LF><BT>",
+         "[int]@<DQ><LF><BT><RDQ>@(+a:<LF><DQ>@#'",
+         '@{a=x<LF><BT><LF>| y#c}',
+         '@{a=x<LF><BT><LF>| y#c<LF>}',
+         '2>&1 --% @<DQ>a<RSQ>b<DQ>#  ',
+         '2>&1<MVS>--% @<DQ>a<RSQ>b<DQ>#  ',
+         '>--% #+=<NEL>><MVS>-<DQ>@<BS>> --% <MVS><LF><DQ>',
+         "><BT> <#'#>*2> --% <DQ>&&<BS>*> --% ",
+         '2>&1 --% -<DQ><DQ><DQ>',
+         '>--% <DQ>a<RSQ>b<DQ><DQ>a<RDQ>',
+         '=> --% ><BS>$',
+         '<BT><# --% <BS>-',
+         '$(<RDQ>${x}<RDQ>2>&1 --% a:<BS>[int].]',
+         '> --% a:$x<MVS>-p<MVS>a:-<BS>x<BT>u{74}(1).2>&1',
+         'echo <DQ>$(configuration c{})<DQ>',
+         'echo <DQ>a $(echo <U1C89>) b<DQ>')],
+     [[_t8bk(" ''% ")],
+      [_t8bk(' <DQ><DQ><BT> % <CR><LF>')],
+      [_t8bk("&&|!1 @<DQ><DQ>'<LF>'@<BS>>")],
+      [_t8bk("'@'@1.5 @''<DQ><LF>>$x[0]")],
+      [_t8bk('[CmdletBinding<BT><LF>(SupportsShouldProcess ')],
+      [_t8bk('[CmdletBinding<BT><LF>(SupportsShouldProcess <LF>)]param()')],
+      [_t8bk('!<BT><#')],
+      [_t8bk("<LF><BT>@'<LF><BT>")],
+      [_t8bk('[int] <DQ><BT><RDQ>@(+a:<DQ> ')],
+      [_t8bk('@{a=x<LF><BT><LF>| y#c}')],
+      [_t8bk('@{a=x<LF><BT><LF>| y#c<LF>}')],
+      [_t8bk("2>&1 --% '@a<RSQ><RSQ>b#'")],
+      [_t8bk("2>&1<MVS>--% '@a<RSQ><RSQ>b#'"), _t8bk("2>&1<MVS>--% @''<DQ>a<RSQ>b<DQ>#  ")],
+      [_t8bk(">--% '#+=<NEL>><MVS>-@<BS>> --% <MVS>'<LF><DQ>")],
+      [_t8bk("><BT>  *2> --% '&&<BS>*> --% '")],
+      [_t8bk("2>&1 --% '-<DQ>'")],
+      [_t8bk(">--% 'a<RSQ><RSQ>b<DQ>a<RDQ>'")],
+      [_t8bk("=> --% '><BS>$'")],
+      [_t8bk("<BT><# --% '<BS>-'")],
+      [_t8bk("$(<DQ>${x}<DQ>2>&1 --% 'a:<BS>[int].]'")],
+      [_t8bk("> --% 'a:$x<MVS>-p<MVS>a:-<BS>x<BT>u{74}(1).2>&1'")],
+      "refused: a PowerShell DSC configuration (its body's reading depends on the resources loaded)",
+      'refused: a PowerShell name character whose letter class differs between Unicode versions']),
+    ("ps lexer: a --% tail inside a string's $( ) is found",
+     lambda: m._ps_lex_has_verb(m._ps_lex(_t8bk("echo <DQ>$(x --% a<LF>)<DQ>"))), True),
+    ("ps lexer: comment and string extents pwsh 7.6 reads (mutant pins)",
+     lambda: [_lex_items8bk(_t8bk(t), v51) for t, v51 in (
+         ('<DQ><DQ><DQ><DQ>', False),
+         ("a<DQ>$(<# x #><BS>); Invoke-Command { pwsh -c 'rm -rf /' } @<DQ><LF>", False),
+         ("1@<DQ><LF><LF>'@$('a<DQ>b'){;; bash -c 'rm -rf /' ;@<DQ><LF> ", False),
+         ("<LF>; rm -rf / $('a<DQ>b') ", False),
+         ('@{a=x<LF><#c#><LF>| y#c}', False),
+         ('@{a=x<LF><#c#><LF>| y#c<LF>}', False),
+         ('$h=@{a=echo x<LF>#c<LF>| echo b#c}', False),
+         ('$h=@{a=echo x<LF>#c<LF>| echo b#c<LF>}', False),
+         ('@{a=1<LF>b<#c#>=1}', False),
+         ('@{a=b<LF>b<#c#>=1}', False),
+         ('<BT><LF>#', False),
+         ('<BT><LF>#%', False),
+         ('<BT> #', False),
+         ("<BT> #'", False),
+         ("<LF>'@ #$('''<LF>rm -rf /", False),
+         ("<LF>'@$(<LF>''<DQ> ; rm -rf / <BS><#'#>", False),
+         ('x$(a@<DQ><LF>)', False),
+         ('x$(|<RDQ>)-p', False),
+         ('-p[$(1)#y', False),
+         ('x | -p[$(1)#y', False),
+         ('enum E{a#c<LF>}', False),
+         ('enum E{a<LF>b#c<LF>}', False),
+         ('[A(b#c<LF>)][B(c)]$x=1', False),
+         ("[A(b<#'#>)][B(c)]$x=1", False),
+         ('[int]#', False),
+         ('[int]#>', False),
+         ('[Flags()]enum E{a#c<LF>}', False),
+         ('[Flags()] enum E{a#c<LF>}', False),
+         (']$x#', False),
+         (']1<#', False),
+         ('a&&0x1#>', False),
+         ("]&&-'&&a:<#'#>$", False),
+         ('<LF>!x#', False),
+         ('!echo x<#@', False),
+         ('+1<BT>-p<BT> #!', False),
+         ('+1.5#>', False),
+         ("+2><MVS>--% #'(", False),
+         ('+=#', False),
+         ('+=#>', False),
+         ("-''#", False),
+         ('-<DQ><DQ>#>', False),
+         ('function f{param([ Parameter(Mandatory#c<LF>)]$x)}', False),
+         ('[ CmdletBinding(SupportsShouldProcess#c<LF>)]param()', False),
+         ('[<#c#>CmdletBinding(SupportsShouldProcess#c<LF>)]param()', False),
+         ('[CmdletBinding <#c#>(SupportsShouldProcess#c<LF>)]param()', False))],
+     [[('S', 0, 4)],
+     [('S', 1, 55)],
+     [('S', 2, 41)],
+     [('S', 14, 19)],
+     [('C', 6, 11)],
+     [('C', 6, 11)],
+     [('C', 14, 16)],
+     [('C', 14, 16)],
+     [('C', 7, 12)],
+     [('C', 7, 12)],
+     [('C', 2, 3)],
+     [('C', 2, 4)],
+     [('C', 2, 3)],
+     [('C', 2, 4)],
+     [('S', 1, 10)],
+     [('C', 25, 27), ('S', 1, 25)],
+     [],
+     [],
+     [],
+     [],
+     [('C', 8, 10)],
+     [('C', 10, 12)],
+     [('C', 4, 6)],
+     [('C', 4, 9)],
+     [('C', 5, 6)],
+     [('C', 5, 7)],
+     [('C', 17, 19)],
+     [('C', 18, 20)],
+     [],
+     [],
+     [('C', 6, 8)],
+     [('C', 12, 15), ('S', 4, 12)],
+     [],
+     [],
+     [],
+     [('C', 4, 6)],
+     [('C', 8, 11)],
+     [],
+     [],
+     [('C', 3, 4), ('S', 1, 3)],
+     [('C', 3, 5), ('S', 1, 3)],
+     [('C', 38, 40)],
+     [('C', 37, 39)],
+     [('C', 1, 6), ('C', 41, 43)],
+     [('C', 15, 20), ('C', 42, 44)]]),
+    ("ps lexer: the normalized text of each opener rule",
+     lambda: [m._ps_normalize(_t8bk(t)) for t in (
+         "$h=@'<LF>it's<LF>'@<LF>x", "echo a=@'<LF>'", "(1)#c<LF>x", "echo a#b", "'s'<#c#>x",
+         "a<#c#>", "echo a<BT><LF>#'", "x$(<#)<LF>y", "echo --% it's #x", "<RSQ>a<RSQ>",
+         "<DQ>$('a<DQ>b')<DQ>", "@<DQ><LF>say <DQ>hi<LF><DQ>@", "-p:<#c#>x", "1#c", "1a#c",
+         "@<DQ><LF>$('<LF><DQ>@<LF>')<LF><DQ>@<LF>x", "> --% a b", "& > --% a", "echo x > --% a",
+         "echo x ><BT><LF>--% a", "echo -p<BT>'x'", "-p<BT> #c<LF>x", ".<LSQ>x<RSQ>#c")],
+     [_t8bk(t) for t in (
+         "$h= 'it''s'<LF>x", "echo a=@<DQ><DQ>'<LF>'", "(1) <LF>x", "echo a#b", "'s' x",
+         "a<''#c#>", "echo a<BT><LF>#'", "x$(<''#)<LF>y", "echo --% 'it''s' '#x'", "'a'",
+         "<DQ>$('a<DQ><DQ>b')<DQ>", " <DQ>say <DQ><DQ>hi<DQ>", "-p: x", "1 ", "1a#c",
+         " <DQ>$('<LF><DQ><DQ>@<LF>')<DQ><LF>x", "> --% 'a' 'b'", "& > --% 'a'", "echo x > --% a",
+         "echo x ><BT><LF>--% a", "echo -p<BT><BT>'x'", "-p<BT><BT>  <LF>x", ".'x'#c")]),
+    ("ps lexer: one chain of 10 subexpressions normalizes, two exceed the whole text's cap",
+     lambda: [isinstance(m._ps_normalize(_t8bk(t)), str) for t in (
+         "Write-Output " + "<DQ>$(" * 10 + "<BT><BT>" + ")<DQ>" * 10,)]
+     + [_raises8bk(m._ps_normalize, _t8bk(
+         "Write-Output " + ("<DQ>$(" * 10 + "<BT><BT>" + ")<DQ>" * 10 + " ") * 2))],
+     [True, True]),
+    ("timing: the lexer is linear (16 KB vs 8 KB)",
+     lambda: [_pattern_ratio8as(_lex_emit8bk, _t8bk(u)) < 3.0
+              for u in ("$h=@'<LF>x<LF>'@<LF>", "$h=@'<LF>", "x@'<LF>'<LF>", "'a'<#'#> ", "<#",
+                        "(1)#c<LF>", "<DQ>$('a<DQ>b')<DQ> ", "a<BT><LF>", "echo --% '<LF>",
+                        "x$((1))<LF>", "x$(", "-a=<#c#> ", "(", "$x.y[0]<#c#> ", "1a$(<#)",
+                        "> --% x<LF>", "echo -p<BT>'x' ", "-a.''", "-a.<DQ><DQ>", "-a.'x'")],
+     [True] * 20),
+    ("timing: the normalized reading scales linearly (4 KB vs 2 KB)",
+     lambda: [_ratio8ah("powershell", _t8bk(h), _t8bk(u)) < 3.0 for h, u in (
+         ("", "$h=@'<LF>it's<LF>'@<LF>"), ("", "x@'<LF>'<LF>"), ("", "(1)#c<LF>"),
+         ("echo ", "'a'<#'#> 'a'<#'#> "), ("echo ", "-a=<#c#> -p:<#c#> "))], [True] * 5),
+    ("ps lexer: the normalized text of each round-5 rule",
+     lambda: [m._ps_normalize(_t8bk(t)) for t in (
+         "]-p<BT><LF>x", "echo -p<BT>;#c<LF>x", "& 2> --% a b", ". 2> --% a", "<BT>--% a #b",
+         "echo hi<LF><BT>--% a", "echo (1).y#c<LF>x", "echo $x.'y'#c", "echo {1}.@'<LF>it's<LF>'@",
+         "+.'x'<#c#>", "-.<RSQ>x<LSQ>#c", "-p.-p<BT>;#c", "-p[x<BT> #c", "echo a,--% ; y #z",
+         "echo a,<LF><BT>--% #z", "echo a,b --% ; y #z", "echo x${a<BT>}b}#c<LF>x", "echo ${<BT>}}#c",
+         "echo ${a<BT>{b", "echo ${a<BT>}", "echo ${env:a<BT>b}", "echo ${ab}#c", "echo 'a'.b#c<LF>x",
+         "echo .'x'-p<BT>'y'", "-p+.'x'#c", "echo 'a'.b[0]#c", "echo @'<LF>a<LF>'@.b#c", "-p.x#c",
+         "echo x > <#c#> --% a b", "echo -p:<#c#>--% a", "& <#c#> > --% a b", "2> <#c#> --% a")],
+     [_t8bk(t) for t in (
+         "]-p<BT><BT><LF>x", "echo -p<BT><BT>; <LF>x", "& 2> --% 'a' 'b'", ". 2> --% 'a'",
+         "<BT>--% 'a' '#b'", "echo hi<LF><BT>--% 'a'", "echo (1).y <LF>x", "echo $x.'y' ",
+         "echo {1}. 'it''s'", "+.'x'<''#c#>", "-.'x'#c", "-p.-p<BT>;#c", "-p[x<BT> #c",
+         "echo a,--% ; y  ", "echo a,<LF><BT>--%  ", "echo a,b --% ';' 'y' '#z'",
+         "echo x${a_b}#c<LF>x", "echo ${_}#c", "echo ${a_b", "echo ${a_", "echo ${env:ab}", "echo ${ab}#c",
+         "echo 'a'.b <LF>x", "echo .'x'-p<BT><BT>'y'", "-p+.'x' ", "echo 'a'.b[0] ", "echo  'a'.b ",
+         "-p.x#c", "echo x >   --% a b", "echo -p: --% a", "&   > --% 'a' 'b'", "2>   --% a")]),
+    # U+180E: a blank to Windows PowerShell on .NET Framework 4 to 4.5.2, part of a word to pwsh 7;
+    # neither reading alone is safe, so a text holding one normalizes to both (one when they agree).
+    # Syntax only pwsh 7 has (a 1n / 0b1 / 0x literal, a <BT>u{...} escape) gives Windows PowerShell
+    # 5.1's reading too: a second normalized text where the two differ, one where they agree.
+    ("ps lexer: pwsh 7-only syntax gives 5.1's normalized text too",
+     lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
+         "1n<#c#>x", "0b1#c<LF>x", "0x#c<LF>x", "echo $x::@'<LF>it's<LF>'@", "echo x<BT>u{74}#c", "$::#c",
+         "echo 1#c", "return#c ; x", "if'x' ; y", "0xan<#c#>x", "clean --% a", "echo $x?.y#c",
+         "echo (1)?.y#c", "echo ${x}?.y#c", "@{a<#c#>=1}", "@{a=1;b#c<LF>=2}", "@{a=b<#c#>}",
+         "$h=@'<LF>a<CR>'@<CR>x#c", "<U663><#c#>x", "1<KELVIN>b<#c#>x")],
+     [[_t8bk(t) for t in ts] for ts in (
+         ("1n x", "1n<''#c#>x"), ("0b1 <LF>x", "0b1#c<LF>x"), ("0x <LF>x", "0x#c<LF>x"),
+         ("echo $x:: 'it''s'",), ("echo x<BT>u{74}#c", "echo x<BT>u{74} "), ("$:: ",),
+         ("echo 1#c",), ("return#c ; x", "return "), ("if'x' ; y",), ("0xan x", "0xan<''#c#>x"),
+         ("clean --% a", "clean --% 'a'"), ("echo $x?.y ",), ("echo (1)?.y ", "echo (1)?.y#c"),
+         ("echo ${x}?.y#c",), ("@{a =1}",), ("@{a=1;b <LF>=2}",), ("@{a=b<''#c#>}",),
+         ("$h= 'a'<CR>x#c", "$h= 'a'<CR>x "), ("<U663><''#c#>x", "<U663> x"),
+         ("1<KELVIN>b<''#c#>x", "1<KELVIN>b x"))]),
+    # Every reading at once (non-ASCII names, a glued word, pwsh 7-only syntax, U+180E, a --% tail)
+    # multiplies the texts: 24 for a short text; past 24 K of them over one evaluation the text is
+    # refused (a $( ) body's texts count too).
+    ("ps lexer: every reading at once is bounded",
+     lambda: [len(m._ps_normalized_texts(_t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 20))) == 24,
+              _raises8bk(m._ps_normalized_texts, _t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 200)),
+              "too many readings" in (m.evaluate(_t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 200),
+                                                  shell="powershell") or [""])[0]],
+     [True] * 3),
+    ("ps lexer: U+180E gives the normalized text of each reading",
+     lambda: [m._ps_normalized_texts(_t8bk(t)) for t in (
+         "echo a<MVS><#c#>x", "echo x<MVS>#c<LF>y", "a<MVS>b", "echo a")],
+     [[_t8bk(t) for t in ts] for ts in (
+         ("echo a<MVS> x", "echo a<MVS><''#c#>x"), ("echo x<MVS> <LF>y", "echo x<MVS>#c<LF>y"),
+         ("a<MVS>b",), ("echo a",))]),
+    # The raw readings block these too; the normalized reading alone must (it is the one that reads
+    # them as pwsh does: a sign-dot word, U+180E as a word character, a parameter ended by . or [,
+    # a --% after a comma).
+    ("ps lexer: the normalized reading alone blocks the round-5 shapes",
+     lambda: [any(_GP8BK in (m.evaluate(t, shell="powershell") or ("",))[0]
+                  for t in m._ps_normalized_texts(_t8bk(u))) for u in (
+         "+.'x'<#><LF>" + _RUN_GP8BK + "<LF>#>", "echo a<MVS><#<LF>" + _RUN_GP8BK + "<LF>#>",
+         "-p--%.-p<BT>;# ; " + _RUN_GP8BK, "-p[x<BT> # ; " + _RUN_GP8BK, "echo a,--% ; " + _RUN_GP8BK,
+         "echo a,<LF><BT>--% ; " + _RUN_GP8BK, "1n<#<LF>" + _RUN_GP8BK + "<LF>#>",
+         "0xan<#<LF>" + _RUN_GP8BK + "<LF>#>", "clean --% '<LF>" + _RUN_GP8BK + "<LF>#'",
+         "echo $x?.y?.z#'<LF>" + _RUN_GP8BK + "<LF>#'", "<U663><#<LF>" + _RUN_GP8BK + "<LF>#>",
+         "1<KELVIN>b<#<LF>" + _RUN_GP8BK + "<LF>#>",
+         "$h=@'<LF>a<CR>'@<CR>" + _RUN_GP8BK + "<CR>$z=@'<LF>'@",
+         "brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'", "@{a=b=<#'#>x'<LF>}<LF>" + _RUN_GP8BK + " #''",
+         "@{a=<LF><LF>b#'<LF>'<LF>}<LF>" + _RUN_GP8BK + " #''",
+         "[CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'",
+         "class C<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'", "enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'",
+         "echo (1)?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'", "echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #''",
+         "[Flags()] enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'",
+         "@{ <#c#><EACUTE><#'#>=1}<LF>echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #'",
+         "echo [a(x<#)<LF>echo (1).y#'<LF>" + _RUN_GP8BK + "<LF>#' #>",
+         "$h=@{a=echo x<LF>| echo b#'<LF>'}<LF>" + _RUN_GP8BK + "<LF>#'",
+         "pwsh -c <DQ>brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'<DQ>",
+         "[ CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'",
+         "[<#c#>CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'",
+         "@{a=x<LF><#c#>| y<#'#>z'}<LF>" + _RUN_GP8BK + " #'")],
+     [True] * 29),
+    # Git's MSYS2 bash, the tail delivered verbatim (Legacy mode, Windows PowerShell 5.1; the tail
+    # fuzz's gap): the unclosed double quote takes the rest of the line into the -c word, which a
+    # normalized text carries whole (evaluate() on that text would split its quoted words again).
+    ("ps lexer: the MSYS2 delivery's -c word, read and carried",
+     lambda: (lambda t, w: [w[0] == "-c", _GP8BK in (m.evaluate(w[1], shell="bash") or ("",))[0],
+                            any(" '" + w[1].replace("'", "''") + "'" in n
+                                for n in m._ps_normalized_texts("bash --% " + t))])(
+         _t8bk("-c x'y<BS><BS><DQ>'<DQ>''':' ; git push --force ;"),
+         m._ps_lex_argv(_t8bk("-c x'y<BS><BS><DQ>'<DQ>''':' ; git push --force ;"), "msys2")),
+     [True] * 3),
+    # A --% tail's words as each program's runtime splits them, from captured argv (python: the UCRT,
+    # Git's bash.exe: MSYS2): the UCRT reads a "" in a "..." span as a quote; MSYS2 groups '...',
+    # reads glob quoting, and strips a word's quotes plainly when it starts with @.
+    ("ps lexer: a --% tail's words per delivery (captured argv)",
+     lambda: [m._ps_lex_argv(_t8bk(t), sp) for t, sp, _w in _ARGV8BK],
+     [[_t8bk(w) for w in ws] for _t, _sp, ws in _ARGV8BK]),
+    # The fixture reaches the two-text path at the measured size, and both texts stay linear.
+    ("timing: U+180E's two normalized texts are linear (16 KB vs 8 KB)",
+     lambda: [len(m._ps_normalized_texts(_t8bk("a<MVS><#c#> " * 300))) == 2]
+     + [_pattern_ratio8as(lambda t: _lex_emit8bk(t, mvs_word=w), _t8bk(u)) < 3.0
+        for w in (False, True)
+        for u in ("a<MVS><#c#> ", "+.'x'<#c#> ", "echo a,--% ", "-p.x<BT> #c<LF>")],
+     [True] * 9),
 ]
 
 
