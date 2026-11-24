@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1428
+FP_FLOOR = 1462
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4670
+BLOCK_FLOOR = 4768
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 50
+REASON_FLOOR = 52
 
 
 def _str_value(node):
@@ -9654,7 +9654,7 @@ STRUCT_CASES += [
 # <U1C89> (a letter to .NET 8 / 10, not to Python 3.13), <U1C80> (a letter to Python and .NET 8, not to
 # .NET Framework 4.8), <MATHA> U+1D400 (one letter to Python, two surrogates to .NET), <EACUTE> U+00E9.
 _RF8BK = "(rm -rf)"
-_F3HEAD8BK = "echo $x.y<SUP2>#c<LF>x#c<LF>echo $x.y<U1C89>#c<LF>1n<#c#>x<LF>echo a<MVS><#c#>x<LF>echo --% <DQ>a b<DQ> ''<LF>"
+_F3HEAD8BK = "echo $x.y<SUP2>#c<LF>x#c<LF>echo $x.y<ROMAN1>#c<LF>1n<#c#>x<LF>echo a<MVS><#c#>x<LF>echo --% <DQ>a b<DQ> ''<LF>"
 _GP8BK = "forced git push"
 _RUN_RF8BK = "pwsh -c 'bash -c ''rm -rf /'''"
 _RUN_GP8BK = "pwsh -c 'env ''a b=1'' git push --force'"
@@ -9668,7 +9668,10 @@ def _t8bk(text):
             .replace("<NBSP>", chr(0xA0)).replace("<EMSP>", chr(0x2003)).replace("<MVS>", chr(0x180E))
             .replace("<CR>", chr(13)).replace("<U663>", chr(0x663)).replace("<KELVIN>", chr(0x212A))
             .replace("<SUP2>", chr(0xB2)).replace("<ROMAN1>", chr(0x2160)).replace("<U1C89>", chr(0x1C89))
-            .replace("<U1C80>", chr(0x1C80)).replace("<MATHA>", chr(0x1D400)).replace("<EACUTE>", chr(0xE9)))
+            .replace("<U1C80>", chr(0x1C80)).replace("<MATHA>", chr(0x1D400)).replace("<EACUTE>", chr(0xE9))
+            .replace("<U0237>", chr(0x237)).replace("<U2427>", chr(0x2427))
+            .replace("<U1885>", chr(0x1885)).replace("<U1886>", chr(0x1886)).replace("<U0130>", chr(0x130))
+            .replace("<U1C90>", chr(0x1C90)).replace("<UA7AE>", chr(0xA7AE)).replace("<UA7C5>", chr(0xA7C5)))
 
 
 def _raises8bk(fn, text):
@@ -9879,21 +9882,11 @@ _DESYNC8BK = [
     ("a member name before a superscript two", _GP8BK, "echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #''"),
     ("a member name before a Roman numeral", _GP8BK, "echo 'a'.b<ROMAN1>#'<LF>'; " + _RUN_GP8BK + " #''"),
     ("a member name before an astral letter", _GP8BK, "echo $x.y<MATHA>#'<LF>'; " + _RUN_GP8BK + " #''"),
-    ("a member name with a Unicode 16 letter", _GP8BK, "echo $x.y<U1C89>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
-    ("a member name with a letter 5.1 does not know", _GP8BK, "echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #''"),
-    # A DSC resource's body is a hashtable (not modelled: the bare-word copy reads it).
-    ("a comment after a DSC resource's key", _GP8BK,
-     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
-    ("a comment after a DSC resource's second key", _GP8BK,
-     "configuration c{File f{DestinationPath='x'<LF>Ensure<#'#>='Present'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
-    # Round 8: an attribute's `(...)]` leaves the statement going on; a DSC resource's body is read as
-    # a hashtable, so a glued word elsewhere keeps its own reading; a letter and a non-letter name
+    # Round 8: an attribute's `(...)]` leaves the statement going on; a letter and a non-letter name
     # character in one text; `echo [a(` is a command argument's group, no attribute.
     ("a comment after an attribute before an enum", _GP8BK, "[Flags()] enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'"),
     ("a comment after an attribute before a class's method", _GP8BK,
      "[Obsolete()] class C{M<#'#>(){}}<LF>" + _RUN_GP8BK + "<LF>#'"),
-    ("a DSC resource's key and an ordinary glued word", _GP8BK,
-     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
     ("a letter key and a superscript member name in one text", _GP8BK,
      "@{ <#c#><EACUTE><#'#>=1}<LF>echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #'"),
     ("an argument's [name( group, no attribute", _GP8BK,
@@ -9901,9 +9894,100 @@ _DESYNC8BK = [
     # The Kelvin sign in a word the readings decode or lowercase: a nested pwsh's script.
     ("a Kelvin-sign break in a nested pwsh's script", _GP8BK,
      "pwsh -c <DQ>brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+    # U+0130 (dotted capital I): a letter to pwsh; lower() splits it into i and a combining dot (measured)
+    ("a dotted capital I in a nested pwsh's member name", _GP8BK,
+     "pwsh -c <DQ>echo (1).y<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+    ("a dotted capital I in a nested powershell's member name", _GP8BK,
+     "powershell -c <DQ>echo 'a'.b<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+    ("a dotted capital I as a nested pwsh's member name", _GP8BK,
+     "pwsh -c <DQ>echo (1).<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
+]
+# Round 9: an attribute with a blank or a comment inside `[...(`; under 5.1 (an older Unicode) e-acute
+# is a name character and U+1C80 is not.
+_DESYNC8BK += [
+    ("a comment after an attribute's argument, a blank after its [", _GP8BK,
+     "[ CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute's argument, a comment after its [", _GP8BK,
+     "[<#c#>CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after an attribute's argument, a comment before its (", _GP8BK,
+     "[CmdletBinding <#c#>(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'"),
+]
+# A DSC configuration is refused: pwsh reads its body by the resources loaded when it parses.
+_DSC8BK = "a PowerShell DSC configuration"
+_REFUSE8BK = [
+    ("a comment after a DSC resource's key", _DSC8BK,
+     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a comment after a DSC resource's second key", _DSC8BK,
+     "configuration c{File f{DestinationPath='x'<LF>Ensure<#'#>='Present'}}<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a DSC resource's key and an ordinary glued word", _DSC8BK,
+     "configuration c{File f{DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a comment before a DSC resource", _DSC8BK,
+     "configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a quoted configuration name", _DSC8BK,
+     "configuration 'c'{File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a script block in a configuration", _DSC8BK,
+     "configuration C { Invoke-Command -ScriptBlock {echo -p<BT>'y' ; " + _RUN_GP8BK + "} }; C"),
+    ("a DSC resource and a real comment", _DSC8BK, "configuration c{File f{DestinationPath='x'}} # git push --force"),
+    # reviewer r11: refused by the keyword's position, whatever follows it
+    ("a DSC name past a long gap", _DSC8BK, "configuration" + " " * 401 + "c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name past a long block comment", _DSC8BK, "configuration <#" + "x" * 400 + "#> c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a line comment before a DSC body", _DSC8BK, "configuration c #x<LF>{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a lone-CR continuation before a DSC name", _DSC8BK, "configuration <BT><CR>c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name with a doubled quote", _DSC8BK, "configuration 'c''d'{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name with an escaped quote", _DSC8BK, "configuration <DQ>c<BT><DQ>d<DQ>{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC name from a subexpression", _DSC8BK, "configuration $('c'){<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC configuration assigned", _DSC8BK, "$x=configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a block comment", _DSC8BK, "<#c#>configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword and many comments", _DSC8BK, "configuration " + "<##>" * 100),
+    ("a backtick-blank before a DSC keyword at the start", _DSC8BK, "<BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword after ;", _DSC8BK, "echo a; <BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword after a block comment", _DSC8BK, "<#c#><BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword after an assignment", _DSC8BK, "$x= <BT> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a backtick-blank before a DSC keyword a non-breaking space, after an attribute", _DSC8BK, "[a()]<BT><NBSP>configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword where a name can follow, in an argument", _DSC8BK, "Copy-Item configuration backup"),
+    ("a DSC keyword after ;", _DSC8BK, "echo a; configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after {", _DSC8BK, "& {configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after }", _DSC8BK, "if(1){}configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after (", _DSC8BK, "(configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after )", _DSC8BK, "if(1)configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after ]", _DSC8BK, "[x()]configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after |", _DSC8BK, "echo a | configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after &&", _DSC8BK, "echo a && configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a line break", _DSC8BK, "echo a<LF>configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a label", _DSC8BK, ":a configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after an assignment", _DSC8BK, "$x = configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after an index assignment", _DSC8BK, "$a[0]=configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a braced variable's assignment", _DSC8BK, "${a b}+=configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a DSC keyword after a block comment", _DSC8BK, "<#c#> configuration c{<#c#>File f{<#c#>DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'"),
+]
+# A name character Unicode 3.2 did not assign is a letter to some of Python, .NET 8 / 10 and .NET
+# Framework 4.8 and not to others (measured): such a text is refused, not read one way.
+_UNI8BK = "letter class differs between Unicode versions"
+_REFUSE8BK += [
+    ("a member name with a Unicode 16 letter", _UNI8BK, "echo $x.y<U1C89>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a member name with a letter 5.1 does not know", _UNI8BK, "echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #''"),
+    ("a letter key and a letter 5.1 does not know in one text", _UNI8BK,
+     "@{ <#c#><EACUTE><#'#>=1}<LF>echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a Unicode 4.1 letter key and a letter 5.1 does not know", _UNI8BK,
+     "@{ <#c#><U0237><#'#>=1}<LF>echo $x.y<U1C80>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    ("a Unicode 16 letter key and a symbol member", _UNI8BK,
+     "@{ <#c#><U1C89><#'#>=1}<LF>echo $x.y<U2427>#'<LF>'; " + _RUN_GP8BK + " #'"),
+    # letters to .NET Framework 4.8 only (Unicode 3.2 to 8 class them Lo, later Unicode Mn): measured
+    ("a member name with a letter only 5.1 knows", _UNI8BK, "echo $x.y<U1885>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    ("a member name with another letter only 5.1 knows", _UNI8BK,
+     "echo $x.y<U1886>#'<LF>" + _RUN_GP8BK + "<LF>#'"),
+    # lower() turns these into letters Unicode 3.2 had; 5.1 knows none of them (measured)
+    ("a Georgian Mtavruli letter in a nested 5.1 script's member name", _UNI8BK,
+     "powershell -c <DQ>echo (1).y<U1C90>#'<LF>'; " + _RUN_GP8BK + " #'<DQ>"),
+    ("a Unicode 9 capital in a nested 5.1 script's member name", _UNI8BK,
+     "powershell -c <DQ>echo 'a'.b<UA7AE>#'<LF>'; " + _RUN_GP8BK + " #'<DQ>"),
+    ("a Unicode 12 capital in a nested 5.1 script's member name", _UNI8BK,
+     "powershell -c <DQ>echo (1).y<UA7C5>#'<LF>'; " + _RUN_GP8BK + " #'<DQ>"),
 ]
 # Bash commands as typed: an ANSI-C escape bash decodes to the Kelvin sign.
 _BASH_RAW8BK = [
+    ("a dotted capital I in a nested powershell's script", _GP8BK,
+     "cmd /c powershell -Command <DQ>echo (1).y<U0130>#'<LF>" + _RUN_GP8BK + "<LF>#'<DQ>"),
     ("a Kelvin sign from an ANSI-C escape", _GP8BK,
      "pwsh -c $'brea<BS>u212a --% <BS>'<BS>npwsh -c <BS>'env <BS>'<BS>'a b=1<BS>'<BS>' git push --force<BS>'<BS>n#<BS>''"),
 ]
@@ -9972,14 +10056,32 @@ _ALLOW8BK = [
     ("a hashtable's key, a comment and a value", "@{a<#c#>=1} # git push --force"),
     ("a hashtable value glued to a comment opener", "@{a=b<#c#>}"),
     ("a Kelvin-sign word and a real comment", "brea<KELVIN> # git push --force"),
+    ("a dotted capital I in a nested pwsh's word", "pwsh -c <DQ>echo <U0130>stanbul<DQ>"),
+    ("a dotted capital I in a nested member name and a real comment", "pwsh -c <DQ>echo (1).y<U0130> # x<DQ>"),
     ("a hashtable value's bareword = and a real comment", "@{a=b=c} # git push --force"),
     ("an attribute and a real comment", "[CmdletBinding()]param() # git push --force"),
     ("a class, an enum and a real comment", "class C{f(){}} ; enum E{a} # git push --force"),
     ("a null-conditional index and a real comment", "echo $x?[0] # git push --force"),
     ("a non-ASCII member name and a real comment", "echo (1).y<SUP2> # git push --force"),
     ("an argument's [name( group and a real comment", "echo [a(1) # git push --force"),
-    ("a DSC resource and a real comment", "configuration c{File f{DestinationPath='x'}} # git push --force"),
     ("an attribute before an enum and a real comment", "[Flags()] enum E{a} # git push --force"),
+    # the word configuration outside a DSC definition's shape
+    ("a build property named Configuration", "dotnet build -p:Configuration=Release"),
+    ("an msbuild property named Configuration", "msbuild x.sln /p:Configuration=Release"),
+    ("a directory named Configuration", "cd src<BS>Configuration"),
+    ("a path through Configuration", "git add src/Configuration/a.cs"),
+    ("a relative Configuration path", "Get-ChildItem .<BS>Configuration"),
+    ("the bare word configuration", "echo configuration"),
+    ("an argument named configuration", "Get-Item -Path x configuration"),
+    ("a redirection to a file named configuration", "echo a > configuration"),
+    ("a hashtable key named Configuration", "@{ Configuration = 'Release' }"),
+    ("a property list naming Configuration", "Select-Object Name, Configuration"),
+    ("a test filter naming Configuration", "dotnet test --filter Category=Configuration"),
+    ("a group holding the word Configuration", "Write-Output (Configuration)"),
+    ("a colon parameter before the word configuration", "Get-Item -Path:x configuration"),
+    ("a host and port before the word configuration", "ssh host:22 configuration"),
+    ("a Unicode 3.2 letter in a name", "$<EACUTE>=1; echo $<EACUTE>.Length"),
+    ("a letter only 5.1 knows in a string", "echo 'x<U1885>y'"),
 ]
 # From Bash only: the PowerShell tool refuses these on main too (its POSIX reading of the
 # whole payload meets the comment's apostrophe: unbalanced quoting).
@@ -10019,6 +10121,8 @@ _DEEP_ROWS8BK = [
      "Write-Output " + ("<DQ>$(" * 10 + "<BT><BT>" + ")<DQ>" * 10 + " ") * 2),
     # every reading at once, 4 KB: the readings' texts together past the bound
     ("every reading at once in 4 KB", _DEEP_READINGS8BK, _F3HEAD8BK + "Write-Output 1 #c<LF>" * 200),
+    ("every reading at once in a subexpression", _DEEP_READINGS8BK,
+     "echo $(" + _F3HEAD8BK + "echo a<BT><LF>b #c<LF>" * 60 + ")"),
 ]
 PS_CASES += [
     (f"ps lexer: {label}", _t8bk(t), B, ()) for label, _r, t in _DESYNC8BK
@@ -10026,6 +10130,8 @@ PS_CASES += [
     (f"ps lexer pin: {label}", _t8bk(t), B, ()) for label, _r, t in _PIN8BK
 ] + [
     (f"ps lexer fp: {label}", _t8bk(t), A, ()) for label, t in _ALLOW8BK
+] + [
+    (f"ps lexer refused: {label}", _t8bk(t), B, ()) for label, _r, t in _REFUSE8BK
 ] + [
     (f"ps lexer: {label}", _t8bk(t), B, ()) for label, t in _PIPE_BLOCK8BK
 ] + [
@@ -10035,6 +10141,8 @@ CASES += [
     (f"ps lexer: {label} (bash)", _bash8bk(t), B, ()) for label, _r, t in _DESYNC8BK + _DESYNC_BASH8BK
 ] + [
     (f"ps lexer: {label} (bash)", _t8bk(t), B, ()) for label, _r, t in _BASH_RAW8BK
+] + [
+    (f"ps lexer refused: {label} (bash)", _bash8bk(t), B, ()) for label, _r, t in _REFUSE8BK
 ] + [
     (f"ps lexer fp: {label} (bash)", _bash8bk(t), A, ()) for label, t in _ALLOW8BK + _ALLOW_BASH8BK
 ]
@@ -10047,6 +10155,10 @@ MUST_BLOCK += [
     for label, r, t in _DESYNC8BK + _DESYNC_BASH8BK
 ] + [
     (f"ps lexer: {label} (bash)", _t8bk(t), "bash", (), r) for label, r, t in _BASH_RAW8BK
+] + [
+    (f"ps lexer refused: {label}", _t8bk(t), "powershell", (), r) for label, r, t in _REFUSE8BK
+] + [
+    (f"ps lexer refused: {label} (bash)", _bash8bk(t), "bash", (), r) for label, r, t in _REFUSE8BK
 ] + [
     (f"ps lexer: {label}", _t8bk(t), "powershell", (), _PIPED8BK) for label, t in _PIPE_BLOCK8BK
 ] + [
@@ -10119,9 +10231,10 @@ STRUCT_CASES += [
          ("$h= 'a'<CR>x#c", "$h= 'a'<CR>x "), ("<U663><''#c#>x", "<U663> x"),
          ("1<KELVIN>b<''#c#>x", "1<KELVIN>b x"))]),
     # Every reading at once (non-ASCII names, a glued word, pwsh 7-only syntax, U+180E, a --% tail)
-    # multiplies the texts: 36 for a short text; past 48 K of them together the text is refused.
+    # multiplies the texts: 24 for a short text; past 24 K of them over one evaluation the text is
+    # refused (a $( ) body's texts count too).
     ("ps lexer: every reading at once is bounded",
-     lambda: [len(m._ps_normalized_texts(_t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 20))) == 36,
+     lambda: [len(m._ps_normalized_texts(_t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 20))) == 24,
               _raises8bk(m._ps_normalized_texts, _t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 200)),
               "too many readings" in (m.evaluate(_t8bk(_F3HEAD8BK + "Write-Output 1 #c<LF>" * 200),
                                                   shell="powershell") or [""])[0]],
@@ -10150,14 +10263,14 @@ STRUCT_CASES += [
          "[CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'",
          "class C<#'#>{}<LF>" + _RUN_GP8BK + "<LF>#'", "enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'",
          "echo (1)?[0]#'<LF>" + _RUN_GP8BK + "<LF>#'", "echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #''",
-         "echo $x.y<U1C89>#'<LF>" + _RUN_GP8BK + "<LF>#'",
-         "configuration c{File f{DestinationPath<#'#>='x'}}<LF>" + _RUN_GP8BK + "<LF>#'",
          "[Flags()] enum E{a<#'#>}<LF>" + _RUN_GP8BK + "<LF>#'",
-         "configuration c{File f{DestinationPath<#'#>='x'}}<LF>echo b#'<LF>'; " + _RUN_GP8BK + " #'",
          "@{ <#c#><EACUTE><#'#>=1}<LF>echo (1).y<SUP2>#'<LF>'; " + _RUN_GP8BK + " #'",
          "echo [a(x<#)<LF>echo (1).y#'<LF>" + _RUN_GP8BK + "<LF>#' #>",
          "$h=@{a=echo x<LF>| echo b#'<LF>'}<LF>" + _RUN_GP8BK + "<LF>#'",
-         "pwsh -c <DQ>brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'<DQ>")],
+         "pwsh -c <DQ>brea<KELVIN> --% '<LF>" + _RUN_GP8BK + "<LF>#'<DQ>",
+         "[ CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'",
+         "[<#c#>CmdletBinding(SupportsShouldProcess<#'#>)]param()<LF>" + _RUN_GP8BK + "<LF>#'",
+         "@{a=x<LF><#c#>| y<#'#>z'}<LF>" + _RUN_GP8BK + " #'")],
      [True] * 29),
     # Git's MSYS2 bash, the tail delivered verbatim (Legacy mode, Windows PowerShell 5.1; the tail
     # fuzz's gap): the unclosed double quote takes the rest of the line into the -c word, which a
