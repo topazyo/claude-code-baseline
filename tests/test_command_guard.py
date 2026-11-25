@@ -10737,6 +10737,14 @@ STRUCT_CASES += [
      lambda: _ratio8ah("bash", "", "pwsh -c 'gi`T x'; ") < 3.0, True),
     ("timing: 8bm: the same from the PowerShell tool (4 KB vs 2 KB)",
      lambda: _ratio8ah("powershell", "", "pwsh -c 'gi`T x'; ") < 3.0, True),
+    # ...and the 4 KB text gets there: the second reading runs and the blocked tail is judged, not refused.
+    ("8bm: the 4 KB timing text takes the second reading and meets the push rule",
+     lambda: (m.evaluate(_fit8af("", "pwsh -c 'gi`T x'; ", 4000)), m._Command.kelvin_seen),
+     (["forced git push is forbidden"], True)),
+    # Every ASCII capital beside a backtick triggers it (pwsh has escapes for nine letters).
+    ("8bm: every capital beside a backtick sends the text through the second reading",
+     lambda: [_seen8bm("bash", "pwsh -c <SQ>x<BT>" + chr(c) + "<SQ>") for c in range(65, 91)],
+     [True] * 26),
     # Both triggers in one word: its case kept, the Kelvin sign still spelled U+0138.
     ("8bm: a word with a fold and a capital keeps its case, the Kelvin sign respelled",
      lambda: _segs8bm(True, "Echo <SQ>Brea" + chr(0x212A) + "<BT>T<SQ>"),
