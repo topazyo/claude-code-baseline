@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1487
+FP_FLOOR = 1488
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4837
+BLOCK_FLOOR = 4848
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -10654,6 +10654,9 @@ _PS7_8BM = [
     ("width: `U{27} before a single-quoted string", _GP8BK, _v1_8bm("27", "<SQ>")),
     ("value: a capital escaped in the command word", _GP8BK, "gi<BT>T push --force"),
     ("value: a capital escaped in a cmdlet's name", _RD8BM, "R<BT>Emove-Item -Recurse -Force C:/"),
+    # The capital need not start the word, and every letter counts (`E, `R as well as `T, `U).
+    ("value: an escaped capital after a lowercase letter", _RD8BM, "r<BT>Emove-item -recurse -force c:/"),
+    ("value: an alias with an escaped capital", _RD8BM, "e<BT>Rase -r -fo c:/"),
 ]
 # ...and run by Windows PowerShell 5.1 too (no width row: 5.1 has no `u{} escape).
 _PS51_8BM = [row for row in _PS7_8BM if row[0].startswith("value")]
@@ -10670,6 +10673,12 @@ _BASH8BM = [
      "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>140<BS>124 push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
     ("ANSI-C: the backtick bash decodes one level down, from sh", _GP8BK,
      "sh -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>x60T push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
+    ("ANSI-C: hex backtick and capital one level down", _GP8BK,
+     "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>x60<BS>x54 push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
+    ("ANSI-C: an octal backtick before a capital one level down", _GP8BK,
+     "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>140T push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
+    ("ANSI-C: a \\u backtick before a capital one level down", _GP8BK,
+     "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>u0060T push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
     ("a capital escaped in the command word: pwsh -NoProfile -Command", _GP8BK,
      "pwsh -NoProfile -Command <SQ>gi<BT>T push --force<SQ>"),
     ("a capital escaped in the command word: env pwsh -c", _GP8BK, "env pwsh -c <SQ>gi<BT>T push --force<SQ>"),
@@ -10693,6 +10702,7 @@ _PS_BLOCK8BM = [(f"pwsh -c <DQ>...<DQ>: {lb}", r, _ps_dq8bm(s)) for lb, r, s in 
 _ALLOW8BM = [
     ("the lexers agree: `u in both places", _bash8bk(_t8bl(_v1_8bm("27", "<DQ>").replace("<BT>U{", "<BT>u{")))),
     ("`N stays a letter", _bash8bk(_t8bl("echo x<BT>N#<DQ><LF>Write-Output 1<LF>#<DQ>"))),
+    ("`E stays a letter", _bash8bk(_t8bl("echo x<BT>E#<DQ><LF>Write-Output 1<LF>#<DQ>"))),
     ("one level of gi``<DQ>T<DQ> names no git", _bash8bk(_t8bl("Write-Outpu<BT><BT><DQ>T<DQ> 1"))),
     ("a commit message with `Foo` and README", _t8bl("git commit -m <DQ>Fix <BS><BT>Foo<BS><BT> in README<DQ>")),
     ("a single-quoted commit message", _t8bl("git commit -m <SQ>Fix <BT>Foo<BT> in README<SQ>")),
@@ -10722,6 +10732,11 @@ STRUCT_CASES += [
      [False, True]),
     ("8bm: only the triggering word keeps its case",
      lambda: _segs8bm(True, "Echo <SQ>A<BT>B<SQ> C"), [["echo", _t8bl("A<BT>B"), "c"]]),
+    # The second reading doubles the work for a triggering word, and stays linear.
+    ("timing: 8bm: nested scripts with a capital beside a backtick scale linearly (4 KB vs 2 KB)",
+     lambda: _ratio8ah("bash", "", "pwsh -c 'gi`T x'; ") < 3.0, True),
+    ("timing: 8bm: the same from the PowerShell tool (4 KB vs 2 KB)",
+     lambda: _ratio8ah("powershell", "", "pwsh -c 'gi`T x'; ") < 3.0, True),
     # Both triggers in one word: its case kept, the Kelvin sign still spelled U+0138.
     ("8bm: a word with a fold and a capital keeps its case, the Kelvin sign respelled",
      lambda: _segs8bm(True, "Echo <SQ>Brea" + chr(0x212A) + "<BT>T<SQ>"),
