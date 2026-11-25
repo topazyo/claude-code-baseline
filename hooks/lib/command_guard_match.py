@@ -33,7 +33,10 @@ normalizer was defeated by ordinary shell quoting):
   * Real tokenization per line via shlex(posix=True): quotes are REMOVED and
     backslash escapes are RESOLVED, so quote-splicing (--fo"rce", r''m) and
     escape-splicing (-r\f) tokenize to their bare equivalents instead of being
-    shredded into extra tokens by a blind quote-to-space substitution.
+    shredded into extra tokens by a blind quote-to-space substitution. Inside "..."
+    bash also decodes a backslash before $ or ` and a backslash-newline, which shlex
+    keeps: each line is read that way too, so a script a double-quoted word hands to
+    a runner is judged as the runner gets it (see _shell_words, bash_dq).
   * Unbalanced quoting raises ValueError -> the command cannot be seen -> BLOCK
     ("uninspectable"). Never silently allow something that could not be parsed.
   * ${IFS} / $IFS are expanded to a space before tokenizing (rm${IFS}-rf${IFS}/).
@@ -61,7 +64,9 @@ normalizer was defeated by ordinary shell quoting):
     shell reading its script from a pipe, a here-string or a process substitution
     (`... | sh`, `bash - <<< ...`, `source <(...)`) is uninspectable -> BLOCK, as is
     `eval "$(...)"`, and so is a cmd or PowerShell runner reading its commands from a
-    heredoc (`pwsh <<EOF`; see _heredoc_check). An `rm -rf` fed by xargs, directly or
+    heredoc (`pwsh <<EOF`; see _heredoc_check), and so is bash text holding a heredoc
+    whose body bash decodes before its reader runs it (an unquoted delimiter and a
+    backslash escape after it; see _heredoc_escapes), whoever reads it. An `rm -rf` fed by xargs, directly or
     through an inline script xargs runs, has targets of unknown scope -> BLOCK.
   * The command word is normalized like a path: split on BOTH / and \\ (Git Bash
     / Windows) with a trailing .exe/.cmd/.bat/.com stripped, so a "git.exe" or
