@@ -2325,9 +2325,11 @@ STRUCT_CASES = [
      "(Join-Path a b)"),
     # The runner readings multiply; their tokenization is memoized (_runner_segments).
     # 4 KB of distinct nested runners took ~0.3 s here (~0.07 s before the runners);
-    # the hook timeout is 10 s.
+    # the hook timeout is 10 s. On the Python 3.7 floor runner it measured 2.05-2.98 s on main
+    # (2026-11-25, 20 runs on each of three runners): the runner's speed, not the code, decided
+    # a 3.0 s bound, so the bound is 6.0 s, still well under the timeout.
     ("timing: 4 KB of nested runners (PowerShell)",
-     lambda: _timing("powershell", _distinct_runner_payload()) < 3.0, True),
+     lambda: _timing("powershell", _distinct_runner_payload()) < 6.0, True),
     ("timing: 4 KB of nested runners (Bash)", lambda: _timing(
         "bash", ("cmd /c wsl -- pwsh -Command echo a^b 'q w' ; " * 90)[:4096]) < 3.0,
      True),
