@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1478
+FP_FLOOR = 1487
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4807
+BLOCK_FLOOR = 4829
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -10596,6 +10596,113 @@ STRUCT_CASES += [
     ("8bl: a pwsh script's text gets no bash decoding",
      lambda: [list(s) for s in m._segments(_t8bl("echo <DQ><BS>$x<DQ>"), ps_script=True)],
      [["echo", _t8bl("<BS>$x")]]),
+]
+
+
+# Follow-up 8bm: the readings lowercase every word, and a runner's script is re-read from those words.
+# pwsh's escapes are lowercase only: `T is a T and `t a tab, `U{27} a U and then a { token and `u{27}
+# one escape (a quote). So a pwsh script holding `T (gi`T: git on a case-insensitive PATH) or `U{27}
+# (a desync: `#"` a comment to pwsh, a string to the lowercased reading) was read as another script.
+# A word holding an ASCII capital and a backtick or a `$'` string (bash's ANSI-C decode can make the
+# backtick one level down) now sends the text through the second reading with that word's case kept
+# (_words_to_segments, evaluate()). Block rows: live on main c05ded0 (a harmless twin ran under pwsh 7.6,
+# or Windows PowerShell 5.1 for powershell -c), but the width rows, whose payload line pwsh 7.6 runs.
+# Placeholders as in 8bl (<LF> <BS> <BT> <DQ> <SQ>).
+_RD8BM = "recursive delete of a root/cwd/home target"
+
+
+def _v1_8bm(hexv, hide):
+    # `U{hex}: a U and a { token to pwsh 7, so the line's #<hide> is a comment; `u{hex} is one escape.
+    return ("echo x<BT>U{" + hexv + "}#" + hide + "<LF>echo a<BT>u{27}#;" + _RUN_GP8BK + "<LF>#" + hide)
+
+
+def _bash_dq8bm(script):
+    # A pwsh script run from Bash as `pwsh -c "..."`: bash's \ escapes before \ $ ` ".
+    s = _t8bl(script)
+    return "pwsh -c " + '"' + "".join("\\" + c if c in '\\$`"' else c for c in s) + '"'
+
+
+def _ps_dq8bm(script):
+    # A pwsh script run from the PowerShell tool as `pwsh -c "..."`: pwsh's ` escapes before ` $ ".
+    s = _t8bl(script)
+    return "pwsh -c " + '"' + "".join("`" + c if c in '`$"' else c for c in s) + '"'
+
+
+def _seen8bm(shell, text):
+    # Whether the text sends the readings through the second reading.
+    m.evaluate(_t8bl(text), shell=shell)
+    return m._Command.kelvin_seen
+
+
+def _segs8bm(second, text):
+    m._Command.kelvin_alt = second
+    try:
+        return [list(s) for s in m._segments(_t8bl(text))]
+    finally:
+        m._Command.kelvin_alt = False
+
+
+# (label, reason, pwsh script): run by pwsh 7.6 from every carrier below.
+_PS7_8BM = [
+    ("width: `U{27} before a string", _GP8BK, _v1_8bm("27", "<DQ>")),
+    ("width: `U{1F600} before a string", _GP8BK, _v1_8bm("1F600", "<DQ>")),
+    ("width: `U{27} before a single-quoted string", _GP8BK, _v1_8bm("27", "<SQ>")),
+    ("value: a capital escaped in the command word", _GP8BK, "gi<BT>T push --force"),
+    ("value: a capital escaped in a cmdlet's name", _RD8BM, "R<BT>Emove-Item -Recurse -Force C:/"),
+]
+# ...and run by Windows PowerShell 5.1 too (no width row: 5.1 has no `u{} escape).
+_PS51_8BM = [row for row in _PS7_8BM if row[0].startswith("value")]
+# (label, reason, Bash text): a capital or a backtick a decode joins one level down.
+_BASH8BM = [
+    ("two levels: a quote between the backtick and the capital", _GP8BK,
+     "pwsh -c <SQ>pwsh -c gi<BT><BT><DQ>T<DQ> push --force<SQ>"),
+    ("two levels: the capital an escape makes", _GP8BK,
+     "pwsh -c <SQ>pwsh -c <DQ>gi<BT><BT><BT>u{54} push --force<DQ><SQ>"),
+    ("ANSI-C: the backtick bash decodes", _GP8BK, "pwsh -c $<SQ>gi<BS>x60T push --force<SQ>"),
+    ("ANSI-C: the backtick bash decodes one level down", _GP8BK,
+     "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>x60T push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
+    ("ANSI-C: octal backtick and capital one level down", _GP8BK,
+     "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>140<BS>124 push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
+]
+_BLOCK8BM = ([(f"pwsh -c '...': {lb}", r, _bash8bk(_t8bl(s))) for lb, r, s in _PS7_8BM]
+             + [(f"pwsh -c <DQ>...<DQ>: {lb}", r, _bash_dq8bm(s)) for lb, r, s in _PS7_8BM]
+             + [(f"powershell -c '...': {lb}", r, _bash8bk(_t8bl(s)).replace("pwsh", "powershell", 1))
+                for lb, r, s in _PS51_8BM]
+             + [(lb, r, _t8bl(s)) for lb, r, s in _BASH8BM])
+_PS_BLOCK8BM = [(f"pwsh -c <DQ>...<DQ>: {lb}", r, _ps_dq8bm(s)) for lb, r, s in _PS7_8BM]
+# Bash-tool and PowerShell-tool texts whose verdict must stay allow.
+_ALLOW8BM = [
+    ("the lexers agree: `u in both places", _bash8bk(_t8bl(_v1_8bm("27", "<DQ>").replace("<BT>U{", "<BT>u{")))),
+    ("`N stays a letter", _bash8bk(_t8bl("echo x<BT>N#<DQ><LF>Write-Output 1<LF>#<DQ>"))),
+    ("one level of gi``<DQ>T<DQ> names no git", _bash8bk(_t8bl("Write-Outpu<BT><BT><DQ>T<DQ> 1"))),
+    ("a commit message with `Foo` and README", _t8bl("git commit -m <DQ>Fix <BS><BT>Foo<BS><BT> in README<DQ>")),
+    ("a single-quoted commit message", _t8bl("git commit -m <SQ>Fix <BT>Foo<BT> in README<SQ>")),
+    ("a command substitution of a capital word", _t8bl("echo <BT>PWD<BT>")),
+    ("a capital in an ANSI-C string", _t8bl("printf $<SQ>Hello World<BS>n<SQ>")),
+]
+_PS_ALLOW8BM = [
+    ("a message with `Readme`", _t8bl("Write-Output <DQ>See <BT><BT>Readme<BT><BT><DQ>")),
+    ("line continuations and capitals", _t8bl("Get-ChildItem -Path C:<BS>x <BT><LF>  -Recurse <BT><LF>  -Filter *.md")),
+]
+CASES += [(f"8bm backtick case: {lb}", t, B, ()) for lb, _r, t in _BLOCK8BM] + [
+    (f"8bm backtick case fp: {lb}", t, A, ()) for lb, t in _ALLOW8BM]
+PS_CASES += [(f"8bm backtick case (powershell): {lb}", t, B, ()) for lb, _r, t in _PS_BLOCK8BM] + [
+    (f"8bm backtick case fp (powershell): {lb}", t, A, ()) for lb, t in _PS_ALLOW8BM]
+MUST_BLOCK += [(f"8bm backtick case: {lb}", t, "bash", (), r) for lb, r, t in _BLOCK8BM] + [
+    (f"8bm backtick case (powershell): {lb}", t, "powershell", (), r) for lb, r, t in _PS_BLOCK8BM]
+STRUCT_CASES += [
+    # The trigger: an ASCII capital in a word with a backtick or a $' string, not one without.
+    ("8bm: the second reading fires on a capital beside a backtick or a $' string only",
+     lambda: [_seen8bm("bash", t) for t in (
+         "pwsh -c <SQ>gi<BT>T x<SQ>", "pwsh -c $<SQ>gi<BS>x60T x<SQ>", "pwsh -c <SQ>gi<BT>t x<SQ>", "Echo Hello",
+         "pwsh -c <DQ>gi<BS><BT>U{27}<DQ>", "pwsh -c <SQ>A<SQ> <SQ>x<BT>y<SQ>")],
+     [True, True, False, False, True, False]),
+    # The first reading lowercases the word (`t: a tab); the second keeps it, so the script runs git.
+    ("8bm: the second reading keeps a capital after a backtick, the first does not",
+     lambda: [["git", "push"] in _segs8bm(s, "pwsh -c <SQ>gi<BT>T push<SQ>") for s in (False, True)],
+     [False, True]),
+    ("8bm: only the triggering word keeps its case",
+     lambda: _segs8bm(True, "Echo <SQ>A<BT>B<SQ> C"), [["echo", _t8bl("A<BT>B"), "c"]]),
 ]
 
 
