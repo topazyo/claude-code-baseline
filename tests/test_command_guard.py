@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1462
+FP_FLOOR = 1478
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4768
+BLOCK_FLOOR = 4807
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 52
+REASON_FLOOR = 53
 
 
 def _str_value(node):
@@ -2325,9 +2325,11 @@ STRUCT_CASES = [
      "(Join-Path a b)"),
     # The runner readings multiply; their tokenization is memoized (_runner_segments).
     # 4 KB of distinct nested runners took ~0.3 s here (~0.07 s before the runners);
-    # the hook timeout is 10 s.
+    # the hook timeout is 10 s. On the Python 3.7 floor runner it measured 2.05-2.98 s on main
+    # (2026-11-25, 20 runs on each of three runners): the runner's speed, not the code, decided
+    # a 3.0 s bound, so the bound is 6.0 s, still well under the timeout.
     ("timing: 4 KB of nested runners (PowerShell)",
-     lambda: _timing("powershell", _distinct_runner_payload()) < 3.0, True),
+     lambda: _timing("powershell", _distinct_runner_payload()) < 6.0, True),
     ("timing: 4 KB of nested runners (Bash)", lambda: _timing(
         "bash", ("cmd /c wsl -- pwsh -Command echo a^b 'q w' ; " * 90)[:4096]) < 3.0,
      True),
@@ -10477,6 +10479,123 @@ STRUCT_CASES += [
         for w in (False, True)
         for u in ("a<MVS><#c#> ", "+.'x'<#c#> ", "echo a,--% ", "-p.x<BT> #c<LF>")],
      [True] * 9),
+]
+
+
+# Follow-up 8bl: inside "..." bash also decodes a backslash before $ or ` and a backslash-newline,
+# which shlex keeps, so a script handed to a runner in a double-quoted word was read with them
+# undecoded (`pwsh -c "echo <BS>$x.y#'..."`: the readings saw a generic word and a string, pwsh runs
+# `$x.y`, a comment, then the next line). Bash text's lines are also read with them decoded (an added
+# reading: _shell_words(bash_dq=True)). Bash also decodes an unquoted heredoc's body before whatever
+# reads it runs it: a heredoc whose body holds such an escape is refused, whoever reads it
+# (_heredoc_escapes). Block rows: live on main 3bdf803 (pwsh 7.6 and Windows PowerShell 5.1 parse the
+# payload line as a command; a harmless twin ran under Git Bash), but for the accepted-cost rows.
+# Placeholders as in 8bc (<LF> <BS> <BT> <DQ>), and <SQ> a single quote.
+_GP8BL = "forced git push"
+_HD8BL = "unquoted heredoc whose body bash decodes"
+_PAY8BL = "pwsh -c <SQ>env <SQ><SQ>a b=1<SQ><SQ> git push --force<SQ>"
+
+
+def _t8bl(text):
+    return _t8bc(text.replace("<PAY>", _PAY8BL)).replace("<SQ>", chr(39))
+
+
+# (label, reason, text) - Bash-tool texts.
+_DQ8BL = [
+    (f"{runner}: {label}", _GP8BL, runner + " <DQ>echo " + shape + "#<SQ><LF><PAY><LF>#<SQ><DQ>")
+    for runner in ("pwsh -c", "pwsh -NoProfile -Command", "powershell -c")
+    for label, shape in (("member", "<BS>$x.y"), ("env member", "<BS>$env:x.y"), ("braced", "<BS>${x}.y"),
+                         ("static", "<BS>$x::y"), ("null-conditional", "<BS>$x?.y"),
+                         ("index", "<BS>$x[0]"), ("continued", "<BS>$x<BS><LF>.y"))
+] + [
+    ("two levels: bash -c > pwsh -c", _GP8BL,
+     "bash -c <DQ>pwsh -c <BS><DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><BS><DQ><DQ>"),
+]
+_BODY8BL = "pwsh -c <DQ>echo <BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ><DQ><LF>EOF"
+_HEREDOC8BL = [
+    (f"{reader} <<EOF", _HD8BL, reader.replace("<<", "") + " <<EOF<LF>" + _BODY8BL) for reader in ("bash", "sh", "bash -s")
+] + [
+    (f"{label}", _HD8BL, text + "<LF>" + _BODY8BL) for label, text in (
+        ("a subshell", "(bash) <<EOF"), ("a spaced subshell", "( bash ) <<EOF"), ("a group", "{ bash; } <<EOF"),
+        ("a group of two", "{ true; bash; } <<EOF"), ("a script on the heredoc's fd", "bash /dev/fd/3 3<<EOF"),
+        ("sourced from the heredoc's fd", "source /dev/fd/3 3<<EOF"),
+        ("a proc fd path", "bash /proc/self/fd/3 3<<EOF"), ("a dot-sourced fd from -c", "bash -c <SQ>. /dev/fd/3<SQ> 3<<EOF"),
+        ("a backslash-newline in the delimiter", "bash <<E<BS><LF>OF"),
+        ("a backslash-newline before the delimiter", "bash << <BS><LF>EOF"),
+        ("a backslash-newline inside the operator", "bash <<BS><LF><EOF"),
+    )
+] + [
+    ("nested heredoc-fed shells", _HD8BL,
+     "bash <<A<LF>bash <<B<LF>pwsh -c <DQ>echo 1,<BS><BS><BS><BS><BS><BS><BS>$x.y#<SQ><LF><PAY><LF>#<SQ>"
+     "<DQ><LF>B<LF>A"),
+]
+# The accepted cost (not in MUST_BLOCK: nothing runs differently): a data heredoc holding a decoded escape.
+_COST8BL = [
+    ("a data heredoc with an escaped backslash", "cat <<EOF<LF><BS><BS>server<BS>share<LF>EOF"),
+    ("a data heredoc with escaped backticks",
+     "cat <<EOF > notes.md<LF>Never run <BS><BT>git push --force<BS><BT> on main.<LF>EOF"),
+]
+# Bash-tool texts whose verdict must stay allow.
+_ALLOW8BL = [
+    ("an escaped dollar, then a string", "pwsh -c <DQ>echo <BS>$x#<SQ><LF>Write-Output 1<LF>#<SQ><DQ>"),
+    ("an escaped backslash before $", "pwsh -c <DQ>echo <BS><BS>$x.y<DQ>"),
+    ("bash -c with an escaped dollar", "bash -c <DQ>echo <BS>$HOME<DQ>"),
+    ("ssh with an escaped dollar", "ssh host <DQ>echo <BS>$PATH; ls<DQ>"),
+    ("a commit message with an escaped dollar", "git commit -m <DQ>costs <BS>$5<DQ>"),
+    ("a quoted delimiter's body is not decoded", "bash <<<SQ>EOF<SQ><LF>echo <BS>$x<LF>EOF"),
+    ("a quoted heredoc commit message", "git commit -F - <<<SQ>EOF<SQ><LF>docs: warn about <BS><BT>git reset --hard<BS><BT><LF>EOF"),
+    ("a read loop over Windows paths", "while IFS= read -r f; do echo <DQ>$f<DQ>; done <<EOF<LF>C:<BS>Users<BS>a.txt<LF>EOF"),
+    ("a quoted read loop over Windows paths", "while IFS= read -r f; do echo x; done <<<SQ>EOF<SQ><LF>C:<BS>Users<BS>x<LF>EOF"),
+    ("a backslash before the heredoc", "cd C:<BS>repo && bash <<EOF<LF>echo hi<LF>EOF"),
+    ("an escaped dollar before the heredoc", "git commit -m <DQ>fix <BS>$x handling<DQ> && bash <<EOF<LF>echo hi<LF>EOF"),
+    ("a backslash bash keeps in the body", "bash <<EOF<LF>printf <SQ>%s<BS>n<SQ> a<LF>EOF"),
+    ("a here-string is not a heredoc", "cat <<< <DQ><BS><BS>x<DQ>"),
+    ("a heredoc-fed shell without a backslash", "bash <<EOF<LF>echo hi<LF>EOF"),
+]
+CASES += [
+    (f"8bl dq escapes: {label}", _t8bl(t), B, ()) for label, _r, t in _DQ8BL + _HEREDOC8BL
+] + [
+    (f"8bl dq escapes fp: {label}", _t8bl(t), A, ()) for label, t in _ALLOW8BL
+] + [
+    (f"8bl dq escapes, accepted cost: {label}", _t8bl(t), B, ()) for label, t in _COST8BL
+]
+# PowerShell-tool text gets no heredoc reading: `<<` there is no heredoc, a backslash no bash escape.
+PS_CASES += [
+    ("8bl dq escapes fp (powershell): a cmd script", _t8bl("cmd /c <DQ>echo a <<E <BS><BS>x<DQ>"), A, ()),
+    ("8bl dq escapes fp (powershell): a pwsh script", _t8bl("pwsh -c <SQ>git log --oneline <<E <BS>$x<SQ>"), A, ()),
+]
+MUST_BLOCK += [
+    (f"8bl dq escapes: {label}", _t8bl(t), "bash", (), r) for label, r, t in _DQ8BL + _HEREDOC8BL
+]
+GROUP_CASES += [
+    # The added reading: the line's words with bash's "..." escapes decoded, beside shlex's.
+    ("8bl: a double-quoted escaped dollar is read decoded too", "bash", _t8bl("echo <DQ><BS>$x<DQ>"),
+     [["echo", "$x"], ["echo", _t8bl("<BS>$x")]], []),
+    ("8bl: a single-quoted one is not", "bash", _t8bl("echo <SQ><BS>$x<SQ>"), [["echo", _t8bl("<BS>$x")]],
+     [["echo", "$x"]]),
+]
+STRUCT_CASES += [
+    ("8bl: _heredoc_escapes on unquoted, quoted, here-string and continued forms",
+     lambda: [m._heredoc_escapes(_t8bl(t)) for t in (
+         "cat <<E<LF><BS>$x<LF>E", "cat <<-E<LF><BS><BS><LF>E", "cat << E<LF><BS><BT><LF>E", "cat <<E<LF>a<BS><LF>b",
+         "cat <<<SQ>E<SQ><LF><BS>$x<LF>E", "cat <<<DQ>E<DQ><LF><BS>$x", "cat <<<BS>E<LF><BS>$x", "cat <<E<SQ>F<SQ><LF><BS>$x",
+         "cat <<<<DQ><BS>$x<DQ>", "cat <<E<LF>C:<BS>Users<LF>E", "cat <<E<LF>x<LF>E", "x <BS>$y; cat <<E<LF>x<LF>E",
+         "cat <<E<BS><LF>F<LF><BS>$x", "cat <<<SQ>E<SQ> <BS><LF><LF><BS>$x")],
+     [True, True, True, True, False, False, False, False, False, False, False, False, True, False]),
+    ("8bl: bash_dq decodes a backslash before $ and `, and drops a backslash-newline",
+     lambda: list(m._shell_words(_t8bl("x <DQ>a<BS>$b<BS><BT>c<BS><LF>d<BS><BS>e<BS><DQ>f<BS>g<DQ>"), bash_dq=True)),
+     ["x", _t8bl("a$b<BT>cd<BS>e<DQ>f<BS>g")]),
+    ("8bl: shlex's reading keeps them",
+     lambda: list(m._shell_words(_t8bl("x <DQ>a<BS>$b<BS><BT>c<BS><LF>d<DQ>"))),
+     ["x", _t8bl("a<BS>$b<BS><BT>c<BS><LF>d")]),
+    ("8bl: bash_dq leaves single quotes and unquoted text as they were",
+     lambda: list(m._shell_words(_t8bl("x <SQ>a<BS>$b<SQ> c<BS>$d"), bash_dq=True)),
+     ["x", _t8bl("a<BS>$b"), "c$d"]),
+    ("8bl: a decoded dollar does not expand",
+     lambda: sorted(m._shell_words(_t8bl("x <DQ><BS>$b<DQ>"), bash_dq=True).expanding), []),
+    ("8bl: a pwsh script's text gets no bash decoding",
+     lambda: [list(s) for s in m._segments(_t8bl("echo <DQ><BS>$x<DQ>"), ps_script=True)],
+     [["echo", _t8bl("<BS>$x")]]),
 ]
 
 

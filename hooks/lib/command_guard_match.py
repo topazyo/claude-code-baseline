@@ -33,7 +33,10 @@ normalizer was defeated by ordinary shell quoting):
   * Real tokenization per line via shlex(posix=True): quotes are REMOVED and
     backslash escapes are RESOLVED, so quote-splicing (--fo"rce", r''m) and
     escape-splicing (-r\f) tokenize to their bare equivalents instead of being
-    shredded into extra tokens by a blind quote-to-space substitution.
+    shredded into extra tokens by a blind quote-to-space substitution. Inside "..."
+    bash also decodes a backslash before $ or ` and a backslash-newline, which shlex
+    keeps: each line is read that way too, so a script a double-quoted word hands to
+    a runner is judged as the runner gets it (see _shell_words, bash_dq).
   * Unbalanced quoting raises ValueError -> the command cannot be seen -> BLOCK
     ("uninspectable"). Never silently allow something that could not be parsed.
   * ${IFS} / $IFS are expanded to a space before tokenizing (rm${IFS}-rf${IFS}/).
@@ -61,7 +64,9 @@ normalizer was defeated by ordinary shell quoting):
     shell reading its script from a pipe, a here-string or a process substitution
     (`... | sh`, `bash - <<< ...`, `source <(...)`) is uninspectable -> BLOCK, as is
     `eval "$(...)"`, and so is a cmd or PowerShell runner reading its commands from a
-    heredoc (`pwsh <<EOF`; see _heredoc_check). An `rm -rf` fed by xargs, directly or
+    heredoc (`pwsh <<EOF`; see _heredoc_check), and so is bash text holding a heredoc
+    whose body bash decodes before its reader runs it (an unquoted delimiter and a
+    backslash escape after it; see _heredoc_escapes), whoever reads it. An `rm -rf` fed by xargs, directly or
     through an inline script xargs runs, has targets of unknown scope -> BLOCK.
   * The command word is normalized like a path: split on BOTH / and \\ (Git Bash
     / Windows) with a trailing .exe/.cmd/.bat/.com stripped, so a "git.exe" or
@@ -3112,6 +3117,37 @@ def _scan_line(line: str, state: str, ps_herestrings: bool = False):
     return state, False, None
 
 
+# A heredoc operator (`<<`, `<<-`; not the here-string's `<<<`) with its delimiter word, and the
+# escapes bash decodes in an unquoted heredoc's body.
+_HEREDOC_OP_RE = re.compile(r"(?<!<)<<-?(?!<)[ \t]*([^\s;|&<>()]*)")
+_HEREDOC_ESC_RE = re.compile(r"\\[\\$`\n]")
+
+
+def _heredoc_escapes(text: str) -> bool:
+    """Whether bash text holds a heredoc whose body bash decodes into other text: one whose
+    delimiter word is unquoted (no quote or backslash in it) with a backslash before a
+    backslash, $, ` or a newline after its operator. The operator and its word are read with
+    backslash-newlines joined, as bash joins them before it reads an operator or a word
+    (`<<E`, a backslash-newline, `OF` is `<<EOF`); the escapes are searched in the text itself, from where the
+    word ends. An over-approximation: the search runs to the text's end (the delimiter line
+    and later commands too), and an operator inside quotes counts."""
+    kept, at, i, n = [], [], 0, len(text)
+    while i < n:
+        if text[i] == "\\" and text[i + 1:i + 2] == "\n":
+            i += 2
+            continue
+        kept.append(text[i])
+        at.append(i)
+        i += 1
+    joined = "".join(kept)
+    for m in _HEREDOC_OP_RE.finditer(joined):
+        if any(q in m.group(1) for q in "'\"\\"):
+            continue
+        if _HEREDOC_ESC_RE.search(text, at[m.end() - 1] + 1):
+            return True
+    return False
+
+
 def _logical_lines(text: str, shell: str = "bash"):
     """Split on UNQUOTED newlines. Returns [(logical_line, physical_lines)].
 
@@ -3217,13 +3253,15 @@ def _ansi_escape(s: str, i: int):
     return "\\" + c, i + 2                           # unknown escape: bash keeps the \
 
 
-def _shell_words(s: str):
+def _shell_words(s: str, bash_dq: bool = False):
     """Words of a logical line, exactly as shlex.split(s, posix=True) reads them --
     quotes removed, backslash escapes resolved, the same errors for an unclosed quote
     or a trailing backslash -- except that an UNQUOTED run of ( ) ; < > | & ` comes
     out as its own _Op token. A quoted one stays inside its word, as in bash, so
     `bash -c "cd /tmp && rm -rf /"` keeps its script whole and `rm -rf '&' ~` keeps
-    `&` as an argument.
+    `&` as an argument. bash_dq: inside "..." also decode the escapes bash decodes
+    there and shlex keeps: a backslash before $ or ` is dropped, a backslash-newline
+    is nothing (see the second reading in _segments).
     """
     words, buf, has_word, state, ansi_cut = _Words(), [], False, "", False
     i, n = 0, len(s)
@@ -3275,6 +3313,10 @@ def _shell_words(s: str):
                 raise ValueError("No escaped character")
             elif c == "\\" and s[i + 1] in '"\\':
                 buf.append(s[i + 1])
+                i += 1
+            elif bash_dq and c == "\\" and s[i + 1] in "$`\n":
+                if s[i + 1] != "\n":
+                    buf.append(s[i + 1])
                 i += 1
             else:
                 if c == "`" or (c == "$" and s[i + 1:i + 2] == "("):
@@ -4532,6 +4574,12 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
+    # Bash decodes an unquoted heredoc's body (see _heredoc_escapes) before whatever reads it
+    # runs it, so the lines judged here would not be the ones it runs: refused, whoever reads
+    # the heredoc (a shell, a group, a script file on its fd, a function, data).
+    if (shell == "bash" and not (ps_script or ps_tool or cmd_script) and "<" in raw
+            and "\\" in raw and _heredoc_escapes(raw)):
+        raise _Uninspectable("unquoted heredoc whose body bash decodes (a backslash escape)")
     segments, lenient, lenient_runs, latch = [], [], [], _Latch()
     lenient_fed, orphan = [], False    # see _heredoc_check
     fed_in = heredoc
@@ -4541,6 +4589,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     # text gets its bash reading below, windows_paths False).
     bash_read = (scan and shell == "bash" and not ps_script and not cmd_script
                  and slashed == raw)
+    # Bash text (not a script pwsh or cmd reads): its "..." escapes, see below.
+    bash_dq_read = shell == "bash" and not (ps_script or ps_tool or cmd_script)
     if shell == "powershell" and ps_slashes:
         # PowerShell's escape is the backtick; a backslash is a path separator, so
         # `rm -r -Force ..\..` must not tokenize to `....`.
@@ -4559,6 +4609,17 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
         if words is not None:
             strict = list(_words_to_segments(words, split_words=False, latch=latch))
             segments.extend(strict)
+            # Bash's own escapes in "..." (\$ \` and a backslash-newline), which
+            # shlex keeps: the line is also read with them decoded, as the program a word
+            # is handed gets it (`pwsh -c "echo \$x.y#'..."` runs `echo $x.y#'...`).
+            # An added reading: the one above is unchanged.
+            if bash_dq_read and "\\" in logical:
+                try:
+                    decoded = _shell_words(logical, bash_dq=True)
+                except ValueError:
+                    decoded = None
+                if decoded is not None and list(decoded) != list(words):
+                    segments.extend(_words_to_segments(decoded, split_words=False))
         # The piecewise pass: for a multi-line logical line, and for any line with a
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
