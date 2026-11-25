@@ -425,6 +425,7 @@ _SEP_ONLY_RE = re.compile(r"^[;|&()`<>]+$")
 # the word after it is its target, not a command word. <( and >( (process
 # substitution) are not in here, so their bodies still become segments.
 _SHORT_FLAG_RE = re.compile(r"^-[A-Za-z0-9]+$")
+_ASCII_CAPITAL_RE = re.compile(r"[A-Z]")   # a word the second reading keeps the case of (_words_to_segments)
 _NAMED_FD_RE = re.compile(r"^[a-z_][a-z0-9_]*\}$")     # {x}> after the { is stripped
 _REDIR_RE = re.compile(r"^(?:&>>?|[<>]&|>>|>\||<<<|<<|<>|<|>)$")
 # Catastrophic delete targets beyond _DANGER_ROOTS: a drive root (C:, Git Bash /c,
@@ -3774,17 +3775,24 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
                 continue
             if not _SHORT_FLAG_RE.match(piece):
-                if not piece.isascii() and any(ord(c) > 127 and c.lower() != c for c in piece):
-                    # lower() changes a non-ASCII character (the Kelvin sign folds into k, U+0130
-                    # splits in two, U+1C90 becomes a letter Unicode 3.2 had; see evaluate()): noted,
-                    # and the second reading lowercases ASCII only, the Kelvin sign and U+0130 spelled
-                    # U+0138 (a letter lower() keeps)
+                # Two kinds of word lower() misreads, each noted for the second reading (see
+                # evaluate()). One where lower() changes a non-ASCII character (the Kelvin sign folds
+                # into k, U+0130 splits in two, U+1C90 becomes a letter Unicode 3.2 had): the second
+                # reading lowercases its ASCII only, the Kelvin sign and U+0130 spelled U+0138 (a letter
+                # lower() keeps). And one holding an ASCII capital and a backtick or a `$'` string:
+                # pwsh's escapes are lowercase only (`U{27} is a U and a { token, `u{27} one escape;
+                # `T a T, `t a tab), and a quote a reading removes (gi``"T") or bash's $'...' decode
+                # (gi\x60T) can join the capital to a backtick one level down, so the second reading
+                # keeps that word's case whole.
+                folds = not piece.isascii() and any(ord(c) > 127 and c.lower() != c for c in piece)
+                capital = (("`" in piece or "$'" in piece)
+                           and _ASCII_CAPITAL_RE.search(piece) is not None)
+                if folds or capital:
                     _Command.kelvin_seen = True
-                    if _Command.kelvin_alt:
-                        piece = piece.replace(chr(0x212A), chr(0x138)).replace(chr(0x130), chr(0x138))
+                if (folds or capital) and _Command.kelvin_alt:
+                    piece = piece.replace(chr(0x212A), chr(0x138)).replace(chr(0x130), chr(0x138))
+                    if not capital:
                         piece = "".join(c.lower() if ord(c) < 128 else c for c in piece)
-                    else:
-                        piece = piece.lower()
                 else:
                     piece = piece.lower()
             if pending:
@@ -4888,8 +4896,8 @@ class _Command:
     raw = ""
     ps_defaults = False
     backslash_switch = False
-    kelvin_seen = False             # a lowercased word held a character lower() changes (see evaluate())
-    kelvin_alt = False              # ...and this reading lowercases ASCII only
+    kelvin_seen = False             # a lowercased word lower() misreads (see evaluate(), _words_to_segments)
+    kelvin_alt = False              # ...and this reading keeps such words' case (non-ASCII, or all of it)
 
 
 @functools.lru_cache(maxsize=4096)
@@ -6856,6 +6864,10 @@ def evaluate(raw: str, extra_patterns=(), shell: str = "bash"):
             # lexer (`pwsh -c "echo (1).y<U+0130>#'..."`: to pwsh one letter); U+1C90 becomes U+10D0,
             # a letter to every reading, where 5.1 knows no U+1C90. Every reading again, with ASCII
             # only lowercased (the Kelvin sign and U+0130 spelled U+0138, a letter lower() keeps).
+            # Or a word held an ASCII capital and a backtick or a `$'` string: pwsh's escapes are
+            # lowercase only, so lowercasing `T (a T) makes `t (a tab) and `U{27} (a U, then a {
+            # token) the escape `u{27}, in a runner's script the readings re-read as code; that word
+            # keeps its case whole in this reading (see _words_to_segments).
             _runner_segments.cache_clear()
             _ps_script_texts.cache_clear()
             _ps_code_strings.cache_clear()
