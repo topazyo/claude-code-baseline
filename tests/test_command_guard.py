@@ -37,7 +37,7 @@ FP_FLOOR = 1487
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4829
+BLOCK_FLOOR = 4837
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -10635,6 +10635,11 @@ def _seen8bm(shell, text):
 
 
 def _segs8bm(second, text):
+    # One reading's segments, from empty caches (they key on the text, not on the reading).
+    m._runner_segments.cache_clear()
+    m._ps_script_texts.cache_clear()
+    m._ps_code_strings.cache_clear()
+    m._RunnerBudget.used = 0
     m._Command.kelvin_alt = second
     try:
         return [list(s) for s in m._segments(_t8bl(text))]
@@ -10663,13 +10668,27 @@ _BASH8BM = [
      "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>x60T push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
     ("ANSI-C: octal backtick and capital one level down", _GP8BK,
      "bash -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>140<BS>124 push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
+    ("ANSI-C: the backtick bash decodes one level down, from sh", _GP8BK,
+     "sh -c <SQ>pwsh -c $<SQ><DQ><SQ><DQ><SQ>gi<BS>x60T push --force<SQ><DQ><SQ><DQ><SQ><SQ>"),
+    ("a capital escaped in the command word: pwsh -NoProfile -Command", _GP8BK,
+     "pwsh -NoProfile -Command <SQ>gi<BT>T push --force<SQ>"),
+    ("a capital escaped in the command word: env pwsh -c", _GP8BK, "env pwsh -c <SQ>gi<BT>T push --force<SQ>"),
+    ("a capital escaped in the command word: iex in a pwsh script", _GP8BK,
+     "pwsh -c <SQ>iex <DQ>gi<BT><BT>T push --force<DQ><SQ>"),
+    ("a capital escaped in the command word: after a pipe", _GP8BK, "pwsh -c <SQ>echo x | gi<BT>T push --force<SQ>"),
 ]
 _BLOCK8BM = ([(f"pwsh -c '...': {lb}", r, _bash8bk(_t8bl(s))) for lb, r, s in _PS7_8BM]
              + [(f"pwsh -c <DQ>...<DQ>: {lb}", r, _bash_dq8bm(s)) for lb, r, s in _PS7_8BM]
              + [(f"powershell -c '...': {lb}", r, _bash8bk(_t8bl(s)).replace("pwsh", "powershell", 1))
                 for lb, r, s in _PS51_8BM]
              + [(lb, r, _t8bl(s)) for lb, r, s in _BASH8BM])
-_PS_BLOCK8BM = [(f"pwsh -c <DQ>...<DQ>: {lb}", r, _ps_dq8bm(s)) for lb, r, s in _PS7_8BM]
+_PS_BLOCK8BM = [(f"pwsh -c <DQ>...<DQ>: {lb}", r, _ps_dq8bm(s)) for lb, r, s in _PS7_8BM] + [
+    (lb, _GP8BK, _t8bl(s)) for lb, s in (
+        ("iex: a capital escaped in the command word", "iex <DQ>gi<BT><BT>T push --force<DQ>"),
+        ("Invoke-Expression: a capital escaped in the command word",
+         "Invoke-Expression <DQ>gi<BT><BT>T push --force<DQ>"),
+        ("powershell -c <DQ>...<DQ>: a capital escaped in the command word",
+         "powershell -c <DQ>gi<BT><BT>T push --force<DQ>"))]
 # Bash-tool and PowerShell-tool texts whose verdict must stay allow.
 _ALLOW8BM = [
     ("the lexers agree: `u in both places", _bash8bk(_t8bl(_v1_8bm("27", "<DQ>").replace("<BT>U{", "<BT>u{")))),
@@ -10703,6 +10722,10 @@ STRUCT_CASES += [
      [False, True]),
     ("8bm: only the triggering word keeps its case",
      lambda: _segs8bm(True, "Echo <SQ>A<BT>B<SQ> C"), [["echo", _t8bl("A<BT>B"), "c"]]),
+    # Both triggers in one word: its case kept, the Kelvin sign still spelled U+0138.
+    ("8bm: a word with a fold and a capital keeps its case, the Kelvin sign respelled",
+     lambda: _segs8bm(True, "Echo <SQ>Brea" + chr(0x212A) + "<BT>T<SQ>"),
+     [["echo", "Brea" + chr(0x138) + _t8bl("<BT>T")]]),
 ]
 
 
