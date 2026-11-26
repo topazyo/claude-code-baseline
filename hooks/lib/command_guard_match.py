@@ -421,6 +421,101 @@ def _is_loopback_url(word: str) -> bool:
 # command substitution's BODY is judged as its own segment.
 _SEP_SPLIT_RE = re.compile(r"([;|&()`<>]+)")
 _SEP_ONLY_RE = re.compile(r"^[;|&()`<>]+$")
+# Matches nothing: the quote-blind split of a no_ops reading (see _runner_segments).
+_NO_SEP_RE = re.compile(r"(?!)")
+_PARENS_AS_SPACE = str.maketrans("()", "  ")
+
+
+def _shell_rest(script: str) -> bool:
+    """Whether a wsl command runs a POSIX shell in EVERY reading of the wrappers before it (`bash`,
+    `sudo bash`, `env bash`): that one reads bash's operators (its script's quotes are gone from the
+    joined words, so a no_ops reading would merge its commands). Every reading, so a wrapper's value
+    spelled as a shell (`env -u bash pwsh.exe ...`) cannot switch the reading off, for the options the
+    wrapper tables list (an option they miss is read as a command word)."""
+    words = script.split()
+    first = _shell_index(words, True) if words else None
+    if first is None or _cmd_word(words[first]) not in _SHELLS:
+        return False
+    # The reading that takes option values (True) leads: a reading landing BEFORE its command word
+    # stands on a word it read as a wrapper's option or value (`sudo -u me bash`, `nice -n 5 bash`),
+    # so only one landing on that word or past it can name another program (`env -u bash pwsh.exe`
+    # lands on pwsh.exe in the leading reading itself).
+    return all(i is not None and (i < first or _cmd_word(words[i]) in _SHELLS)
+               for i in (_shell_index(words, c) for c in _READINGS))
+
+
+# A cmd group's parentheses at a word's edge (`(pwsh -c ...)`, `if x (pwsh -c ...)`), not a pwsh `$(` or a
+# call's `(`.
+_CMD_GROUP_PAREN_RE = re.compile(r"(?<!\S)\(+|\)+(?!\S)")
+_CMD_GROUP_OPEN_RE = re.compile(r"(?<!\S)\(")
+# The runners a word may name, and cmd's punctuation before a command word (see _runner_suffixes).
+_RUNNER_WORDS = frozenset({"pwsh", "powershell", "cmd", "wsl", "env"})
+_CMD_WORD_PIECE_RE = re.compile(r"[^@(;,=<>|&'`]+")
+_MAX_RUNNER_SUFFIXES = 16
+# pwsh's statement and group punctuation (see _lenient_runner).
+_PS_STATEMENT_CUT_RE = re.compile(r"[;|&(){}]+")
+# What the bash readings take from a word that a no_ops reading keeps: _OP_CHARS and the group
+# words' `{ } !` (_LEAD_GROUP_CHARS). A runner's text holding none is read the same either way.
+_NO_OPS_CHARS = frozenset("();<>|&`{}!")
+
+
+def _no_ops_texts(script: str, cmd: bool):
+    """The texts a runner's script is also read as with no operator (see _runner_segments): the
+    script; for cmd also the script with a group's parentheses read away (when a word opens with `(`), and
+    every suffix of those that starts at a runner's name (_runner_suffixes)."""
+    texts = [script]
+    if cmd:
+        texts += [_CMD_GROUP_PAREN_RE.sub(" ", t) for t in list(texts) if _CMD_GROUP_OPEN_RE.search(t)]
+        # cmd has more command-position syntax than a list here keeps up with (a redirect, `for ... do`,
+        # a leading `;`, `call`, `if`, `start`, `@`): every word naming a runner, its cmd punctuation
+        # read off, also starts a command (_runner_suffixes). Over-reads a runner named as an argument
+        # (`echo pwsh -c ...`), which only adds.
+        # Each suffix is read whole, so a text dense with runner names would cost quadratic time: each
+        # text (the script, its group reading) holding more than _MAX_RUNNER_SUFFIXES names is refused.
+        suffixes = list(dict.fromkeys(x for t in list(texts)
+                                      for x in _runner_suffixes(t, _MAX_RUNNER_SUFFIXES)))
+        texts += suffixes
+    return list(dict.fromkeys(texts))
+
+
+def _cmd_bare(word: str) -> str:
+    """A cmd word as the program it starts reads it: cmd's quotes and caret escapes removed (`pw""sh`,
+    `p^wsh`, `"-S"`, `^-S`). The one spelling normaliser of the runner-name and env readings below."""
+    return word.replace('"', "").replace("^", "")
+
+
+def _env_runs_split(rest) -> bool:
+    """Whether env, followed by the words rest, splits a script (-S among its options, as either env
+    walk reads them: _env_split, _env_split_loose), each word read as cmd hands it on (_cmd_bare)."""
+    toks = ["env"] + [_cmd_bare(w) for w in rest]
+    return _env_split(toks, 0) is not None or _env_split_loose(toks, 0) is not None
+
+
+def _runner_suffixes(text: str, limit=None):
+    """Each suffix of text that starts at a runner's name (_RUNNER_WORDS), except text itself. A
+    name is a piece of a word, its `"` read away (cmd hands `pw""sh` on as pwsh), between cmd's
+    punctuation (`@ ( ; , = < > | &`, and for /f's command delimiters `'` and a backtick), so one glued
+    behind a redirect or a delimiter counts (`<nul;pwsh`, `;pwsh`, `(pwsh`, `@pwsh`, `('pwsh`). env
+    counts only with -S after it (its other runs name a runner word of their own). More than limit
+    names refuses, before the rest are built."""
+    words, out = text.split(), []
+    whole = " ".join(words)
+    for i, w in enumerate(words):
+        bare = _cmd_bare(w)
+        for m in _CMD_WORD_PIECE_RE.finditer(bare):
+            name = _cmd_word(m.group().lower())
+            if name not in _RUNNER_WORDS:
+                continue
+            if name == "env" and not _env_runs_split(words[i + 1:]):
+                continue
+            suffix = " ".join([bare[m.start():]] + words[i + 1:])
+            if suffix != whole:   # the text itself is read already (`"pwsh ..."` is not it)
+                out.append(suffix)
+                if limit is not None and len(out) > limit:
+                    raise _Uninspectable(f"too many runner names in a cmd script to inspect (> {limit})")
+    return out
+
+
 # A separator piece that is really a REDIRECTION: it does not end the command, and
 # the word after it is its target, not a command word. <( and >( (process
 # substitution) are not in here, so their bodies still become segments.
@@ -2173,6 +2268,10 @@ def _rules_at(toks, idx, saw_xargs, rest=None):
     # other shell has these commands, and PowerShell's binds /s as a path, never a recursion.
     word = toks[idx].replace("^", "").lower().lstrip("@")
     m = _CMD_DELETE_RE.match(word)
+    # A `)` glued to the name is no delete (`rd) /s /q C:\` runs nothing): bash's tokenizer never
+    # leaves one there, the no_ops reading of a cmd script does (see _runner_segments).
+    if m and word[m.end():m.end() + 1] == ")":
+        m = None
     if m and _cmd_delete(m.group(1), ([word[m.end():]] if m.end() < len(word) else [])
                          + list(args)):
         if m.group(1) in ("rd", "rmdir"):
@@ -2426,7 +2525,7 @@ def _split_inline_script(toks):
                 if toks[end:]:
                     # shlex.join is 3.8+; this is its body, for the 3.7 floor.
                     walked_script += " " + " ".join(shlex.quote(t) for t in toks[end:])
-                extras.append(walked_script)
+                extras.append(_SplitString(walked_script))
             loose = _env_split_loose(toks, i)
             if loose:
                 return done(keep(loose[0]), loose[1])
@@ -2814,9 +2913,9 @@ def _lenient_reads(toks, outer_expanded=False, ps=None):
                 if key in seen:
                     continue
                 seen.add(key)
-                if level > 1 or seg is not toks:
-                    # A reading main did not take (main read toks's own runner only):
-                    # charged as found (see above).
+                if level > 1 or seg is not toks or getattr(r, "env_script", False):
+                    # A reading main did not take (main read toks's own runner only; an env -S
+                    # script read here is none of main's): charged as found (see above).
                     _RunnerBudget.charge(len(" ".join(r)))
                 found.append((r, covered and r.ps_outer == outer
                               and list(seg[len(seg) - len(r):]) == list(r)))
@@ -2867,6 +2966,21 @@ def _lenient_runner(toks, outer_expanded=False, ps=None):
         if kind == "ps" and not getattr(toks, "ps_quote_covered", False):
             _ps_code_strings(" ".join(words))
         variants = [words]
+        if kind == "ps" and any("`" in w for w in words):
+            # pwsh decodes its backtick escapes before it runs a word (`g`it` is git); the strict
+            # pass reads them in _ps_script_texts, the quote-blind words here also decoded (5.1's
+            # escapes too): `cmd /c 'pwsh -c g`it push --force & echo "'` reaches only this pass.
+            joined = " ".join(words)
+            variants += [d.split() for d in dict.fromkeys(
+                (_ps_unescape_everywhere(joined), _ps_unescape_everywhere(joined, legacy=True)))]
+        if kind == "ps":
+            # pwsh's own statement separators and groups: a no_ops reading's quote-blind words keep
+            # `a;git` one word, so each text (as written, escape-decoded) is also cut at them, every
+            # piece a pwsh command (`cmd /c 'pwsh -c echo a;g`it push --force #"'`).
+            for v in list(variants):
+                cut = [p.split() for p in _PS_STATEMENT_CUT_RE.split(" ".join(v)) if p.strip()]
+                if len(cut) > 1:
+                    variants += cut
         if kind == "cmd":
             variants.append([w.replace("^", "") for w in words])
             # A `(` glued to a delete's name (see _CMD_NAME_PAREN_RE).
@@ -2885,6 +2999,35 @@ def _lenient_runner(toks, outer_expanded=False, ps=None):
             out.append(seg)
             if seg.cmd_script:
                 out += _cmd_prefix_variants(seg)
+    # What a quote-blind pwsh command's statements run after a flow word, a dot or an `=` (`return g`it push
+    # --force #"` through cmd reaches only this pass): judged too, as the strict pass judges a pwsh script's,
+    # but not a tail that opens with `$` (`return $lines[$i + 1]`): an expression, no command. A `$( ... )`
+    # subexpression's command is read anyway: the cut at pwsh's `( )` above makes it a piece of its own.
+    out += [t for s in list(out) if getattr(s, "ps_script", False) for t in _lenient_level_extras(s)
+            if t and not str(t[0]).startswith("$")]
+    # env -S on a quote-blind line (a cmd script ending in an odd `"` reaches only this pass): its script, split
+    # again with `\_` a space, and the words after it, a segment the next level reads for runners (`cmd /c 'env
+    # -S pwsh\_-c\_g`it\_push\_--force #"'`). Either env walk; the words as cmd hands them on (_cmd_bare).
+    # Up to the first segment that carries the rest of the line: a later env is among its words, read one
+    # level down (one segment per env word, each to the end of the line, would cost cubic time).
+    bare = [_cmd_bare(t) for t in toks]
+    for i, t in enumerate(bare):
+        if _cmd_word(t.lower()) != "env":
+            continue
+        hit = _env_split(bare, i)
+        loose = _env_split_loose(bare, i)
+        carried = False
+        for script, rest, carries in ((hit[2], bare[hit[1]:], True) if hit else (None, None, False),
+                                      (loose[1], [], False) if loose else (None, None, False)):
+            if script:
+                words = script.replace("\\_", " ").split() + list(rest)
+                if words:
+                    seg = _new_seg(words, getattr(toks, "piped", False))
+                    seg.env_script = True
+                    out.append(seg)
+                    carried = carried or carries
+        if carried:
+            break
     return out
 
 
@@ -3254,7 +3397,7 @@ def _ansi_escape(s: str, i: int):
     return "\\" + c, i + 2                           # unknown escape: bash keeps the \
 
 
-def _shell_words(s: str, bash_dq: bool = False):
+def _shell_words(s: str, bash_dq: bool = False, no_ops: bool = False):
     """Words of a logical line, exactly as shlex.split(s, posix=True) reads them --
     quotes removed, backslash escapes resolved, the same errors for an unclosed quote
     or a trailing backslash -- except that an UNQUOTED run of ( ) ; < > | & ` comes
@@ -3262,7 +3405,8 @@ def _shell_words(s: str, bash_dq: bool = False):
     `bash -c "cd /tmp && rm -rf /"` keeps its script whole and `rm -rf '&' ~` keeps
     `&` as an argument. bash_dq: inside "..." also decode the escapes bash decodes
     there and shlex keeps: a backslash before $ or ` is dropped, a backslash-newline
-    is nothing (see the second reading in _segments).
+    is nothing (see the second reading in _segments). no_ops: no character is an
+    operator, as a reader that is not bash may read it (see _runner_segments).
     """
     words, buf, has_word, state, ansi_cut = _Words(), [], False, "", False
     i, n = 0, len(s)
@@ -3328,6 +3472,8 @@ def _shell_words(s: str, bash_dq: bool = False):
                     dq_bs = i
                 buf.append(c)
                 qbracket = qbracket or c in "[]"
+        elif c == "\\" and no_ops:
+            buf.append(c)                    # cmd has no backslash escape (`env -S pwsh\_-c\_...`)
         elif c == "\\":
             if i + 1 >= n:
                 raise ValueError("No escaped character")
@@ -3355,7 +3501,7 @@ def _shell_words(s: str, bash_dq: bool = False):
             buf, has_word, opens_quoted, value_quoted = [], False, False, False
             qbracket = False
             dollar = False
-        elif c in _OP_CHARS:
+        elif c in _OP_CHARS and not no_ops:
             if c == "`" or (c == "(" and buf and buf[-1] == "$"):
                 words.subst = True
             glued = bool(buf or has_word)
@@ -3381,6 +3527,11 @@ def _shell_words(s: str, bash_dq: bool = False):
     if buf or has_word:
         push()
     return words
+
+
+class _SplitString(str):
+    """An env -S script: env splits it with its own quoting and has no operators, so it is
+    also read with none (see _runner_segments, _expand_scripts)."""
 
 
 class _QuotedWord(str):
@@ -3636,7 +3787,7 @@ class _Latch(list):
     orphan_heredoc = False
 
 
-def _words_to_segments(words, split_words: bool = True, latch=None):
+def _words_to_segments(words, split_words: bool = True, latch=None, no_ops: bool = False):
     """Operator pieces end a segment; group/negation punctuation is stripped.
 
     A run of operators (`;>`, `(>`) is split into single operators. A redirection
@@ -3649,7 +3800,9 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
     Tokens are lowercased, except short-flag bundles (-P, -Rf): wrapper options are
     case-sensitive (xargs -P takes a value, -p does not). latch: shared by the lines of one
     text, since a group can span lines (see _Latch, ps_call on _Seg and close() below).
+    no_ops: quote-blind words are not split on operators (see _shell_words).
     """
+    sep_split, sep_only = (_NO_SEP_RE, _NO_SEP_RE) if no_ops else (_SEP_SPLIT_RE, _SEP_ONLY_RE)
     segments, cur, redirs, herestr = [], [], [], []
     here_exp = []                          # per herestr target: see expanding on _Seg
     piped, pending = False, None           # pending: redirect awaiting its target
@@ -3737,7 +3890,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
         if is_op:                          # from _shell_words: an unquoted operator run
             pieces, glued = [word], word.glued
         elif split_words:                  # quote-blind words: split them on operators
-            pieces, glued = _SEP_SPLIT_RE.split(word), False
+            pieces, glued = sep_split.split(word), False
         else:                              # a word from _shell_words: whole, as bash has it
             pieces, glued = [word], False
         prev_op = None                     # glued: the op touches cur[-1]'s word
@@ -3746,7 +3899,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
                 if not (is_op or split_words or pending):
                     empties.append(len(cur))       # an empty word ("", ''): see empties
                 continue
-            if is_op or (split_words and _SEP_ONLY_RE.match(piece)):
+            if is_op or (split_words and sep_only.match(piece)):
                 for op in _OP_RE.findall(piece):
                     if _REDIR_RE.match(op):
                         if glued and cur and (cur[-1].isdigit() or _NAMED_FD_RE.match(cur[-1])):
@@ -3771,9 +3924,11 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
             if piece == "{" and len(cur) == 2 and cur[0] in ("function", "coproc"):
                 close(False)
                 continue
-            piece = piece.lstrip(_LEAD_GROUP_CHARS)
-            if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
-                continue
+            if not no_ops:
+                # Under no_ops `{ } !` are the reader's text (a pwsh script block), not bash's group.
+                piece = piece.lstrip(_LEAD_GROUP_CHARS)
+                if not piece or piece == "}":   # `{ ... ; }` closer: no command meaning
+                    continue
             if not _SHORT_FLAG_RE.match(piece):
                 # Two kinds of word lower() misreads, each noted for the second reading (see
                 # evaluate()). One where lower() changes a non-ASCII character (the Kelvin sign folds
@@ -3818,7 +3973,7 @@ def _words_to_segments(words, split_words: bool = True, latch=None):
     return segments
 
 
-def _lenient_words(line: str):
+def _lenient_words(line: str, keep_backslash: bool = False):
     """One physical line with escapes resolved and every quote character deleted.
 
     Used only as a second pass over the lines of a multi-line logical line. Deleting
@@ -3833,7 +3988,8 @@ def _lenient_words(line: str):
     it on Windows PowerShell 5.1 with an older .NET. The reading that keeps it inside
     its word stays (pwsh 7 does that), so `x<U+180E>$CMD` is still one command word.
     """
-    bare = re.sub(r"\\(.)", r"\1", line).replace("'", "").replace('"', "")
+    # keep_backslash: a no_ops reading's text (see _shell_words), whose reader has no escape.
+    bare = (line if keep_backslash else re.sub(r"\\(.)", r"\1", line)).replace("'", "").replace('"', "")
     out = [bare.split()]
     spaced = bare.translate(_PS_AS_SPACE).split()
     if spaced != out[0]:
@@ -4554,7 +4710,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
               piped: bool = False, lenient_on_error: bool = False,
               windows_paths: bool = True, ps_script: bool = False,
               ps_tool: bool = False, outer_expanded: bool = False,
-              heredoc: bool = False, cmd_script: bool = False, scan: bool = True):
+              heredoc: bool = False, cmd_script: bool = False, scan: bool = True,
+              no_ops: bool = False):
     """Tokenize into independent sub-commands. Raises ValueError if unparseable.
 
     Returns a list of token lists. The text is split on unquoted newlines (see
@@ -4571,14 +4728,15 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
     marked so, and also judged with cmd's command prefixes read away (see
     _cmd_prefix_variants). scan: bash text is also read as bash reads its command
     substitutions and comments (see _bash_substitutions); False for a reading that came
-    from one.
+    from one. no_ops: no character is an operator in this text's own tokenizing (see
+    _runner_segments); scripts nested in it are read as their runner reads them.
     """
     if any(c in raw for c in _WORD_BREAKS):
         lf = raw.replace("\r\n", "\n")
         kw = dict(shell=shell, ps_slashes=ps_slashes, piped=piped,
                   lenient_on_error=lenient_on_error, windows_paths=windows_paths,
                   ps_script=ps_script, ps_tool=ps_tool, outer_expanded=outer_expanded,
-                  heredoc=heredoc, cmd_script=cmd_script, scan=scan)
+                  heredoc=heredoc, cmd_script=cmd_script, scan=scan, no_ops=no_ops)
         return (_segments(lf.translate(_AS_LINE_BREAK), _depth, **kw)
                 + _segments(lf.translate(_AS_SPACE), _depth, **kw)
                 + _segments(lf.translate(_AS_IN_WORD), _depth, **kw))
@@ -4608,14 +4766,14 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             continue
         # ValueError (unbalanced quoting) -> caller blocks
         try:
-            words = _shell_words(logical)
+            words = _shell_words(logical, no_ops=no_ops)
         except ValueError:
             if not lenient_on_error:
                 raise                    # unbalanced quoting -> caller blocks
             words = None                 # judged piecewise only, below
         strict = ()
         if words is not None:
-            strict = list(_words_to_segments(words, split_words=False, latch=latch))
+            strict = list(_words_to_segments(words, split_words=False, latch=latch, no_ops=no_ops))
             segments.extend(strict)
             # Bash's own escapes in "..." (\$ \` and a backslash-newline), which
             # shlex keeps: the line is also read with them decoded, as the program a word
@@ -4623,11 +4781,11 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # An added reading: the one above is unchanged.
             if bash_dq_read and "\\" in logical:
                 try:
-                    decoded = _shell_words(logical, bash_dq=True)
+                    decoded = _shell_words(logical, bash_dq=True, no_ops=no_ops)
                 except ValueError:
                     decoded = None
                 if decoded is not None and list(decoded) != list(words):
-                    segments.extend(_words_to_segments(decoded, split_words=False))
+                    segments.extend(_words_to_segments(decoded, split_words=False, no_ops=no_ops))
         # The piecewise pass: for a multi-line logical line, and for any line with a
         # command substitution, whose body (`echo "$(git reset --hard)"`) sits inside
         # a word and gets a fresh quoting context in bash.
@@ -4648,9 +4806,9 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
             # joining `git push \` + newline + `--force`, which bash still joins.
             for line in dict.fromkeys(physical + _cont_chains(physical)):
                 first, first_run = len(lenient), len(lenient_runs)
-                for words in _lenient_words(line):
+                for words in _lenient_words(line, no_ops):
                     line_latch = _Latch()      # one per call, as before; read back below
-                    segs = list(_words_to_segments(words, latch=line_latch))
+                    segs = list(_words_to_segments(words, latch=line_latch, no_ops=no_ops))
                     for toks in segs:
                         toks.ps_tool, toks.cmd_script = ps_tool, cmd_script
                         toks.ps_quote_covered = covered or _ps_strict_prefix(prefixes, toks)
@@ -4695,7 +4853,8 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                 # nothing; the passes above still cover it.
                 try:
                     segments.extend(_words_to_segments(
-                        _shell_words(line.replace("\\", "/")), split_words=False))
+                        _shell_words(line.replace("\\", "/"), no_ops=no_ops),
+                        split_words=False, no_ops=no_ops))
                 except ValueError:
                     pass
     if cmd_script:
@@ -4803,7 +4962,7 @@ def _segments(raw: str, _depth: int = 0, shell: str = "bash", ps_slashes: bool =
                               piped=piped, lenient_on_error=True, windows_paths=False,
                               ps_script=ps_script, ps_tool=ps_tool,
                               outer_expanded=outer_expanded, heredoc=heredoc,
-                              cmd_script=cmd_script, scan=scan)
+                              cmd_script=cmd_script, scan=scan, no_ops=no_ops)
     return segments
 
 
@@ -4850,6 +5009,13 @@ def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool, 
             subs = _segments(script, _depth + 1,
                              piped=getattr(toks, "piped", False) or alias_piped,
                              outer_expanded=outer, heredoc=here)
+            if isinstance(script, _SplitString) and any(c in _NO_OPS_CHARS for c in script):
+                # env -S has no operators (see _SplitString): also read with none, charged.
+                _RunnerBudget.charge(len(script))
+                subs += _segments(script, _depth + 1,
+                                  piped=getattr(toks, "piped", False) or alias_piped,
+                                  outer_expanded=outer, heredoc=here, no_ops=True,
+                                  lenient_on_error=True)
             expanded.extend(_xargs_fed_copy(s) if fed and isinstance(s, _Seg) else s
                             for s in subs)
         # A Windows runner's command (`cmd /c`, `pwsh -Command`, `wsl`), judged in
@@ -4861,7 +5027,7 @@ def _expand_scripts(segments, _depth: int, outer_expanded: bool, heredoc: bool, 
             expanded.extend(_runner_segments(script, _depth + 1,
                                              getattr(toks, "piped", False),
                                              kind == "ps", outer_run, here,
-                                             kind == "cmd"))
+                                             kind == "cmd", kind == "wsl" and not _shell_rest(script)))
         # The scripts' segments come back flattened from every depth below.
         subs = expanded[start:]
         reached = (reached
@@ -4902,7 +5068,7 @@ class _Command:
 
 @functools.lru_cache(maxsize=4096)
 def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool = False,
-                     heredoc: bool = False, cmd: bool = False):
+                     heredoc: bool = False, cmd: bool = False, argv: bool = False):
     """_segments() of a Windows runner's script (see _runner_scripts), memoized: the
     PowerShell readings and nested runners hand the same script text down many times.
     The arguments are all the result depends on (with _Command.raw, fixed for one
@@ -4919,9 +5085,24 @@ def _runner_segments(script: str, depth: int, piped: bool, ps: bool, outer: bool
     keeps that one under half of the cap). A dense multi-level payload that also holds
     groups, escapes, Unicode spaces or VT/FF breaks can reach the cap and is refused."""
     _RunnerBudget.charge(len(script))
-    return tuple(_segments(script, depth, piped=piped, lenient_on_error=True,
+    segs = tuple(_segments(script, depth, piped=piped, lenient_on_error=True,
                            ps_script=ps, outer_expanded=outer, heredoc=heredoc,
                            cmd_script=cmd))
+    if (cmd or argv) and (any(c in _NO_OPS_CHARS for c in script) or "\\_" in script):
+        # Bash's operators are not cmd's (cmd ends a command at & | < > only: `;` and ` are
+        # word characters to it) nor wsl -e's (argv, none; argv). Read so, a pwsh script a
+        # command here starts lost its tail at the first of them (`cmd /c pwsh -c echo
+        # a;iex '...'` runs the iex, `pwsh -c g`it ...` runs git): also read with no operator
+        # at all (no_ops), so the script keeps its whole tail and pwsh's own readings split
+        # it. Over-reads cmd's real operators, which only adds; charged again.
+        # A cmd script is also read cut at cmd's own separators, and with a group's parentheses
+        # read away (_no_ops_texts): `echo x & pwsh -c ...`, `(pwsh -c ...)`.
+        for text in _no_ops_texts(script, cmd):
+            _RunnerBudget.charge(len(text))
+            segs += tuple(_segments(text, depth, piped=piped, lenient_on_error=True,
+                                    ps_script=ps, outer_expanded=outer, heredoc=heredoc,
+                                    cmd_script=cmd, no_ops=True))
+    return segs
 
 
 def _lenient_inline(toks):
