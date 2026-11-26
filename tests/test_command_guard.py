@@ -30,14 +30,14 @@ B, A = True, False  # block / allow
 #   * This is a non-shrink CORPUS floor, NOT a measured field false-positive RATE.
 #     A true field-FP rate is unmeasurable here (no telemetry => no command-traffic
 #     denominator), so any "%" would be theater. See tests/README.md.
-FP_FLOOR = 1488
+FP_FLOOR = 1524
 
 # Block-corpus floor: the same rule for the "block" fixtures in CASES + PS_CASES.
 # ONLY EVER INCREASE IT. A decrease means a block fixture was deleted — and deleting
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4848
+BLOCK_FLOOR = 4992
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -2050,7 +2050,7 @@ _REASON_FUNCS = ("_rules_at", "_git_rules", "_git_push_config_reasons", "_reason
 # fixture floors: fewer means the walk broke, or reasons moved where it cannot see them
 # (a module constant, `out.append(_REASON)`, is a Name, not a literal) — and either way
 # those reasons would silently leave coverage. More prints a bump note.
-REASON_FLOOR = 53
+REASON_FLOOR = 54
 
 
 def _str_value(node):
@@ -9269,7 +9269,6 @@ _RUNNER_LIMIT8AX = [
     ("cmd reading a file", "bash", "cmd < x.bat"),
     ("a computed argument", "powershell", "cmd /c rd ('<BS>'+'/s/q')"),
     ("a subexpression between <BS> and /s", "powershell", "cmd /c rd <BS>$()/s/q"),
-    ("a subexpression between <BS> and /s, quoted", "powershell", 'cmd /c "rd <BS>$()/s/q"'),
     ("a backslash the shell computes", "powershell", '$b = [char]92; cmd /c "rd /q $b/s"'),
 ]
 PS_CASES += [
@@ -10749,6 +10748,468 @@ STRUCT_CASES += [
     ("8bm: a word with a fold and a capital keeps its case, the Kelvin sign respelled",
      lambda: _segs8bm(True, "Echo <SQ>Brea" + chr(0x212A) + "<BT>T<SQ>"),
      [["echo", "Brea" + chr(0x138) + _t8bl("<BT>T")]]),
+]
+
+
+# Follow-up 8bs: text that cmd (cmd /c, Git's start, pwsh's --%), wsl -e / --exec (argv, no shell) or env -S
+# (its own splitting) reads was re-tokenized with bash's operators ( ) ; < > | & and the backtick, its group
+# words { } ! and its backslash escapes, which those readers do not have. So a pwsh script they start lost its
+# tail at the first one: cmd //c 'pwsh -c g`it push --force' ran git; the guard read bash's backtick there.
+# Such text is now also read with no operators (no_ops); in a cmd script every runner name, cmd's punctuation
+# and quotes read off, starts a further reading (_runner_suffixes; more than 16 names refused); env -S scripts
+# are re-read; and the quote-blind pass decodes, cuts and judges pwsh statements. Readings are added, none
+# rewritten. Rows: "class" rows were live on main 36ff06e (a harmless twin ran; deletes verdict-only); "pin"
+# rows each flip when one part of the change is removed (an in-memory mutant of it); "fp" rows are fail-closed
+# over-reads the owner accepted (corpus 0). Placeholders as in 8bl (<LF> <BS> <BT> <DQ> <SQ>).
+# Not covered (filed): cmd ending a program name at `/` (`cmd/cgit`, 8bz), cmd /c's outer quotes (8bv),
+# env -S's own escapes (8bw), Start-Process (8bx), unmodelled wrappers (8by), wrapper options missing from
+# the tables the wsl rule trusts (8ca), the quote-blind env -S segment's expansion flags (8cb).
+_BLOCK8BS = [  # (group, label, shell, reason, text): main allows every one
+    ('class', 'A1 cmd g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A2 cmd gi<BT>T (8bm capital)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c gi<BT>T push --force<SQ>'),
+    ('class', 'A3 cmd gi<BT>u{74}', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c gi<BT>u{74} push --force<SQ>'),
+    ('class', 'A4 cmd powershell 5.1 g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>powershell -c g<BT>it push --force<SQ>'),
+    ('class', 'A5 cmd //k', 'bash', 'forced git push is forbidden',
+     'cmd //k <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A6 cmd //r', 'bash', 'forced git push is forbidden',
+     'cmd //r <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A7 cmd //d//c', 'bash', 'forced git push is forbidden',
+     'cmd //d//c <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A8 cmd call prefix', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>call pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A9 cmd after &', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>echo x & pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A11 cmd -Command', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -NoProfile -Command g<BT>it push --force<SQ>'),
+    ('class', 'A12 cmd.exe path', 'bash', 'forced git push is forbidden',
+     'C:/Windows/System32/cmd.exe //c <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A14 cmd rm (Remove-Item)', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'cmd //c <SQ>pwsh -c r<BT>m -recurse -force c:/<SQ>'),
+    ('class', 'A20 pwsh>cmd>pwsh g<BT><BT>it (bash)', 'bash', 'forced git push is forbidden',
+     'pwsh -c <SQ>cmd /c pwsh -c g<BT><BT>it push --force<SQ>'),
+    ('class', 'A24 cmd>cmd>pwsh', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>cmd /c pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A30 PS: cmd /c pwsh g<BT><BT>it', 'powershell', 'forced git push is forbidden',
+     'cmd /c pwsh -c g<BT><BT>it push --force'),
+    ('class', 'A33 PS: cmd /c pwsh gi<BT><BT>T', 'powershell', 'forced git push is forbidden',
+     'cmd /c pwsh -c gi<BT><BT>T push --force'),
+    ('class', 'A35 cmd odd quote after &', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c g<BT>it push --force & echo <DQ><SQ>'),
+    ('class', 'A36 cmd //c start //b', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>start /b /wait pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A37 cmd if prefix', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>if 1==1 pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'A38 cmd ^ before backtick', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c g^<BT>it push --force<SQ>'),
+    ('class', 'A39 ANSI-C <BS>x60 into cmd', 'bash', 'forced git push is forbidden',
+     'cmd //c $<SQ>pwsh -c g<BS>x60it push --force<SQ>'),
+    ('class', 'A40 ANSI-C <BS>140 into cmd', 'bash', 'forced git push is forbidden',
+     'cmd //c $<SQ>pwsh -c g<BS>140it push --force<SQ>'),
+    ('class', 'B14 env -S <BS>_ spaces', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('class', 'B15 env -S ANSI-C <BS>x60', 'bash', 'forced git push is forbidden',
+     'env -S $<SQ>pwsh -c g<BS>x60it push --force<SQ>'),
+    ('class', 'O1 cmd ; then g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c echo a;g<BT>it push --force<SQ>'),
+    ('class', 'O2 cmd (g<BT>it ...)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c (g<BT>it push --force)<SQ>'),
+    ('class', 'O3 env -S ; then g<BT>it', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c echo a;g<BT>it push --force<SQ>'),
+    ('class', 'O4 env -S | then g<BT>it', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c echo a|g<BT>it push --force<SQ>'),
+    ('class', 'O5 env -S (g<BT>it ...)', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c (g<BT>it push --force)<SQ>'),
+    ('class', 'O6 wsl -e ; then g<BT>it', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>echo a;g<BT>it push --force<SQ>'),
+    ('class', 'B1 env -S g<BT>it', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'B2 env -Spwsh glued', 'bash', 'forced git push is forbidden',
+     'env <SQ>-Spwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'B3 env --split-string=', 'bash', 'forced git push is forbidden',
+     'env --split-string=<SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'B4 env -u X -S', 'bash', 'forced git push is forbidden',
+     'env -u X -S <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'B5 env -S gi<BT>T', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c gi<BT>T push --force<SQ>'),
+    ('class', 'B9 env -S > cmd > pwsh', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>cmd //c pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'B10 cmd > env -S? (env in cmd)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>env -S <DQ>pwsh -c g<BT>it push --force<DQ><SQ>'),
+    ('class', 'B11 env -S rm', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'env -S <SQ>pwsh -c r<BT>m -recurse -force c:/<SQ>'),
+    ('class', 'X11 cmd //d //c', 'bash', 'forced git push is forbidden',
+     'cmd //d //c <SQ>pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'W1 wsl -e junction g<BT>it', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>g<BT>it push --force<SQ>'),
+    ('class', 'W2 wsl --exec junction gi<BT>T', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl --exec /mnt/c/tools/pw7/pwsh.exe -c <SQ>gi<BT>T push --force<SQ>'),
+    ('class', 'W4 wsl -e pwsh.exe g<BT>it (PATH form)', 'bash', 'forced git push is forbidden',
+     'wsl -e pwsh.exe -c <SQ>g<BT>it push --force<SQ>'),
+    ('class', 'W5 wsl -- junction g<BT>it', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl -- /mnt/c/tools/pw7/pwsh.exe -c <SQ>g<BT>it push --force<SQ>'),
+    ('class', 'N cmd ; iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'N cmd ; ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'cmd //c <SQ>pwsh -c echo a;ri -r -fo c:/<SQ>'),
+    ('class', 'N cmd | iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c echo a|iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'N cmd | ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'cmd //c <SQ>pwsh -c echo a|ri -r -fo c:/<SQ>'),
+    ('class', 'N cmd () iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c (iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ>)<SQ>'),
+    ('class', 'N cmd () ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'cmd //c <SQ>pwsh -c (ri -r -fo c:/)<SQ>'),
+    ('class', 'N env-S ; iex', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'N env-S ; ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'env -S <SQ>pwsh -c echo a;ri -r -fo c:/<SQ>'),
+    ('class', 'N env-S | iex', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c echo a|iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'N env-S | ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'env -S <SQ>pwsh -c echo a|ri -r -fo c:/<SQ>'),
+    ('class', 'N env-S () iex', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c (iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ>)<SQ>'),
+    ('class', 'N env-S () ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'env -S <SQ>pwsh -c (ri -r -fo c:/)<SQ>'),
+    ('class', 'N wsl-e ; iex', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'N wsl-e ; ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>echo a;ri -r -fo c:/<SQ>'),
+    ('class', 'N wsl-e | iex', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>echo a|iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'N wsl-e | ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>echo a|ri -r -fo c:/<SQ>'),
+    ('class', 'N wsl-e () iex', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>(iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ>)<SQ>'),
+    ('class', 'N wsl-e () ri', 'bash', 'recursive delete of a root/cwd/home target (Remove-Item -Recurse)',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>(ri -r -fo c:/)<SQ>'),
+    ('class', 'R F1 cmd <nul iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'R F1 cmd <nul g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'R F1 cmd 2>nul g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>2>nul pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'R F1 PS cmd <nul iex', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ><nul pwsh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('class', 'R F2 cmd for-do g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>for %i in (1) do pwsh -c g<BT>it push --force<SQ>'),
+    ('class', 'R F2 cmd for-do iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>for %i in (1) do pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'R F3 cmd ;pwsh iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>;pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'R F4 cmd #<DQ> quote-blind', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c echo a;g<BT>it push --force #<DQ><SQ>'),
+    ('class', 'R F4 wsl -e #<DQ>', 'bash', 'forced git push is forbidden',
+     'MSYS_NO_PATHCONV=1 wsl -e /mnt/c/tools/pw7/pwsh.exe -c <SQ>echo a;g<BT>it push --force #<DQ><SQ>'),
+    ('class', 'R F5 cmd icm {}', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c icm {git push --force}<SQ>'),
+    ('class', 'R F5 env -S icm {}', 'bash', 'forced git push is forbidden',
+     'env -S <SQ>pwsh -c icm {git push --force}<SQ>'),
+    ('class', 'R3 H1 PS <nul pw<DQ><DQ>sh iex', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ><nul pw<DQ><DQ>sh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('class', 'R3 H1 PS for-do <DQ>pw<DQ>sh iex', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>for %i in (1) do <DQ>pw<DQ>sh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('class', 'R3 H1 PS ;p<DQ>wsh<DQ> iex', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;p<DQ>wsh<DQ> -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('class', 'R4 N1 cmd env -S <BS>_', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('class', 'R4 N1 PS cmd env -S <BS>_', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('class', 'R5 R1 PS ;env <DQ>-S<DQ> <BS>_', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;env <DQ>-S<DQ> pwsh<BS>_-c<BS>_echo<BS>_a;g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('class', 'R5 R1 PS ;env -u X <DQ>-S<DQ> <BS>_', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;env -u X <DQ>-S<DQ> pwsh<BS>_-c<BS>_echo<BS>_a;g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('fp', 'R5 R3 cmd x3 cmd /c chain', 'bash', 'uninspectable command (inline scripts nested too deep to inspect (> 3 ',
+     'cmd //c <SQ>cmd /c build.bat && cmd /c test.bat && cmd /c pack.bat<SQ>'),
+    ('fp', 'R5 R3 cmd x3 env -S chain', 'bash', 'uninspectable command (inline scripts nested too deep to inspect (> 3 ',
+     'cmd //c <SQ>env -S <DQ>make a<DQ> & env -S <DQ>make b<DQ> & env -S <DQ>make c<DQ><SQ>'),
+    ('class', 'R6 env -S <BS>_ #<DQ> quote-blind', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force #<DQ><SQ>'),
+    ('class', 'R6 PS env -S <BS>_ #<DQ> quote-blind', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force #<DQ><SQ>'),
+    ('class', 'R6 env -S <BS>_ & echo <DQ> (M03 pin)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force & echo <DQ><SQ>'),
+    ('class', 'R6 (env -S <BS>_) group (M04?)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>(env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force)<SQ>'),
+    ('class', 'R7 M04 (if env -u X -S <BS>_) <DQ>', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>(if 1==1 env -u X -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force) <DQ><SQ>'),
+    ('class', 'R7 M04 (echo x & <DQ>pw<DQ>sh g<BT>it) <DQ>', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>(set a=b | echo x & <DQ>pw<DQ>sh -c g<BT>it push --force) <DQ><SQ>'),
+    ('class', 'R8 F1 cmd env -S git<BS>_ (no op)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>env -S git<BS>_push<BS>_--force<SQ>'),
+    ('class', 'R8 F1 PS cmd env -S git<BS>_', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>env -S git<BS>_push<BS>_--force<SQ>'),
+    ('class', 'R8 F1 cmd call env -S pwsh<BS>_-c<BS>_git', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>call env -S pwsh<BS>_-c<BS>_git<BS>_push<BS>_--force<SQ>'),
+    ('class', 'R8 F2 for /f usebackq iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>for /f usebackq %i in (<BT>pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><BT>) do echo %i<SQ>'),
+    ('class', 'R8 F2 for /f usebackq tokens=* iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>for /f usebackq^ tokens^=* %i in (<BT>pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><BT>) do echo %i<SQ>'),
+    ('class', 'R8 F2 for /f usebackq tokens=* env -S <BS>_', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>for /f usebackq^ tokens^=* %i in (<BT>env -S git<BS>_push<BS>_--force<BT>) do echo %i<SQ>'),
+    ('class', 'R8 F3 quote-blind return g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c return g<BT>it push --force #<DQ><SQ>'),
+    ('class', 'R8 F3 quote-blind return $(g<BT>it)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c return $(g<BT>it push --force) #<DQ><SQ>'),
+    ('class', 'R8 F3 quote-blind return @(g<BT>it)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c return @(g<BT>it push --force) #<DQ><SQ>'),
+    ('class', 'R8 F3 ctl strict return g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c return g<BT>it push --force<SQ>'),
+    ('class', 'R2 cmd <nul;pwsh glued iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul;pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('class', 'P1 cmd (pwsh ...;g<BT>it)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>(pwsh -c echo a;g<BT>it push --force)<SQ>'),
+    ('class', 'P2 cmd if (pwsh ...;g<BT>it)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>if 1==1 (pwsh -c echo a;g<BT>it push --force)<SQ>'),
+    ('class', 'P3 cmd ^& g<BT>it', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c echo a ^& g<BT>it push --force<SQ>'),
+    ('class', 'P6 cmd (pwsh ;iex)', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>(pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ>)<SQ>'),
+    ('class', 'P7 cmd ^& iex', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c echo a ^& iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ><SQ>'),
+    ('pin', 'M01: no_ops ignored in _shell_words', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>pwsh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('pin', 'M01: no_ops ignored in _shell_words', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>PWSH -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('pin', 'M01: no_ops ignored in _shell_words', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>p^wsh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('pin', 'M02: quote-blind split under no_ops', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c return $( g<BT>it push --force ) #<DQ><SQ>'),
+    ('pin', 'M02: quote-blind split under no_ops', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>echo x & (pwsh -c g<BT>it push --force) & echo <DQ><SQ>'),
+    ('pin', 'M02: quote-blind split under no_ops', 'bash', 'uninspectable command (PowerShell code from a computed string)',
+     'cmd //c <SQ>pwsh -c return $(iex <SQ><SQ>git push --force<SQ><SQ>) #<DQ><SQ>'),
+    ('pin', 'M05: runner suffixes not added', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul PWSH -c g<BT>it push --force<SQ>'),
+    ('pin', 'M05: runner suffixes not added', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul p^wsh -c g<BT>it push --force<SQ>'),
+    ('pin', 'M05: runner suffixes not added', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul ^pwsh -c g<BT>it push --force<SQ>'),
+    ('pin', 'M09: env walked script not _SplitString', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>ENV -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M09: env walked script not _SplitString', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>e^nv -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M09: env walked script not _SplitString', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>env ^-S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M10: lenient decode removed', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>pwsh -c return $(pwsh -c g<BT>it push --force) #<DQ><SQ>'),
+    ('pin', 'M11: lenient pwsh cut removed', 'powershell', 'uninspectable command (PowerShell code from a computed string)',
+     'cmd /c <SQ>(pwsh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ>) & echo <DQ><SQ>'),
+    ('pin', 'M11: lenient pwsh cut removed', 'bash', 'uninspectable command (PowerShell code from a computed string)',
+     'cmd //c <SQ>(pwsh -c echo a;iex <SQ><DQ><SQ><DQ><SQ>git push --force<SQ><DQ><SQ><DQ><SQ>) & echo <DQ><SQ>'),
+    ('pin', 'M13: trigger backtick only', 'powershell', 'recursive delete of a root/cwd/home target (cmd rd /s)',
+     'cmd /c <DQ>rd <BS>$()/s/q<DQ>'),
+    ('pin', 'M13: trigger backtick only', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>^pwsh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('pin', 'M13: trigger backtick only', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;pwsh -c echo a;iex <SQ><SQ>git push --force<SQ><SQ><SQ>'),
+    ('pin', 'M17: backslash escape under no_ops', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>ENV -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M17: backslash escape under no_ops', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>e^nv -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M17: backslash escape under no_ops', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>env ^-S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M18: _cmd_bare keeps quotes and carets', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul <DQ>pwsh<DQ> -c g<BT>it push --force<SQ>'),
+    ('pin', 'M18: _cmd_bare keeps quotes and carets', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul pw<DQ><DQ>sh -c g<BT>it push --force<SQ>'),
+    ('pin', 'M18: _cmd_bare keeps quotes and carets', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ><nul <DQ>pw<DQ>sh -c g<BT>it push --force<SQ>'),
+    ('pin', 'M19: env never a runner word', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M19: env never a runner word', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;ENV -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M19: env never a runner word', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>;env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M20: cap removed', 'bash', 'uninspectable command (too many runner names in a cmd script to inspec',
+     'cmd //c <SQ>echo a;cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd x<SQ>'),
+    ('pin', 'M20: cap removed', 'bash', 'uninspectable command (too many runner names in a cmd script to inspec',
+     'cmd //c <SQ>echo a;pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh x<SQ>'),
+    ('pin', 'M20: cap removed', 'bash', 'uninspectable command (too many runner names in a cmd script to inspec',
+     'cmd //c <SQ>echo a;cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd cmd x<SQ>'),
+    ('pin', 'M21: piece regex whole word', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;e^nv -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M21: piece regex whole word', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;env ^-S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M21: piece regex whole word', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>;env -iS pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force<SQ>'),
+    ('pin', 'M23: quote-blind env -S removed', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>env -S pwsh<BS>_-c<BS>_g<BT>it<BS>_push<BS>_--force & echo <DQ><SQ>'),
+    ('cap', '17 runner names, PowerShell tool', 'powershell', 'uninspectable command (too many runner names in a cmd script to inspec',
+     'cmd /c <SQ>echo a;pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh pwsh x<SQ>'),
+    ('fp', 'a runner name in an echo argument beside an operator', 'bash', 'forced git push is forbidden',
+     'cmd //c <SQ>echo pwsh -c git push --force & echo ok<SQ>'),
+    ('fp', 'a runner name in an echo argument beside an operator, PowerShell tool', 'powershell', 'forced git push is forbidden',
+     'cmd /c <SQ>echo pwsh -c git push --force & echo ok<SQ>'),
+    ('fp', 'a returned string naming rm -rf, odd quote', 'bash', 'recursive force-delete of a root/cwd/home target (rm -rf)',
+     'cmd //c <SQ>pwsh -c return <SQ><DQ><SQ><DQ><SQ>rm -rf / is blocked<SQ><DQ><SQ><DQ><SQ> #<DQ><SQ>'),
+    ('fp', 'a returned string naming rm -rf, odd quote, PowerShell tool', 'powershell', 'recursive force-delete of a root/cwd/home target (rm -rf)',
+     'cmd /c <SQ>pwsh -c return <SQ><SQ>rm -rf / is blocked<SQ><SQ> #<DQ><SQ>'),
+    # Each env -S on a quote-blind line is read one level down from the one before it (_lenient_runner).
+    ('fp', 'four chained env -S steps, odd quote', 'bash', 'inline scripts nested too deep to inspect',
+     'cmd //c <SQ>env -Sa & env -Sb & env -Sc & env -Sd & echo <DQ><SQ>'),
+    ('fp', 'four chained env -S steps, odd quote, PowerShell tool', 'powershell',
+     'inline scripts nested too deep to inspect', 'cmd /c <SQ>env -Sa & env -Sb & env -Sc & env -Sd & echo <DQ><SQ>'),
+]
+_ALLOW8BS = [  # (group, label, shell, text): allowed on main and here
+    ('pin', 'M07: _shell_rest always False', 'bash',
+     'wsl -e env bash -c <SQ>set -e; rm -rf /tmp/x; cd /tmp/x; find . -name y<SQ>'),
+    ('pin', 'M07: _shell_rest always False', 'bash',
+     'wsl -e sudo bash -c <SQ>set -e; rm -rf /tmp/x; cd /tmp/x; find . -name y<SQ>'),
+    ('pin', 'M07: _shell_rest always False', 'bash',
+     'wsl -e nice -n 5 bash -c <SQ>set -e; rm -rf /tmp/x; cd /tmp/x; find . -name y<SQ>'),
+    ('pin', 'M12: rule 5 removed', 'bash',
+     'cmd //c <SQ>rd) /s /q C:<BS><SQ>'),
+    ('pin', 'M27: tails: $ filter removed', 'powershell',
+     'pwsh -c <SQ>return $data.$key + <DQ><BT>n<DQ><SQ>'),
+    ('pin', 'M27: tails: $ filter removed', 'powershell',
+     'pwsh -c <SQ>return $lines[$i + 1] + <DQ><BT>n<DQ><SQ>'),
+    ('pin', 'M27: tails: $ filter removed', 'powershell',
+     'pwsh -c <SQ>return $arr[0..5] -join <DQ><BT>n<DQ><SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>dir C:<BS>Users<BS>me<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>rd /s /q build<BS><SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>copy a<BS>b c<BS><SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>pwsh -File C:<BS>s<BS>b.ps1 -Out C:<BS>o<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>env -S python3<BS>_-V<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>dir src<BS>__pycache__<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>dir C:<BS>_work & echo done<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>pwsh -c echo a;echo b<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>(echo a)<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>for /f usebackq %i in (<BT>dir /b C:<BS>x<BT>) do echo %i<SQ>'),
+    ('benign', 'benign', 'bash',
+     'cmd //c <SQ>for /f %i in (<SQ><DQ><SQ><DQ><SQ>git rev-parse HEAD<SQ><DQ><SQ><DQ><SQ>) do echo %i<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>dir C:<BS>Users<BS>me<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>rd /s /q build<BS><SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>copy a<BS>b c<BS><SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>pwsh -File C:<BS>s<BS>b.ps1 -Out C:<BS>o<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>env -S python3<BS>_-V<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>dir src<BS>__pycache__<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>dir C:<BS>_work & echo done<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>pwsh -c echo a;echo b<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>(echo a)<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>rd) /s /q C:<BS><SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>for /f usebackq %i in (<BT>dir /b C:<BS>x<BT>) do echo %i<SQ>'),
+    ('benign', 'benign', 'powershell',
+     'cmd /c <SQ>for /f %i in (<SQ><SQ>git rev-parse HEAD<SQ><SQ>) do echo %i<SQ>'),
+    ('benign', 'benign', 'bash',
+     'env -S <SQ>pwsh -c echo (1+1)<SQ>'),
+    ('benign', 'an env -S script with a backslash-quote and an operator', 'bash',
+     'env -S <SQ>echo <BS><DQ>a b<BS><DQ> | wc<SQ>'),
+    ('benign', 'an env -S script with a backslash-quote and an operator', 'bash',
+     'env -S <SQ>printf %s <BS><DQ>x<BS><DQ> ; echo y<SQ>'),
+    ('benign', 'an env -S script with a backslash-quote and an operator', 'powershell',
+     'env -S <SQ>echo <BS><DQ>a b<BS><DQ> | wc<SQ>'),
+    ('benign', 'an env -S script with a backslash-quote and an operator', 'powershell',
+     'env -S <SQ>printf %s <BS><DQ>x<BS><DQ> ; echo y<SQ>'),
+    ('benign', 'benign', 'bash',
+     'wsl -e bash -c <SQ>set -e; rm -rf /tmp/x; cd /tmp/x; find . -name y<SQ>'),
+    ('benign', 'benign', 'bash',
+     'wsl -e ls <SQ>C:<BS>_work (x)<SQ>'),
+]
+
+
+def _fit8bs(head, unit, tail, room):
+    """head and as many units as fit in room characters, then tail (which closes head's quote)."""
+    return head + unit * ((room - len(head) - len(tail)) // len(unit)) + tail
+
+
+def _ratio8bs(shell, head, unit, tail):
+    """_ratio8ah for a runner's script: head, units, then the blocked tail, all inside head's quote."""
+    import time
+
+    texts = (_fit8bs(head, unit, tail, 2000), _fit8bs(head, unit, tail, 4000))
+
+    def measure():
+        best = [float("inf"), float("inf")]
+        for _ in range(7):
+            for k, text in enumerate(texts):
+                t0 = time.perf_counter()
+                m.evaluate(text, shell=shell)
+                best[k] = min(best[k], time.perf_counter() - t0)
+        return best[1] / best[0]
+
+    first = measure()
+    return first if first < 3.0 else min(first, measure())
+
+
+_PS8BS = "echo a<BT>b<BT>c;"   # pwsh statements dense with backticks
+_GP8BS = ["forced git push is forbidden"]
+# An odd-quote line dense with env -S: each env read one level down, so the line is refused at the depth
+# limit. (Without the break in _lenient_runner, one segment per env word, each to the line's end, would cost
+# cubic time and then be refused by the runner budget instead.)
+_DEEP8BS = ["uninspectable command (inline scripts nested too deep to inspect (> 3 levels))"]
+_TIMING8BS = [  # (label, shell, head, unit, tail, the 4 KB text's reasons)
+    ("a cmd script's pwsh -c", "bash", "cmd //c <SQ>pwsh -c ", _PS8BS, "g<BT>it push --force<SQ>", _GP8BS),
+    ("the same from the PowerShell tool", "powershell", "cmd /c <SQ>pwsh -c ", _PS8BS,
+     "g<BT>it push --force<SQ>", _GP8BS),
+    ("a cmd script with an odd quote (the quote-blind pass)", "bash", "cmd //c <SQ>pwsh -c ", _PS8BS,
+     "g<BT>it push --force & echo <DQ><SQ>", _GP8BS),
+    ("wsl -e pwsh.exe -c", "bash", "wsl -e pwsh.exe -c <SQ>", _PS8BS, "g<BT>it push --force<SQ>", _GP8BS),
+    ("an odd-quote cmd script dense with env -S", "bash", "cmd //c <SQ>", "env -Sx ",
+     "git push --force & echo <DQ><SQ>", _DEEP8BS),
+    ("an odd-quote cmd script dense with env -S, PowerShell tool", "powershell", "cmd /c <SQ>", "env -Sx ",
+     "git push --force & echo <DQ><SQ>", _DEEP8BS),
+]
+CASES += [(f"8bs runner readers: {g}: {lb}", _t8bl(t), B, ())
+          for g, lb, sh, _r, t in _BLOCK8BS if sh == "bash" and g != "fp"] + [
+    (f"fp cost: 8bs runner readers: {lb}", _t8bl(t), B, ())
+    for g, lb, sh, _r, t in _BLOCK8BS if sh == "bash" and g == "fp"] + [
+    (f"8bs runner readers fp: {g}: {lb}", _t8bl(t), A, ()) for g, lb, sh, t in _ALLOW8BS if sh == "bash"]
+PS_CASES += [(f"8bs runner readers (powershell): {g}: {lb}", _t8bl(t), B, ())
+             for g, lb, sh, _r, t in _BLOCK8BS if sh == "powershell" and g != "fp"] + [
+    (f"fp cost: 8bs runner readers (powershell): {lb}", _t8bl(t), B, ())
+    for g, lb, sh, _r, t in _BLOCK8BS if sh == "powershell" and g == "fp"] + [
+    (f"8bs runner readers fp (powershell): {g}: {lb}", _t8bl(t), A, ())
+    for g, lb, sh, t in _ALLOW8BS if sh == "powershell"]
+MUST_BLOCK += [(f"8bs runner readers: {g}: {lb}", _t8bl(t), sh, (), _t8bl(r))
+               for g, lb, sh, r, t in _BLOCK8BS if g != "fp"]
+STRUCT_CASES += [
+    # wsl's no_ops reading is off only when every wrapper reading lands on a POSIX shell.
+    ("8bs: _shell_rest: a shell in every wrapper reading, not a value spelled as one",
+     lambda: [m._shell_rest(s) for s in ("bash -c x", "sudo -u me bash -c x", "nice -n 5 bash -c x",
+                                         "pwsh.exe -c x", "env -u bash pwsh.exe -c x")],
+     [True, True, True, False, False]),
+    # A runner name glued behind cmd's punctuation, or with cmd's quotes in it, starts a suffix; env only with -S.
+    ("8bs: _runner_suffixes: glued names, quoted names, env with -S only",
+     lambda: [m._runner_suffixes(_t8bl(s)) for s in (
+         "echo x <nul;pwsh -c y", "echo pw<DQ><DQ>sh -c y", "x & env -u X git", "x & env -S git y", "pwsh -c y")],
+     [["pwsh -c y"], ["pwsh -c y"], [], ["env -S git y"], []]),
+] + [
+    (f"timing: 8bs: {lb} scales linearly (4 KB vs 2 KB)",
+     lambda sh=sh, h=_t8bl(head), u=_t8bl(unit), t=_t8bl(tail): _ratio8bs(sh, h, u, t) < 3.0, True)
+    for lb, sh, head, unit, tail, _r in _TIMING8BS
+] + [
+    # ...and each 4 KB text gets there: the blocked tail judged (or the env line refused at the depth
+    # limit), not refused early by the runner budget.
+    (f"8bs: the 4 KB timing text reaches its path: {lb}",
+     lambda sh=sh, h=_t8bl(head), u=_t8bl(unit), t=_t8bl(tail): m.evaluate(_fit8bs(h, u, t, 4000), shell=sh),
+     reasons)
+    for lb, sh, head, unit, tail, reasons in _TIMING8BS
 ]
 
 
