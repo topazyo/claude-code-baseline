@@ -37,7 +37,7 @@ FP_FLOOR = 1524
 # the fixtures for a rule is exactly how a disabled rule would pass this suite — so
 # run() fails. It drifts low between releases by design; run() nudges a bump.
 # MUST_BLOCK and the reason-coverage check (below) back it up per rule site.
-BLOCK_FLOOR = 4990
+BLOCK_FLOOR = 4992
 
 CASES = [
     # --- 15 original blocklist entries (must still block) ---
@@ -11049,6 +11049,11 @@ _BLOCK8BS = [  # (group, label, shell, reason, text): main allows every one
      'cmd //c <SQ>pwsh -c return <SQ><DQ><SQ><DQ><SQ>rm -rf / is blocked<SQ><DQ><SQ><DQ><SQ> #<DQ><SQ>'),
     ('fp', 'a returned string naming rm -rf, odd quote, PowerShell tool', 'powershell', 'recursive force-delete of a root/cwd/home target (rm -rf)',
      'cmd /c <SQ>pwsh -c return <SQ><SQ>rm -rf / is blocked<SQ><SQ> #<DQ><SQ>'),
+    # Each env -S on a quote-blind line is read one level down from the one before it (_lenient_runner).
+    ('fp', 'four chained env -S steps, odd quote', 'bash', 'inline scripts nested too deep to inspect',
+     'cmd //c <SQ>env -Sa & env -Sb & env -Sc & env -Sd & echo <DQ><SQ>'),
+    ('fp', 'four chained env -S steps, odd quote, PowerShell tool', 'powershell',
+     'inline scripts nested too deep to inspect', 'cmd /c <SQ>env -Sa & env -Sb & env -Sc & env -Sd & echo <DQ><SQ>'),
 ]
 _ALLOW8BS = [  # (group, label, shell, text): allowed on main and here
     ('pin', 'M07: _shell_rest always False', 'bash',
@@ -11155,7 +11160,8 @@ def _ratio8bs(shell, head, unit, tail):
 _PS8BS = "echo a<BT>b<BT>c;"   # pwsh statements dense with backticks
 _GP8BS = ["forced git push is forbidden"]
 # An odd-quote line dense with env -S: each env read one level down, so the line is refused at the depth
-# limit (one segment per env word, each to the line's end, cost cubic time; then the budget refused).
+# limit. (Without the break in _lenient_runner, one segment per env word, each to the line's end, would cost
+# cubic time and then be refused by the runner budget instead.)
 _DEEP8BS = ["uninspectable command (inline scripts nested too deep to inspect (> 3 levels))"]
 _TIMING8BS = [  # (label, shell, head, unit, tail, the 4 KB text's reasons)
     ("a cmd script's pwsh -c", "bash", "cmd //c <SQ>pwsh -c ", _PS8BS, "g<BT>it push --force<SQ>", _GP8BS),
